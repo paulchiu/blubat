@@ -6,7 +6,7 @@ default:
 
 # Build the workspace in debug mode
 build:
-    cargo build
+    cargo build --workspace
 
 # Build the workspace in release mode
 release:
@@ -14,7 +14,7 @@ release:
 
 # Run all tests
 test:
-    cargo test
+    cargo test --workspace
 
 # Lint with clippy, warnings are errors
 lint:
@@ -26,7 +26,7 @@ fmt:
 
 # Fail if code is not formatted
 fmt-check:
-    cargo fmt -- --check
+    cargo fmt --check
 
 # Assert the core crate stays usable by non-terminal frontends
 check-core-isolation:
@@ -38,5 +38,6 @@ check-core-isolation:
     fi
     echo "blubat-core is free of terminal dependencies"
 
-# Everything CI runs
+# The single definition of CI: the GitHub workflow runs this recipe, so a green
+# run here is a green pipeline
 ci: fmt-check lint test check-core-isolation build

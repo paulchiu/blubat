@@ -25,22 +25,12 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Format Check
-        run: cargo fmt --check
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
 
-      - name: Lint
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Test
-        run: cargo test --workspace
-
-      - name: Build
-        run: cargo build --workspace
-
-      - name: Core Isolation Check
-        run: |
-          if cargo tree -p blubat-core --edges normal | grep -qE '\b(ratatui|crossterm)\b'; then
-            echo "blubat-core must not depend on ratatui or crossterm" >&2
-            exit 1
-          fi
-          echo "blubat-core is free of terminal dependencies"
+      # The justfile owns what CI means: format, lint, test, core isolation and
+      # build. Duplicating the steps here would let the two drift apart.
+      - name: Format, Lint, Test & Build
+        run: just ci
