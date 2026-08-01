@@ -90,7 +90,7 @@ fn mean(values: &[f64]) -> Option<f64> {
 /// In memory and per process by design, so it starts empty on every run. It is
 /// what the sparkline and the drain rate read, which is why it holds a fixed
 /// number of samples per device rather than growing for as long as blubat runs.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct History {
     capacity: usize,
     devices: BTreeMap<Address, VecDeque<Sample>>,

@@ -8,10 +8,13 @@
 //! event channel, a reading in flight can never delay a keystroke.
 
 mod app;
+mod columns;
 mod events;
+mod glyph;
 mod render;
 mod terminal;
 mod theme;
+mod view;
 
 use std::io::{self, IsTerminal};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -21,6 +24,7 @@ use blubat_core::{Tiers, Timestamp};
 
 use crate::Failure;
 use app::{App, Event, update};
+use glyph::Glyphs;
 
 /// How often the dashboard reads while someone is watching it.
 ///
@@ -48,7 +52,7 @@ pub fn run() -> Result<(), Failure> {
 
     let events = events::events(blubat_core::poll(TIERS));
     let mut session = terminal::Session::open()?;
-    let mut app = App::new(TIERS.fast, Timestamp::now());
+    let mut app = App::new(TIERS.fast, Timestamp::now(), Glyphs::detected());
 
     while app.running {
         session.draw(&app)?;

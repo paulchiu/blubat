@@ -12,7 +12,7 @@ use std::thread;
 use blubat_core::Snapshot;
 use crossterm::event::{self, Event as Terminal, KeyCode, KeyEventKind};
 
-use super::app::Event;
+use super::app::{Event, Key};
 
 /// Merges keypresses and readings into the one channel the loop waits on.
 ///
@@ -58,14 +58,17 @@ fn keypresses() -> impl Iterator<Item = Event> {
     })
 }
 
-/// The character a keypress carries, absent for anything else.
+/// The key a keypress carries, absent for anything the dashboard cannot bind.
 ///
 /// Releases and repeats are ignored so a held key acts once per press on the
 /// terminals that report them.
-fn pressed(terminal: &Terminal) -> Option<char> {
+fn pressed(terminal: &Terminal) -> Option<Key> {
     match terminal {
         Terminal::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-            KeyCode::Char(key) => Some(key),
+            KeyCode::Char(key) => Some(Key::Char(key)),
+            KeyCode::Enter => Some(Key::Enter),
+            KeyCode::Esc => Some(Key::Escape),
+            KeyCode::Backspace => Some(Key::Backspace),
             _ => None,
         },
         _ => None,
@@ -86,12 +89,21 @@ mod tests {
     fn a_source_reaches_the_loop_in_order() {
         let (sender, events) = mpsc::channel();
 
-        forward(['j', 'k', 'q'].into_iter().map(Event::Key), &sender);
+        forward(
+            ['j', 'k', 'q']
+                .into_iter()
+                .map(|key| Event::Key(Key::Char(key))),
+            &sender,
+        );
         drop(sender);
 
         assert_eq!(
             events.into_iter().collect::<Vec<_>>(),
-            [Event::Key('j'), Event::Key('k'), Event::Key('q')]
+            [
+                Event::Key(Key::Char('j')),
+                Event::Key(Key::Char('k')),
+                Event::Key(Key::Char('q'))
+            ]
         );
     }
 
@@ -104,7 +116,7 @@ mod tests {
         forward(
             std::iter::repeat_with(|| {
                 produced += 1;
-                Event::Key('j')
+                Event::Key(Key::Char('j'))
             }),
             &sender,
         );
@@ -113,16 +125,21 @@ mod tests {
     }
 
     #[test]
-    fn only_a_pressed_character_is_a_key_the_dashboard_sees() {
-        assert_eq!(
-            pressed(&key(KeyCode::Char('q'), KeyEventKind::Press)),
-            Some('q')
-        );
+    fn only_a_pressed_key_the_dashboard_binds_reaches_it() {
+        for (code, expected) in [
+            (KeyCode::Char('q'), Key::Char('q')),
+            (KeyCode::Enter, Key::Enter),
+            (KeyCode::Esc, Key::Escape),
+            (KeyCode::Backspace, Key::Backspace),
+        ] {
+            assert_eq!(pressed(&key(code, KeyEventKind::Press)), Some(expected));
+        }
+
         assert_eq!(
             pressed(&key(KeyCode::Char('q'), KeyEventKind::Release)),
             None
         );
-        assert_eq!(pressed(&key(KeyCode::Enter, KeyEventKind::Press)), None);
+        assert_eq!(pressed(&key(KeyCode::Tab, KeyEventKind::Press)), None);
         assert_eq!(pressed(&Terminal::Resize(80, 24)), None);
     }
 }

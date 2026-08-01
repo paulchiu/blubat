@@ -15,9 +15,10 @@ merges them, keeping the source and freshness of each reading visible.
 Pre-release. Milestone M0 is complete: both data sources, the merge, and the
 one-shot CLI (`list`, `status`, `wait`) that reaches parity with the
 `trackpad-battery` shell script blubat takes its inspiration from. M1 is
-underway: bare `blubat` now opens a live dashboard that polls in the
-background, though its table is still filling out. Threshold notifications and
-the background daemon come after it.
+underway: bare `blubat` opens a live dashboard listing every device with its
+level, charge state, trend and freshness, sorted, filtered and narrowed from
+the keyboard. The device detail view, threshold notifications and the
+background daemon come after it.
 
 blubat reads no configuration file and writes nothing, with one exception:
 `blubat wait` may create `~/.local/state/blubat/watches/`.
@@ -25,7 +26,7 @@ blubat reads no configuration file and writes nothing, with one exception:
 ## Usage
 
 ```
-blubat                              # the live dashboard: q quit, j/k move, ? keys
+blubat                              # the live dashboard: ? lists every key
 blubat list [--json] [--all]        # every device that reports a battery
 blubat status [--device <match>]    # one device, human readable
               [--json | --number]   # machine readable variants
@@ -52,6 +53,26 @@ Paul's Magic Trackpad  83%  on battery
 
 $ blubat wait --device trackpad --until 100 --interval 5m
 ```
+
+## Dashboard
+
+Bare `blubat` opens the dashboard. Connected devices come first; disconnected
+ones sit under a dimmed `inactive` heading with their own count, keeping their
+last seen level out of the critical summary. A device no source reports a level
+for is listed as `unreported` rather than dropped, and a narrow terminal gives
+up columns from the right rather than breaking the table.
+
+```
+q      quit                  s  cycle the order: level, name, last seen
+j/k    move the selection    /  filter on name or address, esc clears it
+enter  detail view, later    h  hide the selected device, H show hidden again
+?      the full keymap
+```
+
+Hiding lasts for the session: nothing is written anywhere. The charging mark is
+ascii by default and becomes the Nerd Font bolt when the environment says a
+Nerd Font is in use, which is a guess: set `BLUBAT_NERD_FONT=1` or `=0` to
+settle it either way.
 
 A disconnected device keeps the level macOS last saw, which carries no
 timestamp and can be arbitrarily old. It is labelled `last seen` wherever it is

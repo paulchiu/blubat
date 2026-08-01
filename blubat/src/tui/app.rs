@@ -7,7 +7,10 @@
 
 use std::time::Duration;
 
-use blubat_core::{Device, Snapshot, Timestamp};
+use blubat_core::{Device, History, Snapshot, Timestamp};
+
+use super::glyph::Glyphs;
+use super::view::{Filter, Rows, View};
 
 /// One advertised key: what to press, and what pressing it does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,7 +21,7 @@ pub struct Binding {
 }
 
 /// The dashboard keymap, in the order the footer and the overlay list it.
-pub const KEYMAP: [Binding; 3] = [
+pub const KEYMAP: [Binding; 8] = [
     Binding {
         keys: "q",
         label: "quit",
@@ -28,9 +31,35 @@ pub const KEYMAP: [Binding; 3] = [
         label: "move",
     },
     Binding {
+        keys: "enter",
+        label: "detail",
+    },
+    Binding {
+        keys: "s",
+        label: "sort",
+    },
+    Binding {
+        keys: "/",
+        label: "filter",
+    },
+    Binding {
+        keys: "h",
+        label: "hide",
+    },
+    Binding {
+        keys: "H",
+        label: "show hidden",
+    },
+    Binding {
         keys: "?",
         label: "help",
     },
+];
+
+/// What the overlay says beyond the keys themselves.
+pub const NOTES: [&str; 2] = [
+    "enter opens the detail view, which arrives later.",
+    "h hides for this session only; a lasting hide arrives later.",
 ];
 
 /// The keys that stay live while the keymap overlay covers the dashboard.
@@ -45,6 +74,30 @@ const OVERLAY_KEYS: [Binding; 2] = [
     },
 ];
 
+/// The keys that mean something while the filter is being typed.
+///
+/// Every other key is text, which is what makes the filter narrow the table as
+/// it is typed rather than when it is submitted.
+const FILTER_KEYS: [Binding; 2] = [
+    Binding {
+        keys: "esc",
+        label: "clear",
+    },
+    Binding {
+        keys: "enter",
+        label: "keep",
+    },
+];
+
+/// A key as the dashboard binds on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Key {
+    Char(char),
+    Enter,
+    Escape,
+    Backspace,
+}
+
 /// What a bound key does to the dashboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -52,16 +105,29 @@ pub enum Action {
     Down,
     Up,
     ToggleKeymap,
+    CycleSort,
+    OpenFilter,
+    ClearFilter,
+    ToggleHidden,
+    ShowHidden,
+    /// Bound and drawn in the keymap, but the detail view arrives later.
+    Detail,
 }
 
 impl Action {
     /// The action a key performs, absent for a key the dashboard does not bind.
-    pub fn of(key: char) -> Option<Self> {
+    pub fn of(key: Key) -> Option<Self> {
         match key {
-            'q' => Some(Action::Quit),
-            'j' => Some(Action::Down),
-            'k' => Some(Action::Up),
-            '?' => Some(Action::ToggleKeymap),
+            Key::Char('q') => Some(Action::Quit),
+            Key::Char('j') => Some(Action::Down),
+            Key::Char('k') => Some(Action::Up),
+            Key::Char('?') => Some(Action::ToggleKeymap),
+            Key::Char('s') => Some(Action::CycleSort),
+            Key::Char('/') => Some(Action::OpenFilter),
+            Key::Char('h') => Some(Action::ToggleHidden),
+            Key::Char('H') => Some(Action::ShowHidden),
+            Key::Enter => Some(Action::Detail),
+            Key::Escape => Some(Action::ClearFilter),
             _ => None,
         }
     }
@@ -70,7 +136,7 @@ impl Action {
 /// Everything the dashboard reacts to, whichever source it came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
-    Key(char),
+    Key(Key),
     /// A fresh reading from the poller.
     Reading(Snapshot),
     /// The redraw timer expired at this moment.
@@ -82,6 +148,8 @@ pub enum Event {
 pub struct App {
     /// The last reading, absent until the first poll lands.
     pub reading: Option<Snapshot>,
+    /// The levels seen this run, which the trend column reads.
+    pub history: History,
     /// The row the selection sits on, always a real index while there are rows.
     pub selected: usize,
     pub keymap_open: bool,
@@ -91,17 +159,25 @@ pub struct App {
     pub now: Timestamp,
     /// How often the poller reads, which fixes when the next reading is due.
     pub interval: Duration,
+    /// Which devices are shown, and in what order.
+    pub view: View,
+    /// The glyphs to draw with, handed in rather than detected here so the
+    /// config file's override has somewhere to land.
+    pub glyphs: Glyphs,
 }
 
 impl App {
-    pub fn new(interval: Duration, now: Timestamp) -> Self {
+    pub fn new(interval: Duration, now: Timestamp, glyphs: Glyphs) -> Self {
         Self {
             reading: None,
+            history: History::default(),
             selected: 0,
             keymap_open: false,
             running: true,
             now,
             interval,
+            view: View::default(),
+            glyphs,
         }
     }
 
@@ -110,6 +186,16 @@ impl App {
         self.reading
             .as_ref()
             .map_or(&[], |reading| reading.devices.as_slice())
+    }
+
+    /// The devices on screen, which is what the table draws and `j` moves through.
+    pub fn rows(&self) -> Rows<'_> {
+        Rows::of(self.devices(), &self.view)
+    }
+
+    /// The device the selection sits on, absent while nothing is on screen.
+    pub fn current(&self) -> Option<&Device> {
+        self.rows().get(self.selected)
     }
 
     /// What the sources could not use, for the status line to place.
@@ -135,6 +221,8 @@ impl App {
     pub fn keys(&self) -> &'static [Binding] {
         if self.keymap_open {
             &OVERLAY_KEYS
+        } else if self.view.filter.typing {
+            &FILTER_KEYS
         } else {
             &KEYMAP
         }
@@ -143,14 +231,36 @@ impl App {
 
 /// The whole state machine: one event in, the next state out.
 pub fn update(app: App, event: Event) -> App {
-    match event {
-        Event::Key(key) => match Action::of(key) {
-            Some(action) => act(app, action),
-            None => app,
-        },
+    let app = match event {
+        Event::Key(key) => pressed(app, key),
         Event::Reading(reading) => receive(app, reading),
         Event::Tick(now) => App { now, ..app },
+    };
+
+    onto_a_row(app)
+}
+
+/// A key is text while the filter is being typed, and a command otherwise.
+fn pressed(app: App, key: Key) -> App {
+    match (app.view.filter.typing, Action::of(key)) {
+        (true, _) => typed(app, key),
+        (false, Some(action)) => act(app, action),
+        (false, None) => app,
     }
+}
+
+/// Editing the filter, where every printable key narrows the table further.
+fn typed(app: App, key: Key) -> App {
+    viewed(app, |view| match key {
+        Key::Char(key) => view.filter.query.push(key),
+        Key::Backspace => {
+            view.filter.query.pop();
+        }
+        // Escape abandons the filter altogether; enter keeps what it matched
+        // and hands the keys back to the dashboard.
+        Key::Escape => view.filter = Filter::default(),
+        Key::Enter => view.filter.typing = false,
+    })
 }
 
 fn act(app: App, action: Action) -> App {
@@ -165,32 +275,69 @@ fn act(app: App, action: Action) -> App {
             keymap_open: !app.keymap_open,
             ..app
         },
+        Action::CycleSort => viewed(app, |view| view.sort = view.sort.next()),
+        Action::OpenFilter => viewed(app, |view| view.filter.typing = true),
+        Action::ClearFilter => viewed(app, |view| view.filter = Filter::default()),
+        Action::ToggleHidden => hide_selected(app),
+        Action::ShowHidden => viewed(app, |view| view.show_hidden = !view.show_hidden),
+        // The detail view arrives later. The key is bound and advertised now so
+        // the keymap it appears in is the one that ships.
+        Action::Detail => app,
     }
+}
+
+/// The same state with `change` applied to what it is showing.
+fn viewed(mut app: App, change: impl FnOnce(&mut View)) -> App {
+    change(&mut app.view);
+
+    app
 }
 
 /// Moves the selection by `step` rows, stopping at either end.
 ///
-/// Clamped rather than wrapping, so holding `j` settles on the last device
-/// instead of cycling back to the top.
+/// Never wraps: the step saturates at the first row and `onto_a_row` catches
+/// the last, so holding `j` settles on the final device rather than cycling.
 fn moved(app: App, step: isize) -> App {
-    let last = app.devices().len().saturating_sub(1);
-    let selected = app.selected.saturating_add_signed(step).min(last);
+    let selected = app.selected.saturating_add_signed(step);
 
     App { selected, ..app }
 }
 
-/// Takes a fresh reading, keeping the selection on a row that still exists.
+/// Hides the selected device, or shows it again if it was already hidden.
+///
+/// One key both ways, so a device unhidden under `H` goes back with the same
+/// press that hid it.
+fn hide_selected(app: App) -> App {
+    let selected = app.current().map(|device| device.address.clone());
+
+    viewed(app, |view| {
+        if let Some(address) = selected {
+            view.toggle_hidden(&address);
+        }
+    })
+}
+
+/// Takes a fresh reading, recording the levels the trend column reads.
 ///
 /// A reading is delivered as it is taken, so it carries the clock forward too
 /// and the countdown restarts from the moment the reading actually happened.
-fn receive(app: App, reading: Snapshot) -> App {
-    let selected = app.selected.min(reading.devices.len().saturating_sub(1));
-    let now = reading.read_at;
+fn receive(mut app: App, reading: Snapshot) -> App {
+    app.history.record(&reading);
+    app.now = reading.read_at;
+    app.reading = Some(reading);
+
+    app
+}
+
+/// Pulls the selection back onto a row that exists.
+///
+/// Every way the table can shrink ends here, so a filter, a hide and a shorter
+/// reading all leave the selection somewhere real without each having to say so.
+fn onto_a_row(app: App) -> App {
+    let last = app.rows().len().saturating_sub(1);
 
     App {
-        reading: Some(reading),
-        selected,
-        now,
+        selected: app.selected.min(last),
         ..app
     }
 }
@@ -201,7 +348,7 @@ pub(super) mod tests {
 
     use super::*;
 
-    const READ_AT: Timestamp = Timestamp::from_unix(1_785_643_199);
+    pub const READ_AT: Timestamp = Timestamp::from_unix(1_785_643_199);
     const INTERVAL: Duration = Duration::from_secs(5);
 
     /// A device that differs from its neighbours only where a test looks.
@@ -240,7 +387,7 @@ pub(super) mod tests {
     }
 
     pub fn app() -> App {
-        App::new(INTERVAL, READ_AT)
+        App::new(INTERVAL, READ_AT, Glyphs::ASCII)
     }
 
     /// An app holding a reading, which is the state most tests start from.
@@ -248,9 +395,18 @@ pub(super) mod tests {
         update(app(), Event::Reading(three_devices()))
     }
 
-    fn press(app: App, keys: &str) -> App {
+    /// Presses each character of `keys` in turn, as a person would type them.
+    pub fn press(app: App, keys: &str) -> App {
         keys.chars()
-            .fold(app, |app, key| update(app, Event::Key(key)))
+            .fold(app, |app, key| update(app, Event::Key(Key::Char(key))))
+    }
+
+    fn key(app: App, key: Key) -> App {
+        update(app, Event::Key(key))
+    }
+
+    fn names(app: &App) -> Vec<String> {
+        app.rows().all().map(|device| device.name.clone()).collect()
     }
 
     #[test]
@@ -261,6 +417,7 @@ pub(super) mod tests {
         assert!(app.devices().is_empty());
         assert_eq!(app.next_poll_in(), None, "nothing has been read yet");
         assert!(!app.keymap_open);
+        assert_eq!(app.view, View::default());
     }
 
     #[test]
@@ -318,7 +475,7 @@ pub(super) mod tests {
     #[test]
     fn q_is_the_only_way_the_loop_is_asked_to_stop() {
         assert!(!press(loaded(), "q").running);
-        assert!(press(loaded(), "jk?").running);
+        assert!(press(loaded(), "jk?sH").running);
     }
 
     #[test]
@@ -326,7 +483,9 @@ pub(super) mod tests {
         let app = loaded();
 
         assert_eq!(press(app.clone(), "xyz1"), app);
-        assert_eq!(Action::of('z'), None);
+        assert_eq!(key(app.clone(), Key::Backspace), app);
+        assert_eq!(Action::of(Key::Char('z')), None);
+        assert_eq!(Action::of(Key::Backspace), None);
     }
 
     #[test]
@@ -349,11 +508,20 @@ pub(super) mod tests {
 
     #[test]
     fn every_advertised_key_is_bound_to_an_action() {
-        for binding in KEYMAP.iter().chain(&OVERLAY_KEYS) {
-            for key in binding.keys.split('/') {
-                let key = key.chars().next().expect("a key to press");
+        let pressed = |text: &str| match text {
+            "esc" => Key::Escape,
+            "enter" => Key::Enter,
+            other => Key::Char(other.chars().next().expect("a key to press")),
+        };
+        // `/` is a key of its own as well as the separator between two of them.
+        let advertised = |keys: &'static str| match keys {
+            "/" => vec![Key::Char('/')],
+            several => several.split('/').map(pressed).collect(),
+        };
 
-                assert!(Action::of(key).is_some(), "{key} is advertised unbound");
+        for binding in KEYMAP.iter().chain(&OVERLAY_KEYS) {
+            for key in advertised(binding.keys) {
+                assert!(Action::of(key).is_some(), "{key:?} is advertised unbound");
             }
         }
     }
@@ -369,5 +537,151 @@ pub(super) mod tests {
         );
 
         assert_eq!(app.warnings(), ["system_profiler exited with 1"]);
+    }
+
+    #[test]
+    fn s_cycles_the_order_the_table_is_listed_in() {
+        let by_level = loaded();
+
+        assert_eq!(by_level.view.sort.label(), "level");
+        assert_eq!(press(by_level.clone(), "s").view.sort.label(), "name");
+        assert_eq!(press(by_level.clone(), "ss").view.sort.label(), "last seen");
+        assert_eq!(
+            press(by_level.clone(), "sss").view.sort,
+            by_level.view.sort,
+            "three presses come back round"
+        );
+        assert_eq!(
+            names(&press(by_level, "s")),
+            ["Magic Trackpad", "MX Keys M Mac", "Soundcore Liberty"]
+        );
+    }
+
+    #[test]
+    fn the_filter_narrows_the_table_as_it_is_typed() {
+        let filtering = press(loaded(), "/key");
+
+        assert!(filtering.view.filter.typing);
+        assert_eq!(filtering.view.filter.query, "key");
+        assert_eq!(names(&filtering), ["MX Keys M Mac"]);
+    }
+
+    #[test]
+    fn a_key_bound_on_the_dashboard_is_text_while_the_filter_is_typed() {
+        let filtering = press(loaded(), "/qs");
+
+        assert!(filtering.running, "q types rather than quits");
+        assert_eq!(filtering.view.filter.query, "qs");
+        assert_eq!(filtering.view.sort.label(), "level", "and s types too");
+    }
+
+    #[test]
+    fn backspace_takes_back_one_character_of_the_filter() {
+        let filtering = key(press(loaded(), "/keys"), Key::Backspace);
+
+        assert_eq!(filtering.view.filter.query, "key");
+        assert_eq!(names(&filtering), ["MX Keys M Mac"]);
+        assert_eq!(
+            key(key(filtering, Key::Backspace), Key::Backspace)
+                .view
+                .filter
+                .query,
+            "k"
+        );
+    }
+
+    #[test]
+    fn enter_keeps_the_filter_and_hands_the_keys_back() {
+        let kept = key(press(loaded(), "/keys"), Key::Enter);
+
+        assert!(!kept.view.filter.typing);
+        assert_eq!(kept.view.filter.query, "keys");
+        assert_eq!(names(&kept), ["MX Keys M Mac"]);
+        assert!(!press(kept, "q").running, "q is a command again");
+    }
+
+    #[test]
+    fn esc_clears_the_filter_while_typing_and_after_keeping_it() {
+        let typing = press(loaded(), "/keys");
+        let kept = key(typing.clone(), Key::Enter);
+
+        for app in [typing, kept] {
+            let cleared = key(app, Key::Escape);
+
+            assert_eq!(cleared.view.filter, Filter::default());
+            assert_eq!(names(&cleared).len(), 3);
+        }
+    }
+
+    #[test]
+    fn a_filter_that_matches_nothing_leaves_the_selection_on_no_row() {
+        let empty = press(press(loaded(), "jj"), "/nothing here");
+
+        assert!(empty.rows().is_empty());
+        assert_eq!(empty.selected, 0);
+        assert_eq!(empty.current(), None);
+    }
+
+    #[test]
+    fn h_hides_the_selected_device_and_the_selection_stays_on_a_row() {
+        let hidden = press(press(loaded(), "jj"), "h");
+
+        assert_eq!(
+            names(&hidden),
+            ["MX Keys M Mac", "Magic Trackpad"],
+            "the emptiest device leads the default order"
+        );
+        assert_eq!(hidden.selected, 1, "the last row is the last row");
+        assert_eq!(hidden.view.hidden.len(), 1);
+    }
+
+    #[test]
+    fn capital_h_brings_hidden_devices_back_so_one_can_be_unhidden() {
+        let hidden = press(loaded(), "h");
+        let showing = press(hidden.clone(), "H");
+
+        assert_eq!(names(&hidden).len(), 2);
+        assert!(showing.view.show_hidden);
+        assert_eq!(names(&showing).len(), 3);
+
+        let unhidden = press(showing, "h");
+        assert!(unhidden.view.hidden.is_empty(), "the same key both ways");
+        assert_eq!(names(&press(unhidden, "H")).len(), 3);
+    }
+
+    #[test]
+    fn hiding_nothing_hides_nothing() {
+        let empty = press(app(), "h");
+
+        assert!(empty.view.hidden.is_empty());
+    }
+
+    #[test]
+    fn enter_on_the_dashboard_waits_for_the_detail_view() {
+        let app = loaded();
+
+        assert_eq!(key(app.clone(), Key::Enter), app);
+        assert_eq!(Action::of(Key::Enter), Some(Action::Detail));
+    }
+
+    #[test]
+    fn readings_accumulate_into_the_trend_history() {
+        let earlier = Snapshot {
+            read_at: Timestamp::from_unix(READ_AT.unix() - 3_600),
+            ..reading(vec![device(
+                "Magic Trackpad",
+                "30-82-16-f2-24-90",
+                Some(90),
+            )])
+        };
+        let app = update(app(), Event::Reading(earlier));
+        let app = update(app, Event::Reading(three_devices()));
+
+        let trackpad = &app.devices()[0].address;
+        assert_eq!(app.history.samples(trackpad).count(), 2);
+        assert!(
+            app.history.trend(trackpad).expect("a trend").rate < 0.0,
+            "90% an hour ago and 85% now is a drain"
+        );
     }
 }
