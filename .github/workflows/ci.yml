@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  quality-check:
+    name: Format, Lint, Test & Build
+    # IOKit bindings only compile on macOS, so there is no Linux fallback runner.
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format Check
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Core Isolation Check
+        run: |
+          if cargo tree -p blubat-core --edges normal | grep -qE '\b(ratatui|crossterm)\b'; then
+            echo "blubat-core must not depend on ratatui or crossterm" >&2
+            exit 1
+          fi
+          echo "blubat-core is free of terminal dependencies"
