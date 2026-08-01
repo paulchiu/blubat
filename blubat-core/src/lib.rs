@@ -1,8 +1,9 @@
 //! Core of blubat, a Bluetooth battery monitor for macOS.
 //!
 //! This crate owns the device model, the macOS data sources that feed it, the
-//! merge that reconciles them, the poller, the threshold event engine and the
-//! configuration and JSON shapes. No single macOS source lists every device
+//! merge that reconciles them, the two tier poller, the rolling history behind
+//! the trend and the rate, the threshold event engine and the configuration and
+//! JSON shapes. No single macOS source lists every device
 //! battery, so readings come from IOKit and from `system_profiler` and are
 //! merged into one view that keeps the source and freshness of each reading
 //! visible. Nothing here depends on a terminal library, so the TUI is one
@@ -21,6 +22,7 @@
 mod address;
 mod device;
 mod error;
+mod history;
 mod iokit;
 mod poll;
 mod profiler;
@@ -31,7 +33,8 @@ mod watch;
 pub use address::Address;
 pub use device::{ChargeState, Device, Levels, Source};
 pub use error::{Error, Result};
-pub use poll::{poll, snapshot};
+pub use history::{Direction, History, Sample, Trend};
+pub use poll::{Tiers, poll, snapshot};
 pub use snapshot::Snapshot;
 pub use timestamp::Timestamp;
 pub use watch::{Watch, watch_dir};
