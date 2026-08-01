@@ -14,9 +14,10 @@ merges them, keeping the source and freshness of each reading visible.
 
 Pre-release. Milestone M0 is complete: both data sources, the merge, and the
 one-shot CLI (`list`, `status`, `wait`) that reaches parity with the
-`trackpad-battery` shell script blubat takes its inspiration from. The live
-TUI, threshold notifications and the background daemon come after it, so bare
-`blubat` prints help rather than opening a dashboard for now.
+`trackpad-battery` shell script blubat takes its inspiration from. M1 is
+underway: bare `blubat` now opens a live dashboard that polls in the
+background, though its table is still filling out. Threshold notifications and
+the background daemon come after it.
 
 blubat reads no configuration file and writes nothing, with one exception:
 `blubat wait` may create `~/.local/state/blubat/watches/`.
@@ -24,6 +25,7 @@ blubat reads no configuration file and writes nothing, with one exception:
 ## Usage
 
 ```
+blubat                              # the live dashboard: q quit, j/k move, ? keys
 blubat list [--json] [--all]        # every device that reports a battery
 blubat status [--device <match>]    # one device, human readable
               [--json | --number]   # machine readable variants
@@ -133,8 +135,10 @@ blubat list --json | jq -r '.[] | select(.connected) | "\(.name) \(.levels.main)
 - `blubat-core`: the device model, both data sources, the poller, the event
   engine and the config types. Depends on no terminal library, so a frontend
   other than the TUI stays buildable.
-- `blubat`: the binary, holding the CLI and (later) the TUI over that core. It
-  owns argument parsing, rendering and exit codes, and nothing else.
+- `blubat`: the binary, holding the CLI and the TUI over that core. It owns
+  argument parsing, rendering and exit codes, and nothing else. The dashboard
+  is one loop over one channel: keypresses and readings arrive as events, a
+  pure `update` folds each into the next state, and a pure `render` draws it.
 
 ## Development
 

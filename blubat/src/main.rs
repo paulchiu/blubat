@@ -1,17 +1,19 @@
-//! The blubat binary: the one-shot CLI over `blubat-core`.
+//! The blubat binary: the dashboard and the one-shot CLI over `blubat-core`.
 //!
-//! Every command reads one snapshot, prints it in the form the caller asked
-//! for, and exits with a code a script can branch on: 0 for a usable reading,
-//! 3 when no matching device has a battery, 1 for anything else.
+//! A bare `blubat` opens the live dashboard. Every other command reads one
+//! snapshot, prints it in the form the caller asked for, and exits with a code
+//! a script can branch on: 0 for a usable reading, 3 when no matching device
+//! has a battery, 1 for anything else.
 
 mod report;
+mod tui;
 mod wait;
 
 use std::fmt;
 use std::process::ExitCode;
 
 use blubat_core::Snapshot;
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 
 use report::Format;
 
@@ -113,7 +115,7 @@ fn run(cli: Cli) -> Result<(), Failure> {
             number,
         }) => report::status(&reading(), device.as_deref(), Format::of(json, number)),
         Some(Command::Wait(args)) => wait::run(&args),
-        None => print_help(),
+        None => tui::run(),
     }
 }
 
@@ -131,16 +133,6 @@ fn reading() -> Snapshot {
     snapshot
 }
 
-/// Prints the help a bare `blubat` has instead of the dashboard.
-fn print_help() -> Result<(), Failure> {
-    Cli::command()
-        .print_help()
-        .map_err(|error| Failure::Error(error.to_string()))?;
-    println!("\nThe live TUI dashboard bare `blubat` opens arrives in a later release.");
-
-    Ok(())
-}
-
 fn fail(failure: Failure) -> ExitCode {
     eprintln!("blubat: {failure}");
 
@@ -149,6 +141,8 @@ fn fail(failure: Failure) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use clap::CommandFactory;
+
     use super::*;
 
     #[test]

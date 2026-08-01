@@ -31,17 +31,28 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// A bare `blubat` opens the dashboard, which needs a screen to draw on. Piped
+/// into a test or a script there is none, so it says so and points at the
+/// command that does answer in text rather than taking over a terminal it does
+/// not have.
 #[test]
-fn a_bare_invocation_prints_help_and_says_where_the_dashboard_is() {
+fn a_bare_invocation_with_nowhere_to_draw_says_so() {
     let output = blubat(&[]);
-    let printed = stdout(&output);
 
-    assert_eq!(code(&output), 0);
+    assert_eq!(code(&output), 1);
+    assert!(output.stdout.is_empty(), "{output:?}");
+    assert!(stderr(&output).contains("needs a terminal"), "{output:?}");
+    assert!(stderr(&output).contains("blubat list"), "{output:?}");
+}
+
+#[test]
+fn help_still_lists_every_subcommand() {
+    let printed = stdout(&blubat(&["--help"]));
+
     assert!(printed.contains("Usage: blubat"), "{printed}");
     for subcommand in ["list", "status", "wait"] {
         assert!(printed.contains(subcommand), "{subcommand} is missing");
     }
-    assert!(printed.contains("TUI dashboard"), "{printed}");
 }
 
 #[test]
