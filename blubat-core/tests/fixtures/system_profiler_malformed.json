@@ -1,0 +1,56 @@
+{
+  "SPBluetoothDataType": [
+    {
+      "device_connected": [
+        {
+          "Good Device": {
+            "device_address": "11:22:33:44:55:66",
+            "device_batteryLevelMain": "42%",
+            "device_minorType": "Mouse"
+          }
+        },
+        "a bare string where a device object was expected",
+        {
+          "No Address": {
+            "device_batteryLevelMain": "50%"
+          }
+        },
+        {
+          "Bad Address": {
+            "device_address": "not-an-address",
+            "device_batteryLevelMain": "50%"
+          }
+        },
+        {
+          "Numeric Battery": {
+            "device_address": "11:22:33:44:55:77",
+            "device_batteryLevelMain": 55
+          }
+        },
+        {
+          "Empty Battery": {
+            "device_address": "11:22:33:44:55:88",
+            "device_batteryLevelMain": ""
+          }
+        },
+        {
+          "Impossible Battery": {
+            "device_address": "11:22:33:44:55:99",
+            "device_batteryLevelMain": "255%"
+          }
+        },
+        {
+          "Null Properties": null
+        }
+      ],
+      "device_not_connected": "this should have been an array",
+      "unexpected_section": {
+        "schema": "changed under us"
+      }
+    },
+    {
+      "device_connected": []
+    },
+    "a section that is not an object"
+  ]
+}

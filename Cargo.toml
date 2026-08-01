@@ -26,3 +26,9 @@ objc2-io-kit = { version = "0.3.2", default-features = false, features = [
     "std",
     "libc",
 ] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CFDictionary",
+    "CFString",
+    "CFNumber",
+] }
