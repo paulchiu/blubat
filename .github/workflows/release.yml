@@ -21,7 +21,7 @@ jobs:
     steps:
       - name: Determine Version Bump
         id: bump
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           result-encoding: string
           script: |
