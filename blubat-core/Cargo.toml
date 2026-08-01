@@ -1,0 +1,13 @@
+[package]
+name = "blubat-core"
+description = "Bluetooth battery model, macOS data sources and polling engine behind the blubat CLI"
+documentation = "https://docs.rs/blubat-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
