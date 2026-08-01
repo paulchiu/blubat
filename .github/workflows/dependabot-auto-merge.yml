@@ -1,0 +1,51 @@
+name: Dependabot Auto-Merge
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  dependabot-auto-merge:
+    runs-on: ubuntu-latest
+    if: ${{ github.actor == 'dependabot[bot]' }}
+    steps:
+      - name: Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+
+      # A dependency bump never breaks blubat's own public API, so the release
+      # label is one step gentler than the dependency's own semver jump.
+      - name: Add semantic version labels
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for label in major minor patch norelease; do
+            gh pr edit "$PR_URL" --remove-label "$label" || true
+          done
+
+          case "${{ steps.metadata.outputs.update-type }}" in
+            version-update:semver-major)
+              gh pr edit "$PR_URL" --add-label "minor"
+              ;;
+            version-update:semver-minor)
+              gh pr edit "$PR_URL" --add-label "patch"
+              ;;
+            version-update:semver-patch)
+              gh pr edit "$PR_URL" --add-label "patch"
+              ;;
+          esac
+
+      - name: Enable auto-merge for minor and patch updates
+        if: ${{ steps.metadata.outputs.update-type == 'version-update:semver-minor' || steps.metadata.outputs.update-type == 'version-update:semver-patch' }}
+        run: |
+          gh pr merge --auto --squash "$PR_URL" --body "Auto-merged minor/patch dependency update"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

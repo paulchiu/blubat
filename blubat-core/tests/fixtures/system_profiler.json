@@ -1,0 +1,109 @@
+{
+  "SPBluetoothDataType": [
+    {
+      "controller_properties": {
+        "controller_address": "AA:BB:CC:00:00:01",
+        "controller_chipset": "Apple N1",
+        "controller_discoverable": "attrib_off",
+        "controller_firmwareVersion": "MAC FW Version: 1.542.0.0, PHY FW Version: 2.1.527.0",
+        "controller_productID": "0x4A4A",
+        "controller_state": "attrib_on",
+        "controller_supportedServices": "0x392039 < HFP AVRCP A2DP HID Braille LEA AACP GATT SerialPort >",
+        "controller_transport": "PCIe",
+        "controller_vendorID": "0x004C (Apple)"
+      },
+      "device_connected": [
+        {
+          "MX Keys M Mac": {
+            "device_address": "AA:BB:CC:00:00:02",
+            "device_batteryLevelMain": "100%",
+            "device_firmwareVersion": "RBK74.04_0016",
+            "device_minorType": "Keyboard",
+            "device_productID": "0xB36A",
+            "device_services": "0x400000 < BLE >",
+            "device_vendorID": "0x046D"
+          }
+        },
+        {
+          "Paul’s Magic Trackpad": {
+            "device_address": "AA:BB:CC:00:00:03",
+            "device_firmwareVersion": "3.1.8",
+            "device_minorType": "Magic Trackpad",
+            "device_productID": "0x0265",
+            "device_services": "0x800020 < HID ACL >",
+            "device_vendorID": "0x004C"
+          }
+        },
+        {
+          "MX Master 3S": {
+            "device_address": "AA:BB:CC:00:00:0A",
+            "device_batteryLevelMain": "0%",
+            "device_minorType": "Mouse",
+            "device_productID": "0xB034",
+            "device_vendorID": "0x046D"
+          }
+        },
+        {
+          "Soundcore Liberty 3 Pro": {
+            "device_address": "AA:BB:CC:00:00:0B",
+            "device_batteryLevelCase": "72%",
+            "device_batteryLevelLeft": "88%",
+            "device_batteryLevelRight": "91%",
+            "device_minorType": "Headphones",
+            "device_vendorID": "0x0A9B"
+          }
+        }
+      ],
+      "device_not_connected": [
+        {
+          "Bedroom": {
+            "device_address": "AA:BB:CC:00:00:04"
+          }
+        },
+        {
+          "Bose QC Headphones": {
+            "device_address": "AA:BB:CC:00:00:05",
+            "device_firmwareVersion": "1.0.6",
+            "device_minorType": "Headphones",
+            "device_productID": "0x4075",
+            "device_vendorID": "0x009E"
+          }
+        },
+        {
+          "Keychron B1 Pro": {
+            "device_address": "AA:BB:CC:00:00:06",
+            "device_minorType": "Keyboard"
+          }
+        },
+        {
+          "Living Room": {
+            "device_address": "AA:BB:CC:00:00:07",
+            "device_rssi": "-79"
+          }
+        },
+        {
+          "Paul’s AirPods Pro": {
+            "device_address": "AA:BB:CC:00:00:08",
+            "device_batteryLevelCase": "68%",
+            "device_batteryLevelLeft": "100%",
+            "device_batteryLevelRight": "100%",
+            "device_caseVersion": "8A0",
+            "device_firmwareVersion": "8B41",
+            "device_minorType": "Headphones",
+            "device_productID": "0x2014",
+            "device_serialNumber": "XXXXXXXXXXXX",
+            "device_serialNumberLeft": "XXXXXXXXXXXX",
+            "device_serialNumberRight": "XXXXXXXXXXXX",
+            "device_vendorID": "0x004C"
+          }
+        },
+        {
+          "Paul’s iPhone 17": {
+            "device_address": "AA:BB:CC:00:00:09",
+            "device_rssi": "-51"
+          }
+        }
+      ]
+    }
+  ]
+}

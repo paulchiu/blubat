@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  quality-check:
+    name: Format, Lint, Test & Build
+    # IOKit bindings only compile on macOS, so there is no Linux fallback runner.
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      # The justfile owns what CI means: format, lint, test, core isolation and
+      # build. Duplicating the steps here would let the two drift apart.
+      - name: Format, Lint, Test & Build
+        run: just ci
