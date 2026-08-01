@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use etcetera::base_strategy::{BaseStrategy, Xdg};
 use serde::{Deserialize, Serialize};
@@ -29,20 +30,22 @@ pub struct Watch {
 }
 
 impl Watch {
-    /// Creates a watch stamped now.
-    pub fn new(device: impl Into<String>, target: u8, deadline: Option<Timestamp>) -> Self {
+    /// Creates a watch stamped now, giving up `timeout` after that moment.
+    pub fn new(device: impl Into<String>, target: u8, timeout: Option<Duration>) -> Self {
+        let created = Timestamp::now();
+
         Self {
             device: device.into(),
             target,
-            created: Timestamp::now(),
-            deadline,
+            created,
+            deadline: timeout.map(|timeout| created.plus(timeout)),
         }
     }
 
     /// Parses one watch file, rejecting unknown keys and bad timestamps.
-    pub fn parse(contents: &str) -> Result<Self> {
+    fn parse(contents: &str) -> Result<Self> {
         toml::from_str(contents)
-            .map_err(|error| Error::Parse(format!("watch file is unreadable: {error}")))
+            .map_err(|error| Error::Format(format!("watch file is unreadable: {error}")))
     }
 
     /// Reads one watch file.
@@ -54,20 +57,33 @@ impl Watch {
     }
 
     /// Writes the watch into `directory`, creating it if needed.
+    ///
+    /// Through a partial file and a rename, which is atomic on one filesystem,
+    /// so a daemon draining the directory never reads half a watch.
     pub fn write(&self, directory: &Path) -> Result<PathBuf> {
         let path = directory.join(self.file_name());
+        let partial = path.with_extension("toml.partial");
         let contents = toml::to_string(self)
-            .map_err(|error| Error::Parse(format!("watch file is unwritable: {error}")))?;
+            .map_err(|error| Error::Format(format!("watch file is unwritable: {error}")))?;
 
         fs::create_dir_all(directory)
-            .and_then(|()| fs::write(&path, contents))
+            .and_then(|()| fs::write(&partial, contents))
+            .and_then(|()| fs::rename(&partial, &path))
             .map(|()| path.clone())
             .map_err(|source| Error::Io { path, source })
     }
 
     /// Names the file after what it is waiting for, so the directory reads.
+    ///
+    /// The target is in the name because two waits on one device registered in
+    /// the same second would otherwise silently overwrite each other.
     fn file_name(&self) -> String {
-        format!("{}-{}.toml", self.created.unix(), slug(&self.device))
+        format!(
+            "{}-{}-{}.toml",
+            self.created.unix(),
+            slug(&self.device),
+            self.target
+        )
     }
 }
 
@@ -168,7 +184,7 @@ mod tests {
             "not toml at all {{",
         ] {
             assert!(
-                matches!(Watch::parse(contents), Err(Error::Parse(_))),
+                matches!(Watch::parse(contents), Err(Error::Format(_))),
                 "{contents:?} should be rejected"
             );
         }
@@ -176,14 +192,14 @@ mod tests {
 
     #[test]
     fn the_file_name_says_what_the_watch_is_for() {
-        assert_eq!(watch().file_name(), "1785643199-trackpad.toml");
+        assert_eq!(watch().file_name(), "1785643199-trackpad-100.toml");
         assert_eq!(
             Watch {
                 device: "Paul\u{2019}s AirPods Pro".to_string(),
                 ..watch()
             }
             .file_name(),
-            "1785643199-paul-s-airpods-pro.toml"
+            "1785643199-paul-s-airpods-pro-100.toml"
         );
         assert_eq!(
             Watch {
@@ -191,8 +207,30 @@ mod tests {
                 ..watch()
             }
             .file_name(),
-            "1785643199-device.toml"
+            "1785643199-device-100.toml"
         );
+    }
+
+    #[test]
+    fn two_targets_for_one_device_in_one_second_get_their_own_files() {
+        let eighty = Watch {
+            target: 80,
+            ..watch()
+        };
+
+        assert_ne!(watch().file_name(), eighty.file_name());
+    }
+
+    #[test]
+    fn a_timeout_becomes_a_deadline_that_far_ahead() {
+        let before = Timestamp::now().unix();
+
+        let deadline = Watch::new("trackpad", 100, Some(Duration::from_secs(600)))
+            .deadline
+            .expect("a timeout sets one");
+
+        assert!(deadline.unix() >= before + 600, "{deadline:?}");
+        assert_eq!(Watch::new("trackpad", 100, None).deadline, None);
     }
 
     #[test]

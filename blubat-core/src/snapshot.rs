@@ -11,14 +11,19 @@ use crate::timestamp::Timestamp;
 pub struct Snapshot {
     pub read_at: Timestamp,
     pub devices: Vec<Device>,
+    /// Input a source could not use and carried on past, for a frontend to place.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl Snapshot {
     /// Devices whose name or address contains `needle`, case insensitively.
-    pub fn matching<'a>(&'a self, needle: &'a str) -> impl Iterator<Item = &'a Device> {
+    pub fn matching<'a>(&'a self, needle: &str) -> impl Iterator<Item = &'a Device> + 'a {
+        let needle = needle.to_string();
+
         self.devices
             .iter()
-            .filter(move |device| device.matches(needle))
+            .filter(move |device| device.matches(&needle))
     }
 
     /// Devices that reported a battery level, fresh or last seen.
@@ -33,11 +38,26 @@ impl Snapshot {
 /// Magic Trackpad appears in both, with a battery level only in IOKit, so the
 /// IOKit record wins. It keeps the device category from the other source,
 /// which names it `Magic Trackpad` where IOKit only offers a transport.
-pub(crate) fn merge(iokit: Vec<Device>, profiler: Vec<Device>, read_at: Timestamp) -> Snapshot {
-    let mut merged: BTreeMap<Address, Device> = profiler
-        .into_iter()
-        .map(|device| (device.address.clone(), device))
-        .collect();
+///
+/// `system_profiler` can also list one address twice within a section, once
+/// connected and once not, and a live reading always beats a last seen one.
+pub(crate) fn merge(
+    iokit: Vec<Device>,
+    profiler: Vec<Device>,
+    read_at: Timestamp,
+    warnings: Vec<String>,
+) -> Snapshot {
+    let mut merged: BTreeMap<Address, Device> = BTreeMap::new();
+
+    for device in profiler {
+        let held_is_live = merged
+            .get(&device.address)
+            .is_some_and(|held| held.connected);
+
+        if device.connected || !held_is_live {
+            merged.insert(device.address.clone(), device);
+        }
+    }
 
     for device in iokit {
         let kind = merged
@@ -54,7 +74,11 @@ pub(crate) fn merge(iokit: Vec<Device>, profiler: Vec<Device>, read_at: Timestam
             .then_with(|| a.address.cmp(&b.address))
     });
 
-    Snapshot { read_at, devices }
+    Snapshot {
+        read_at,
+        devices,
+        warnings,
+    }
 }
 
 #[cfg(test)]
@@ -63,6 +87,10 @@ mod tests {
     use crate::device::{ChargeState, Levels, Source};
 
     const READ_AT: Timestamp = Timestamp::from_unix(1_785_643_199);
+
+    fn merged(iokit: Vec<Device>, profiler: Vec<Device>) -> Snapshot {
+        merge(iokit, profiler, READ_AT, Vec::new())
+    }
 
     fn device(name: &str, address: &str, source: Source) -> Device {
         Device {
@@ -108,11 +136,7 @@ mod tests {
 
     #[test]
     fn the_same_device_from_both_sources_collapses_to_the_iokit_reading() {
-        let merged = merge(
-            vec![trackpad_from_iokit()],
-            vec![trackpad_from_profiler()],
-            READ_AT,
-        );
+        let merged = merged(vec![trackpad_from_iokit()], vec![trackpad_from_profiler()]);
 
         let [trackpad] = &merged.devices[..] else {
             panic!("expected exactly one device, got {:?}", merged.devices);
@@ -126,11 +150,7 @@ mod tests {
 
     #[test]
     fn the_displaced_reading_still_donates_the_device_category() {
-        let merged = merge(
-            vec![trackpad_from_iokit()],
-            vec![trackpad_from_profiler()],
-            READ_AT,
-        );
+        let merged = merged(vec![trackpad_from_iokit()], vec![trackpad_from_profiler()]);
 
         assert_eq!(merged.devices[0].kind.as_deref(), Some("Magic Trackpad"));
         assert_eq!(merged.devices[0].transport.as_deref(), Some("Bluetooth"));
@@ -138,14 +158,13 @@ mod tests {
 
     #[test]
     fn devices_unique_to_one_source_all_survive() {
-        let merged = merge(
+        let merged = merged(
             vec![trackpad_from_iokit()],
             vec![
                 trackpad_from_profiler(),
                 device("MX Keys M Mac", "de:df:38:f0:46:9b", Source::SystemProfiler),
                 device("Bedroom", "d0:03:4b:0b:e6:4e", Source::SystemProfiler),
             ],
-            READ_AT,
         );
 
         assert_eq!(
@@ -161,7 +180,7 @@ mod tests {
 
     #[test]
     fn an_iokit_only_device_needs_no_counterpart() {
-        let merged = merge(vec![trackpad_from_iokit()], Vec::new(), READ_AT);
+        let merged = merged(vec![trackpad_from_iokit()], Vec::new());
 
         assert_eq!(merged.devices.len(), 1);
         assert_eq!(merged.devices[0].kind, None);
@@ -169,15 +188,67 @@ mod tests {
     }
 
     #[test]
+    fn one_address_listed_twice_keeps_the_connected_reading() {
+        let live = Device {
+            levels: Levels {
+                main: Some(10),
+                ..Levels::default()
+            },
+            ..device("Twice Listed", "11:22:33:44:55:66", Source::SystemProfiler)
+        };
+        let stale = Device {
+            connected: false,
+            levels: Levels {
+                main: Some(90),
+                ..Levels::default()
+            },
+            ..live.clone()
+        };
+
+        for profiler in [
+            vec![live.clone(), stale.clone()],
+            vec![stale.clone(), live.clone()],
+        ] {
+            let merged = merged(Vec::new(), profiler);
+
+            let [device] = &merged.devices[..] else {
+                panic!("expected exactly one device, got {:?}", merged.devices);
+            };
+            assert!(device.connected);
+            assert_eq!(device.levels.main, Some(10));
+            assert_eq!(device.active_level(), Some(10));
+        }
+    }
+
+    #[test]
+    fn devices_sharing_a_name_are_ordered_by_address() {
+        let merged = merged(
+            Vec::new(),
+            vec![
+                device("AirPods Pro", "bb:bb:bb:bb:bb:bb", Source::SystemProfiler),
+                device("AirPods Pro", "aa:aa:aa:aa:aa:aa", Source::SystemProfiler),
+            ],
+        );
+
+        assert_eq!(
+            merged
+                .devices
+                .iter()
+                .map(|device| device.address.as_str())
+                .collect::<Vec<_>>(),
+            ["aa-aa-aa-aa-aa-aa", "bb-bb-bb-bb-bb-bb"]
+        );
+    }
+
+    #[test]
     fn selects_devices_by_match_and_by_battery() {
-        let merged = merge(
+        let merged = merged(
             vec![trackpad_from_iokit()],
             vec![device(
                 "MX Keys M Mac",
                 "de:df:38:f0:46:9b",
                 Source::SystemProfiler,
             )],
-            READ_AT,
         );
 
         assert_eq!(merged.matching("keys").count(), 1);

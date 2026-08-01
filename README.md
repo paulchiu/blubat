@@ -34,17 +34,19 @@ blubat wait --device <match>        # poll until the level is reached, then
 
 `--device` takes a substring, matched case insensitively against both the
 device name and its Bluetooth address, so `trackpad`, `Magic`, `30-82-16` and
-`30:82:16` all select the same device. With no `--device`, `status` reports the
-only device that has a battery, and asks for one if there is more than one.
+`30:82:16` all select the same device. `status` reports the one device with a
+battery that the arguments identify; if more than one qualifies, with or
+without `--device`, it names them and asks you to narrow the substring rather
+than picking one.
 
 ```
 $ blubat list
-NAME                   ADDRESS            LEVEL  STATE        SOURCE
-MX Keys M Mac          de-df-38-f0-46-9b  100%   unknown      system_profiler
-Paul's Magic Trackpad  30-82-16-f2-24-90  83%    discharging  iokit
+NAME                   ADDRESS            LEVEL  STATE       SOURCE
+MX Keys M Mac          de-df-38-f0-46-9b  100%   unknown     system_profiler
+Paul's Magic Trackpad  30-82-16-f2-24-90  83%    on battery  iokit
 
 $ blubat status --device trackpad
-Paul's Magic Trackpad  83%  discharging
+Paul's Magic Trackpad  83%  on battery
 
 $ blubat wait --device trackpad --until 100 --interval 5m
 ```
@@ -68,8 +70,9 @@ not change shape within a major version.
 | 3 | No matching device has a battery. |
 
 Warnings and errors go to stderr, so nothing contaminates a value read from
-stdout. `blubat status --json --device X > level.json` is safe even when the
-device is gone.
+stdout. `blubat status --json --device X > level.json` never mixes a diagnostic
+into the file, though it writes nothing at all when the device is gone, so
+branch on the exit code before reading it back.
 
 ### `--number`
 
@@ -84,11 +87,16 @@ level=$(blubat status --device trackpad --number) || exit
 For a multi-battery device such as AirPods, the number is the lowest present
 sub-level, because a device is as charged as its emptiest part.
 
+A bare number has nowhere to carry the `last seen` label, so for a disconnected
+device it is the level macOS last saw, which can be arbitrarily old. A script
+that needs a fresh reading should use `--json` and check `connected`.
+
 ### `--json`
 
 `blubat status --json` emits one object; `blubat list --json` emits an array of
-those same objects, in the order the table shows them. Keys with no value are
-omitted rather than emitted as `null`.
+those same objects, in the order the table shows them, and stays an array (`[]`)
+when nothing is paired. Keys with no value are omitted rather than emitted as
+`null`.
 
 ```json
 {
@@ -111,7 +119,7 @@ omitted rather than emitted as `null`.
 | `kind` | string, optional | Device category as `system_profiler` names it. |
 | `transport` | string, optional | Link the IOKit node reports. |
 | `levels` | object | Any of `main`, `left`, `right`, `case`, each a percentage. Absent keys are omitted. |
-| `charge` | string | `charging`, `discharging` or `unknown`. Only Apple HID devices report it. |
+| `charge` | string | `charging`, `discharging` or `unknown`. Only Apple HID devices report it. The human output prints `discharging` as `on battery`, as the POC does. |
 | `source` | string | `iokit` or `system_profiler`. |
 | `connected` | boolean | `false` means `levels` is last seen data of unknown age. |
 | `read_at` | string | RFC 3339 in UTC, whole seconds. When blubat took the reading, not when the device reported it. |

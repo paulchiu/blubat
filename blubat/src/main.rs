@@ -10,6 +10,7 @@ mod wait;
 use std::fmt;
 use std::process::ExitCode;
 
+use blubat_core::Snapshot;
 use clap::{CommandFactory, Parser, Subcommand};
 
 use report::Format;
@@ -105,29 +106,39 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<(), Failure> {
     match cli.command {
-        Some(Command::List { json, all }) => report::list(&blubat_core::snapshot(), json, all),
+        Some(Command::List { json, all }) => report::list(&reading(), json, all),
         Some(Command::Status {
             device,
             json,
             number,
-        }) => report::status(
-            &blubat_core::snapshot(),
-            device.as_deref(),
-            Format::of(json, number),
-        ),
+        }) => report::status(&reading(), device.as_deref(), Format::of(json, number)),
         Some(Command::Wait(args)) => wait::run(&args),
-        None => greet(),
+        None => print_help(),
     }
 }
 
+/// One reading, with whatever the core could not use reported on stderr.
+///
+/// The core hands its warnings back rather than printing them, so a frontend
+/// that owns the screen can place them. This one only owes stdout a clean value.
+fn reading() -> Snapshot {
+    let snapshot = blubat_core::snapshot();
+
+    for warning in &snapshot.warnings {
+        eprintln!("blubat: warning: {warning}");
+    }
+
+    snapshot
+}
+
 /// Prints the help a bare `blubat` has instead of the dashboard.
-fn greet() -> Result<(), Failure> {
+fn print_help() -> Result<(), Failure> {
     Cli::command()
         .print_help()
-        .map(|()| {
-            println!("\nThe live TUI dashboard bare `blubat` opens arrives in a later release.");
-        })
-        .map_err(|error| Failure::Error(error.to_string()))
+        .map_err(|error| Failure::Error(error.to_string()))?;
+    println!("\nThe live TUI dashboard bare `blubat` opens arrives in a later release.");
+
+    Ok(())
 }
 
 fn fail(failure: Failure) -> ExitCode {

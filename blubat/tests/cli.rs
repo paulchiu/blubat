@@ -73,6 +73,20 @@ fn no_matching_device_is_exit_three_for_every_output_format() {
     }
 }
 
+/// Runs on a CI machine with nothing paired and on a desk with several, so it
+/// asserts the contract both have in common rather than any device's reading.
+#[test]
+fn list_json_is_an_array_whatever_the_machine_has_paired() {
+    let output = blubat(&["list", "--json"]);
+    let printed = stdout(&output);
+
+    assert!(matches!(code(&output), 0 | 3), "{output:?}");
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&printed).is_ok_and(|json| json.is_array()),
+        "{printed}"
+    );
+}
+
 #[test]
 fn incompatible_output_flags_are_an_error_exit() {
     let output = blubat(&["status", "--json", "--number"]);

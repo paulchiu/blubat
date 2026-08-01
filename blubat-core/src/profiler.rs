@@ -1,8 +1,8 @@
 //! The `system_profiler` source: everything that is not an Apple HID peripheral.
 //!
 //! The schema here is undocumented and has changed across releases, so every
-//! field is optional and anything unrecognised is warned about and skipped
-//! rather than treated as fatal.
+//! field is optional and anything unrecognised is collected into `warnings` and
+//! skipped rather than treated as fatal.
 
 use std::process::Command;
 
@@ -12,10 +12,9 @@ use crate::address::Address;
 use crate::device::{ChargeState, Device, Levels, Source};
 use crate::error::{Error, Result};
 use crate::timestamp::Timestamp;
-use crate::warn;
 
 /// Runs `system_profiler SPBluetoothDataType -json` and parses what comes back.
-pub(crate) fn read(read_at: Timestamp) -> Result<Vec<Device>> {
+pub(crate) fn read(read_at: Timestamp, warnings: &mut Vec<String>) -> Result<Vec<Device>> {
     let output = Command::new("system_profiler")
         .args(["SPBluetoothDataType", "-json"])
         .output()
@@ -29,62 +28,73 @@ pub(crate) fn read(read_at: Timestamp) -> Result<Vec<Device>> {
         )));
     }
 
-    parse(&String::from_utf8_lossy(&output.stdout), read_at)
+    parse(&String::from_utf8_lossy(&output.stdout), read_at, warnings)
 }
 
 /// Parses one `SPBluetoothDataType` document.
-fn parse(json: &str, read_at: Timestamp) -> Result<Vec<Device>> {
+fn parse(json: &str, read_at: Timestamp, warnings: &mut Vec<String>) -> Result<Vec<Device>> {
     let root: Value = serde_json::from_str(json)
-        .map_err(|error| Error::Parse(format!("system_profiler JSON is unreadable: {error}")))?;
+        .map_err(|error| Error::Format(format!("system_profiler JSON is unreadable: {error}")))?;
 
     let Some(sections) = root.get("SPBluetoothDataType").and_then(Value::as_array) else {
-        warn("system_profiler returned no SPBluetoothDataType section");
+        warnings.push("system_profiler returned no SPBluetoothDataType section".to_string());
         return Ok(Vec::new());
     };
 
     Ok(sections
         .iter()
-        .flat_map(|section| section_devices(section, read_at))
+        .flat_map(|section| section_devices(section, read_at, warnings))
         .collect())
 }
 
 /// Reads both device arrays of one section, which is where connectedness comes from.
-fn section_devices(section: &Value, read_at: Timestamp) -> Vec<Device> {
-    [("device_connected", true), ("device_not_connected", false)]
-        .into_iter()
-        .flat_map(|(key, connected)| {
-            section
-                .get(key)
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .flat_map(move |entry| entry_devices(entry, connected, read_at))
-        })
-        .collect()
+fn section_devices(section: &Value, read_at: Timestamp, warnings: &mut Vec<String>) -> Vec<Device> {
+    let mut devices = Vec::new();
+
+    for (key, connected) in [("device_connected", true), ("device_not_connected", false)] {
+        let entries = section.get(key).and_then(Value::as_array);
+
+        for entry in entries.into_iter().flatten() {
+            devices.extend(entry_devices(entry, connected, read_at, warnings));
+        }
+    }
+
+    devices
 }
 
 /// Converts one `{ "Device Name": { ... } }` entry.
-fn entry_devices(entry: &Value, connected: bool, read_at: Timestamp) -> Vec<Device> {
+fn entry_devices(
+    entry: &Value,
+    connected: bool,
+    read_at: Timestamp,
+    warnings: &mut Vec<String>,
+) -> Vec<Device> {
     let Some(fields) = entry.as_object() else {
-        warn("skipping a system_profiler entry that is not an object");
+        warnings.push("skipping a system_profiler entry that is not an object".to_string());
         return Vec::new();
     };
 
     fields
         .iter()
-        .filter_map(|(name, properties)| device(name, properties, connected, read_at))
+        .filter_map(|(name, properties)| device(name, properties, connected, read_at, warnings))
         .collect()
 }
 
-fn device(name: &str, properties: &Value, connected: bool, read_at: Timestamp) -> Option<Device> {
+fn device(
+    name: &str,
+    properties: &Value,
+    connected: bool,
+    read_at: Timestamp,
+    warnings: &mut Vec<String>,
+) -> Option<Device> {
     let address = properties
         .get("device_address")
         .and_then(Value::as_str)
-        .and_then(Address::parse)
-        .or_else(|| {
-            warn(&format!("skipping `{name}`: no usable device_address"));
-            None
-        })?;
+        .and_then(Address::parse);
+    let Some(address) = address else {
+        warnings.push(format!("skipping `{name}`: no usable device_address"));
+        return None;
+    };
 
     Some(Device {
         address,
@@ -95,10 +105,10 @@ fn device(name: &str, properties: &Value, connected: bool, read_at: Timestamp) -
             .map(str::to_string),
         transport: None,
         levels: Levels {
-            main: level(properties, name, "device_batteryLevelMain"),
-            left: level(properties, name, "device_batteryLevelLeft"),
-            right: level(properties, name, "device_batteryLevelRight"),
-            case: level(properties, name, "device_batteryLevelCase"),
+            main: level(properties, name, "device_batteryLevelMain", warnings),
+            left: level(properties, name, "device_batteryLevelLeft", warnings),
+            right: level(properties, name, "device_batteryLevelRight", warnings),
+            case: level(properties, name, "device_batteryLevelCase", warnings),
         },
         // No charge state exists in this source for any device.
         charge: ChargeState::Unknown,
@@ -109,19 +119,24 @@ fn device(name: &str, properties: &Value, connected: bool, read_at: Timestamp) -
 }
 
 /// Reads one battery key, a percent suffixed string such as `"100%"`.
-fn level(properties: &Value, name: &str, key: &str) -> Option<u8> {
+///
+/// Trimmed on both sides of the suffix, because the only guarantee this schema
+/// offers is that it has changed shape before.
+fn level(properties: &Value, name: &str, key: &str, warnings: &mut Vec<String>) -> Option<u8> {
     let raw = properties.get(key)?;
-
-    raw.as_str()
-        .map(|text| text.trim().trim_end_matches('%'))
+    let level = raw
+        .as_str()
+        .map(|text| text.trim().trim_end_matches('%').trim())
         .and_then(|text| text.parse::<u8>().ok())
-        .filter(|&level| level <= 100)
-        .or_else(|| {
-            warn(&format!(
-                "ignoring {key} on `{name}`: {raw} is not a percentage"
-            ));
-            None
-        })
+        .filter(|&level| level <= 100);
+
+    if level.is_none() {
+        warnings.push(format!(
+            "ignoring {key} on `{name}`: {raw} is not a percentage"
+        ));
+    }
+
+    level
 }
 
 #[cfg(test)]
@@ -133,7 +148,14 @@ mod tests {
     const MALFORMED: &str = include_str!("../tests/fixtures/system_profiler_malformed.json");
 
     fn parsed(json: &str) -> Vec<Device> {
-        parse(json, READ_AT).expect("fixture parses")
+        parse(json, READ_AT, &mut Vec::new()).expect("fixture parses")
+    }
+
+    fn skipped(json: &str) -> Vec<String> {
+        let mut warnings = Vec::new();
+        parse(json, READ_AT, &mut warnings).expect("fixture parses");
+
+        warnings
     }
 
     fn named(json: &str, name: &str) -> Device {
@@ -147,8 +169,8 @@ mod tests {
     fn reads_every_device_from_both_arrays() {
         let devices = parsed(REAL);
 
-        assert_eq!(devices.len(), 8);
-        assert_eq!(devices.iter().filter(|device| device.connected).count(), 2);
+        assert_eq!(devices.len(), 10);
+        assert_eq!(devices.iter().filter(|device| device.connected).count(), 4);
         assert!(devices.iter().all(|device| device.read_at == READ_AT));
         assert!(
             devices
@@ -190,6 +212,23 @@ mod tests {
     }
 
     #[test]
+    fn a_connected_multi_battery_device_has_an_active_level() {
+        let earbuds = named(REAL, "Soundcore Liberty 3 Pro");
+
+        assert!(earbuds.connected);
+        assert_eq!(earbuds.levels.lowest(), Some(72));
+        assert_eq!(earbuds.active_level(), Some(72));
+    }
+
+    #[test]
+    fn an_empty_battery_is_a_reading_rather_than_a_missing_one() {
+        let mouse = named(REAL, "MX Master 3S");
+
+        assert_eq!(mouse.levels.main, Some(0));
+        assert!(mouse.has_battery(), "0% is a level, not the absence of one");
+    }
+
+    #[test]
     fn a_device_with_no_battery_keys_is_kept_without_a_level() {
         let trackpad = named(REAL, "Paul\u{2019}s Magic Trackpad");
 
@@ -226,11 +265,57 @@ mod tests {
                 "Good Device",
                 "Numeric Battery",
                 "Empty Battery",
-                "Impossible Battery"
+                "Impossible Battery",
+                "Spaced Battery",
+                "Bare Battery",
+                "Twice Listed",
+                "Twice Listed",
             ],
             "entries without a usable address are dropped, the rest are kept"
         );
         assert_eq!(named(MALFORMED, "Good Device").levels.main, Some(42));
+    }
+
+    #[test]
+    fn what_was_skipped_is_returned_rather_than_printed() {
+        let warnings = skipped(MALFORMED);
+
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("Bad Address")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("is not a percentage")),
+            "{warnings:?}"
+        );
+        assert_eq!(
+            skipped("{}"),
+            ["system_profiler returned no SPBluetoothDataType section"]
+        );
+    }
+
+    #[test]
+    fn a_battery_value_survives_stray_space_and_a_missing_percent_sign() {
+        assert_eq!(named(MALFORMED, "Spaced Battery").levels.main, Some(100));
+        assert_eq!(named(MALFORMED, "Bare Battery").levels.main, Some(85));
+    }
+
+    #[test]
+    fn one_address_in_both_arrays_yields_both_records_for_the_merge_to_settle() {
+        let listed: Vec<Device> = parsed(MALFORMED)
+            .into_iter()
+            .filter(|device| device.name == "Twice Listed")
+            .collect();
+
+        let [live, stale] = &listed[..] else {
+            panic!("expected the address twice, got {listed:?}");
+        };
+        assert_eq!(live.address, stale.address);
+        assert!(live.connected && !stale.connected);
     }
 
     #[test]
@@ -250,8 +335,8 @@ mod tests {
     #[test]
     fn json_that_is_not_json_is_an_error_rather_than_a_panic() {
         assert!(matches!(
-            parse("not json at all", READ_AT),
-            Err(Error::Parse(_))
+            parse("not json at all", READ_AT, &mut Vec::new()),
+            Err(Error::Format(_))
         ));
     }
 }

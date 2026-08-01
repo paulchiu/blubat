@@ -40,6 +40,18 @@
           }
         },
         {
+          "Spaced Battery": {
+            "device_address": "11:22:33:44:55:AA",
+            "device_batteryLevelMain": " 100 %"
+          }
+        },
+        {
+          "Bare Battery": {
+            "device_address": "11:22:33:44:55:BB",
+            "device_batteryLevelMain": "85"
+          }
+        },
+        {
           "Null Properties": null
         }
       ],
@@ -49,7 +61,22 @@
       }
     },
     {
-      "device_connected": []
+      "device_connected": [
+        {
+          "Twice Listed": {
+            "device_address": "11:22:33:44:55:CC",
+            "device_batteryLevelMain": "10%"
+          }
+        }
+      ],
+      "device_not_connected": [
+        {
+          "Twice Listed": {
+            "device_address": "11:22:33:44:55:CC",
+            "device_batteryLevelMain": "90%"
+          }
+        }
+      ]
     },
     "a section that is not an object"
   ]

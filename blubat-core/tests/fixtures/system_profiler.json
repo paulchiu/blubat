@@ -33,6 +33,25 @@
             "device_services": "0x800020 < HID ACL >",
             "device_vendorID": "0x004C"
           }
+        },
+        {
+          "MX Master 3S": {
+            "device_address": "AA:BB:CC:00:00:0A",
+            "device_batteryLevelMain": "0%",
+            "device_minorType": "Mouse",
+            "device_productID": "0xB034",
+            "device_vendorID": "0x046D"
+          }
+        },
+        {
+          "Soundcore Liberty 3 Pro": {
+            "device_address": "AA:BB:CC:00:00:0B",
+            "device_batteryLevelCase": "72%",
+            "device_batteryLevelLeft": "88%",
+            "device_batteryLevelRight": "91%",
+            "device_minorType": "Headphones",
+            "device_vendorID": "0x0A9B"
+          }
         }
       ],
       "device_not_connected": [

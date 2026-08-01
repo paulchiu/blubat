@@ -43,11 +43,15 @@ impl ChargeState {
     }
 }
 
+/// Reads as the shell POC reads, where a discharging device is `on battery`.
+///
+/// Only the human surfaces use this. The JSON value stays `discharging`, which
+/// is what the documented schema promises.
 impl fmt::Display for ChargeState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             ChargeState::Charging => "charging",
-            ChargeState::Discharging => "discharging",
+            ChargeState::Discharging => "on battery",
             ChargeState::Unknown => "unknown",
         })
     }
@@ -191,6 +195,24 @@ mod tests {
     }
 
     #[test]
+    fn a_flat_battery_is_a_reading_rather_than_a_missing_one() {
+        let flat = Device {
+            levels: Levels {
+                main: Some(0),
+                ..Levels::default()
+            },
+            ..device("MX Master 3S", "aa-bb-cc-00-00-0a")
+        };
+
+        assert_eq!(flat.levels.lowest(), Some(0));
+        assert!(
+            flat.has_battery(),
+            "empty is a level, not the absence of one"
+        );
+        assert_eq!(flat.active_level(), Some(0));
+    }
+
+    #[test]
     fn matches_name_and_address_case_insensitively() {
         let trackpad = device("Paul\u{2019}s Magic Trackpad", "30:82:16:F2:24:90");
 
@@ -234,6 +256,18 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Source::SystemProfiler).expect("serialisable"),
             "\"system_profiler\""
+        );
+    }
+
+    #[test]
+    fn charge_state_reads_as_the_poc_and_serialises_as_documented() {
+        assert_eq!(ChargeState::Charging.to_string(), "charging");
+        assert_eq!(ChargeState::Discharging.to_string(), "on battery");
+        assert_eq!(ChargeState::Unknown.to_string(), "unknown");
+        assert_eq!(
+            serde_json::to_string(&ChargeState::Discharging).expect("serialisable"),
+            "\"discharging\"",
+            "the JSON name is independent of the printed one"
         );
     }
 

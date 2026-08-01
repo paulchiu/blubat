@@ -6,8 +6,8 @@ use std::path::PathBuf;
 pub enum Error {
     /// A macOS helper command could not be run, or ran and reported failure.
     Command(String),
-    /// Input did not match the shape blubat expects.
-    Parse(String),
+    /// Data did not match the shape blubat expects, reading it or writing it.
+    Format(String),
     /// A file under the blubat state directory could not be read or written.
     Io {
         path: PathBuf,
@@ -22,7 +22,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Command(message) | Error::Parse(message) | Error::Path(message) => {
+            Error::Command(message) | Error::Format(message) | Error::Path(message) => {
                 f.write_str(message)
             }
             Error::Io { path, source } => write!(f, "{}: {source}", path.display()),
@@ -30,11 +30,6 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::Io { source, .. } => Some(source),
-            _ => None,
-        }
-    }
-}
+// No `source`: the io failure is already in the `Display` text, and offering it
+// twice makes anything walking the chain print it twice.
+impl std::error::Error for Error {}

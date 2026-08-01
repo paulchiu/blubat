@@ -2,23 +2,39 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::Duration;
 
+use crate::device::Device;
+use crate::error::Result;
 use crate::snapshot::{Snapshot, merge};
 use crate::timestamp::Timestamp;
-use crate::{iokit, profiler, warn};
+use crate::{iokit, profiler};
 
 /// Takes one merged reading from both sources.
+pub fn snapshot() -> Snapshot {
+    let read_at = Timestamp::now();
+    let mut warnings = Vec::new();
+    let iokit = iokit::read(read_at, &mut warnings);
+    let profiler = profiler::read(read_at, &mut warnings);
+
+    snapshot_from(iokit, profiler, read_at, warnings)
+}
+
+/// Reconciles what the two sources returned into one reading.
 ///
 /// A `system_profiler` failure degrades the reading to the IOKit devices
 /// rather than failing it: the fast source alone still answers the question
-/// the POC could answer, and a warning on stderr says what was lost.
-pub fn snapshot() -> Snapshot {
-    let read_at = Timestamp::now();
-    let profiler = profiler::read(read_at).unwrap_or_else(|error| {
-        warn(&error.to_string());
+/// the POC could answer, and the failure leaves as a warning.
+fn snapshot_from(
+    iokit: Vec<Device>,
+    profiler: Result<Vec<Device>>,
+    read_at: Timestamp,
+    mut warnings: Vec<String>,
+) -> Snapshot {
+    let profiler = profiler.unwrap_or_else(|error| {
+        warnings.push(error.to_string());
         Vec::new()
     });
 
-    merge(iokit::read(read_at), profiler, read_at)
+    merge(iokit, profiler, read_at, warnings)
 }
 
 /// Repeats [`snapshot`] every `interval`, reading once before the first wait.
@@ -50,12 +66,65 @@ mod tests {
     use std::sync::atomic::{AtomicI64, Ordering};
 
     use super::*;
+    use crate::address::Address;
+    use crate::device::{ChargeState, Levels, Source};
+    use crate::error::Error;
+
+    const READ_AT: Timestamp = Timestamp::from_unix(1_785_643_199);
 
     fn counted(reads: Arc<AtomicI64>) -> impl Fn() -> Snapshot + Send + 'static {
         move || Snapshot {
             read_at: Timestamp::from_unix(reads.fetch_add(1, Ordering::SeqCst)),
             devices: Vec::new(),
+            warnings: Vec::new(),
         }
+    }
+
+    fn device(name: &str, address: &str, source: Source) -> Device {
+        Device {
+            address: Address::parse(address).expect("valid address"),
+            name: name.to_string(),
+            kind: None,
+            transport: None,
+            levels: Levels {
+                main: Some(85),
+                ..Levels::default()
+            },
+            charge: ChargeState::Unknown,
+            source,
+            connected: true,
+            read_at: READ_AT,
+        }
+    }
+
+    #[test]
+    fn both_sources_merge_into_one_reading() {
+        let reading = snapshot_from(
+            vec![device("Magic Trackpad", "30-82-16-f2-24-90", Source::IoKit)],
+            Ok(vec![device(
+                "MX Keys M Mac",
+                "de-df-38-f0-46-9b",
+                Source::SystemProfiler,
+            )]),
+            READ_AT,
+            Vec::new(),
+        );
+
+        assert_eq!(reading.devices.len(), 2);
+        assert!(reading.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_failed_system_profiler_degrades_the_reading_rather_than_failing_it() {
+        let reading = snapshot_from(
+            vec![device("Magic Trackpad", "30-82-16-f2-24-90", Source::IoKit)],
+            Err(Error::Command("system_profiler exited with 1".to_string())),
+            READ_AT,
+            Vec::new(),
+        );
+
+        assert_eq!(reading.devices.len(), 1, "the fast source still answers");
+        assert_eq!(reading.warnings, ["system_profiler exited with 1"]);
     }
 
     #[test]

@@ -6,7 +6,9 @@
 //! battery, so readings come from IOKit and from `system_profiler` and are
 //! merged into one view that keeps the source and freshness of each reading
 //! visible. Nothing here depends on a terminal library, so the TUI is one
-//! frontend over this crate rather than the program itself.
+//! frontend over this crate rather than the program itself. For the same
+//! reason input a source could not use travels out on the snapshot rather than
+//! being printed, leaving a frontend that owns the screen free to place it.
 //!
 //! ```no_run
 //! let reading = blubat_core::snapshot();
@@ -33,11 +35,3 @@ pub use poll::{poll, snapshot};
 pub use snapshot::Snapshot;
 pub use timestamp::Timestamp;
 pub use watch::{Watch, watch_dir};
-
-/// Reports input blubat could not use and carried on past.
-///
-/// stderr, so a warning never contaminates the JSON or the bare number that a
-/// script is reading from stdout.
-pub(crate) fn warn(message: &str) {
-    eprintln!("blubat: warning: {message}");
-}

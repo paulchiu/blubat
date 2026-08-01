@@ -16,7 +16,6 @@ use objc2_io_kit::{
 use crate::address::Address;
 use crate::device::{ChargeState, Device, Levels, Source};
 use crate::timestamp::Timestamp;
-use crate::warn;
 
 /// The class Apple's HID peripherals register under.
 ///
@@ -35,10 +34,10 @@ const KEYS: [&str; 6] = [
 ];
 
 /// Reads every Apple HID peripheral that reports a battery.
-pub(crate) fn read(read_at: Timestamp) -> Vec<Device> {
+pub(crate) fn read(read_at: Timestamp, warnings: &mut Vec<String>) -> Vec<Device> {
     matching_entries()
         .into_iter()
-        .filter_map(|properties| device(&properties, read_at))
+        .filter_map(|properties| device(&properties, read_at, warnings))
         .collect()
 }
 
@@ -64,32 +63,37 @@ impl Property {
         }
     }
 
-    fn flag(&self) -> Option<bool> {
-        match self {
-            Property::Flag(flag) => Some(*flag),
-            _ => None,
-        }
+    /// Whether the property denies its key, as either a boolean or a zero.
+    ///
+    /// IOKit is free to hand back a flag as a CFBoolean or as a CFNumber, and
+    /// a denial has to be honoured whichever shape it arrives in.
+    fn is_false(&self) -> bool {
+        matches!(self, Property::Flag(false) | Property::Number(0))
     }
 }
 
 type Properties = HashMap<&'static str, Property>;
 
-fn device(properties: &Properties, read_at: Timestamp) -> Option<Device> {
+fn device(
+    properties: &Properties,
+    read_at: Timestamp,
+    warnings: &mut Vec<String>,
+) -> Option<Device> {
     let percent = properties
         .get("BatteryPercent")
         .and_then(Property::number)?;
-    if properties.get("HasBattery").and_then(Property::flag) == Some(false) {
+    if properties.get("HasBattery").is_some_and(Property::is_false) {
         return None;
     }
 
     let address = properties
         .get("DeviceAddress")
         .and_then(Property::text)
-        .and_then(Address::parse)
-        .or_else(|| {
-            warn("skipping an IOKit battery reading with no usable DeviceAddress");
-            None
-        })?;
+        .and_then(Address::parse);
+    let Some(address) = address else {
+        warnings.push("skipping an IOKit battery reading with no usable DeviceAddress".to_string());
+        return None;
+    };
 
     let name = properties
         .get("Product")
@@ -122,36 +126,37 @@ fn device(properties: &Properties, read_at: Timestamp) -> Option<Device> {
 }
 
 /// Runs one pass over the matching services, releasing every handle it takes.
+///
+/// Each `unsafe` wraps the single call it vouches for, so the loop and the
+/// pushes stay plainly safe code.
 fn matching_entries() -> Vec<Properties> {
     let class = CString::new(SERVICE_CLASS).expect("class name has no interior nul");
     let mut entries = Vec::new();
 
-    unsafe {
-        let Some(matching) = IOServiceMatching(class.as_ptr()) else {
-            return entries;
-        };
-        // IOServiceMatching hands back the mutable subtype and the getter wants
-        // the immutable one. Same object, so the reinterpret is sound.
-        let matching: CFRetained<CFDictionary> = CFRetained::cast_unchecked(matching);
+    let Some(matching) = (unsafe { IOServiceMatching(class.as_ptr()) }) else {
+        return entries;
+    };
+    // IOServiceMatching hands back the mutable subtype and the getter wants the
+    // immutable one. Same object, so the reinterpret is sound.
+    let matching: CFRetained<CFDictionary> = unsafe { CFRetained::cast_unchecked(matching) };
 
-        let mut iterator: io_iterator_t = 0;
-        let result =
-            IOServiceGetMatchingServices(kIOMainPortDefault, Some(matching), &mut iterator);
-        if result != 0 || iterator == 0 {
-            return entries;
-        }
-
-        loop {
-            let entry = IOIteratorNext(iterator);
-            if entry == 0 {
-                break;
-            }
-            entries.push(read_properties(entry));
-            IOObjectRelease(entry);
-        }
-
-        IOObjectRelease(iterator);
+    let mut iterator: io_iterator_t = 0;
+    let result =
+        unsafe { IOServiceGetMatchingServices(kIOMainPortDefault, Some(matching), &mut iterator) };
+    if result != 0 || iterator == 0 {
+        return entries;
     }
+
+    loop {
+        let entry = IOIteratorNext(iterator);
+        if entry == 0 {
+            break;
+        }
+
+        entries.push(read_properties(entry));
+        IOObjectRelease(entry);
+    }
+    IOObjectRelease(iterator);
 
     entries
 }
@@ -214,7 +219,8 @@ mod tests {
 
     #[test]
     fn builds_a_device_from_every_key_it_reads() {
-        let device = device(&trackpad(), Timestamp::from_unix(0)).expect("a battery reading");
+        let device = device(&trackpad(), Timestamp::from_unix(0), &mut Vec::new())
+            .expect("a battery reading");
 
         assert_eq!(device.name, "Paul\u{2019}s Magic Trackpad");
         assert_eq!(device.address.as_str(), "30-82-16-f2-24-90");
@@ -230,7 +236,8 @@ mod tests {
         let mut charging = trackpad();
         charging.insert("BatteryStatusFlags", Property::Number(3));
 
-        let device = device(&charging, Timestamp::from_unix(0)).expect("a battery reading");
+        let device =
+            device(&charging, Timestamp::from_unix(0), &mut Vec::new()).expect("a battery reading");
         assert_eq!(device.charge, ChargeState::Charging);
     }
 
@@ -239,7 +246,8 @@ mod tests {
         let mut no_flags = trackpad();
         no_flags.remove("BatteryStatusFlags");
 
-        let device = device(&no_flags, Timestamp::from_unix(0)).expect("a battery reading");
+        let device =
+            device(&no_flags, Timestamp::from_unix(0), &mut Vec::new()).expect("a battery reading");
         assert_eq!(device.charge, ChargeState::Unknown);
     }
 
@@ -248,7 +256,7 @@ mod tests {
         let mut no_battery = trackpad();
         no_battery.remove("BatteryPercent");
 
-        assert!(device(&no_battery, Timestamp::from_unix(0)).is_none());
+        assert!(device(&no_battery, Timestamp::from_unix(0), &mut Vec::new()).is_none());
     }
 
     #[test]
@@ -256,15 +264,28 @@ mod tests {
         let mut denied = trackpad();
         denied.insert("HasBattery", Property::Flag(false));
 
-        assert!(device(&denied, Timestamp::from_unix(0)).is_none());
+        assert!(device(&denied, Timestamp::from_unix(0), &mut Vec::new()).is_none());
+    }
+
+    #[test]
+    fn has_battery_denies_a_reading_as_a_number_as_well_as_a_boolean() {
+        let mut denied = trackpad();
+        denied.insert("HasBattery", Property::Number(0));
+        assert!(device(&denied, Timestamp::from_unix(0), &mut Vec::new()).is_none());
+
+        let mut allowed = trackpad();
+        allowed.insert("HasBattery", Property::Number(1));
+        assert!(device(&allowed, Timestamp::from_unix(0), &mut Vec::new()).is_some());
     }
 
     #[test]
     fn an_unusable_address_drops_the_entry() {
         let mut bad_address = trackpad();
         bad_address.insert("DeviceAddress", Property::Text("nonsense".to_string()));
+        let mut warnings = Vec::new();
 
-        assert!(device(&bad_address, Timestamp::from_unix(0)).is_none());
+        assert!(device(&bad_address, Timestamp::from_unix(0), &mut warnings).is_none());
+        assert_eq!(warnings.len(), 1, "returned rather than printed");
     }
 
     #[test]
@@ -272,7 +293,8 @@ mod tests {
         let mut anonymous = trackpad();
         anonymous.remove("Product");
 
-        let device = device(&anonymous, Timestamp::from_unix(0)).expect("a battery reading");
+        let device = device(&anonymous, Timestamp::from_unix(0), &mut Vec::new())
+            .expect("a battery reading");
         assert_eq!(device.name, "30-82-16-f2-24-90");
     }
 
@@ -282,7 +304,8 @@ mod tests {
             let mut odd = trackpad();
             odd.insert("BatteryPercent", Property::Number(percent));
 
-            let device = device(&odd, Timestamp::from_unix(0)).expect("a battery reading");
+            let device =
+                device(&odd, Timestamp::from_unix(0), &mut Vec::new()).expect("a battery reading");
             assert_eq!(device.levels.main, None, "at {percent}");
         }
     }

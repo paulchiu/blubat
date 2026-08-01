@@ -7,8 +7,9 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
-use blubat_core::{Timestamp, Watch};
+use blubat_core::Watch;
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
@@ -37,7 +38,7 @@ impl Drop for Scratch {
 #[test]
 fn a_written_watch_reads_back_unchanged() {
     let scratch = Scratch::new();
-    let watch = Watch::new("trackpad", 100, Some(Timestamp::from_unix(1_785_646_799)));
+    let watch = Watch::new("trackpad", 100, Some(Duration::from_secs(3_600)));
 
     let path = watch
         .write(&scratch.0)
@@ -70,6 +71,35 @@ fn a_daemon_can_drain_a_directory_of_watches() {
     expected.sort_by(|a, b| a.device.cmp(&b.device));
 
     assert_eq!(drained, expected);
+}
+
+#[test]
+fn two_targets_for_one_device_both_survive() {
+    let scratch = Scratch::new();
+    let watches = [
+        Watch::new("trackpad", 80, None),
+        Watch::new("trackpad", 100, None),
+    ];
+
+    for watch in &watches {
+        watch.write(&scratch.0).expect("writes");
+    }
+
+    let mut targets: Vec<u8> = fs::read_dir(&scratch.0)
+        .expect("the directory exists")
+        .map(|entry| {
+            Watch::read(&entry.expect("a readable entry").path())
+                .expect("parses")
+                .target
+        })
+        .collect();
+    targets.sort_unstable();
+
+    assert_eq!(
+        targets,
+        [80, 100],
+        "the second must not overwrite the first"
+    );
 }
 
 #[test]

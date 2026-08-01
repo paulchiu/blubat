@@ -6,9 +6,9 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use blubat_core::{Device, Snapshot, Timestamp, Watch, watch_dir};
+use blubat_core::{Device, Snapshot, Watch, watch_dir};
 
-use crate::Failure;
+use crate::{Failure, reading};
 
 /// Arguments of `blubat wait`.
 #[derive(Debug, clap::Args)]
@@ -42,7 +42,7 @@ pub fn run(args: &Args) -> Result<(), Failure> {
                 );
             })
     } else {
-        wait_for_level(args, blubat_core::snapshot).map(|(device, level)| {
+        wait_for_level(args, reading).map(|(device, level)| {
             notify(&format!("{device} is at {level}%, safe to unplug."));
             println!("{device} reached {level}%");
         })
@@ -59,15 +59,7 @@ fn daemon_is_running() -> bool {
 
 /// Drops a one-shot watch file for a running daemon to pick up.
 fn register(args: &Args, directory: &Path) -> Result<PathBuf, Failure> {
-    let deadline = args.timeout.map(|timeout| {
-        Timestamp::from_unix(
-            Timestamp::now()
-                .unix()
-                .saturating_add(i64::try_from(timeout.as_secs()).unwrap_or(i64::MAX)),
-        )
-    });
-
-    Watch::new(&args.device, args.until, deadline)
+    Watch::new(&args.device, args.until, args.timeout)
         .write(directory)
         .map_err(Failure::from)
 }
@@ -113,17 +105,24 @@ fn named_level(device: &Device) -> Option<(String, u8)> {
 /// Takes its reader so the loop is exercised without a Bluetooth device. A
 /// device that is absent for a while is reported and waited on, matching the
 /// shell POC, because the usual reason to wait is that it is still connecting.
+/// That notice is said once per disappearance rather than once per tick, since
+/// a wait can run for hours.
 fn wait_for_level(args: &Args, read: impl Fn() -> Snapshot) -> Result<(String, u8), Failure> {
     let started = Instant::now();
+    let mut said_absent = false;
 
     loop {
         match progress(&read(), &args.device, args.until) {
             Progress::Reached { device, level } => return Ok((device, level)),
-            Progress::Below => {}
-            Progress::Absent => eprintln!(
-                "blubat: no connected device matching `{}` reports a battery",
-                args.device
-            ),
+            Progress::Below => said_absent = false,
+            Progress::Absent if !said_absent => {
+                eprintln!(
+                    "blubat: no connected device matching `{}` reports a battery",
+                    args.device
+                );
+                said_absent = true;
+            }
+            Progress::Absent => {}
         }
 
         if args
@@ -190,11 +189,12 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicU8, Ordering};
 
-    use blubat_core::{Address, ChargeState, Levels, Source};
+    use blubat_core::{Address, ChargeState, Levels, Source, Timestamp};
 
     use super::*;
 
     const TRACKPAD: &str = "Paul\u{2019}s Magic Trackpad";
+    const EARBUDS: &str = "Soundcore Liberty 3 Pro";
 
     fn args(device: &str, until: u8, timeout: Option<Duration>) -> Args {
         Args {
@@ -205,24 +205,46 @@ mod tests {
         }
     }
 
-    fn snapshot(level: Option<u8>, connected: bool) -> Snapshot {
+    fn one_device(name: &str, levels: Levels, connected: bool) -> Snapshot {
         Snapshot {
             read_at: Timestamp::from_unix(1_785_643_199),
             devices: vec![Device {
                 address: Address::parse("30-82-16-f2-24-90").expect("valid address"),
-                name: TRACKPAD.to_string(),
+                name: name.to_string(),
                 kind: None,
                 transport: None,
-                levels: Levels {
-                    main: level,
-                    ..Levels::default()
-                },
+                levels,
                 charge: ChargeState::Charging,
                 source: Source::IoKit,
                 connected,
                 read_at: Timestamp::from_unix(1_785_643_199),
             }],
+            warnings: Vec::new(),
         }
+    }
+
+    fn snapshot(level: Option<u8>, connected: bool) -> Snapshot {
+        one_device(
+            TRACKPAD,
+            Levels {
+                main: level,
+                ..Levels::default()
+            },
+            connected,
+        )
+    }
+
+    fn earbuds(connected: bool) -> Snapshot {
+        one_device(
+            EARBUDS,
+            Levels {
+                left: Some(88),
+                right: Some(91),
+                case: Some(72),
+                ..Levels::default()
+            },
+            connected,
+        )
     }
 
     /// A directory that removes itself, so a failing test leaves nothing behind.
@@ -293,6 +315,23 @@ mod tests {
             progress(&snapshot(Some(85), true), "trackpad", 100),
             Progress::Below
         );
+    }
+
+    #[test]
+    fn a_multi_battery_device_is_measured_by_its_emptiest_part() {
+        assert_eq!(
+            progress(&earbuds(true), "soundcore", 90),
+            Progress::Below,
+            "the case is at 72%, whatever the buds say"
+        );
+        assert_eq!(
+            progress(&earbuds(true), "soundcore", 60),
+            Progress::Reached {
+                device: EARBUDS.to_string(),
+                level: 72
+            }
+        );
+        assert_eq!(progress(&earbuds(false), "soundcore", 60), Progress::Absent);
     }
 
     #[test]
@@ -370,19 +409,23 @@ mod tests {
     }
 
     #[test]
+    fn two_targets_for_one_device_register_as_two_watches() {
+        let scratch = Scratch::new("targets");
+
+        let eighty = register(&args("trackpad", 80, None), &scratch.0).expect("writes a watch");
+        let full = register(&args("trackpad", 100, None), &scratch.0).expect("writes a watch");
+
+        assert_ne!(eighty, full, "the second must not overwrite the first");
+        assert_eq!(Watch::read(&eighty).expect("reads back").target, 80);
+        assert_eq!(Watch::read(&full).expect("reads back").target, 100);
+    }
+
+    #[test]
     fn a_notification_body_survives_the_quotes_a_device_name_may_carry() {
         assert_eq!(applescript_string("plain"), "\"plain\"");
         assert_eq!(
             applescript_string("a \"quoted\" back\\slash"),
             "\"a \\\"quoted\\\" back\\\\slash\""
-        );
-    }
-
-    #[test]
-    fn no_daemon_drains_watches_yet() {
-        assert!(
-            !daemon_is_running(),
-            "wait polls in process until the daemon ships"
         );
     }
 }

@@ -19,6 +19,10 @@ pub enum Format {
     Human,
     Json,
     /// A bare integer percentage, for direct substitution into scripts.
+    ///
+    /// A bare number has nowhere to carry the `last seen` label the other
+    /// formats do, so it can be data of unknown age; a script that needs
+    /// freshness reads `connected` from `--json` instead.
     Number,
 }
 
@@ -39,14 +43,9 @@ impl Format {
 /// paired devices that report nothing; only the exit code turns on whether a
 /// usable reading was among them.
 pub fn list(snapshot: &Snapshot, json: bool, all: bool) -> Result<(), Failure> {
-    let devices: Vec<&Device> = if all {
-        snapshot.devices.iter().collect()
-    } else {
-        snapshot.with_battery().collect()
-    };
-
-    if !devices.is_empty() {
-        println!("{}", render_list(&devices, json)?);
+    let listing = listing(snapshot, json, all)?;
+    if !listing.is_empty() {
+        println!("{listing}");
     }
 
     snapshot
@@ -54,6 +53,24 @@ pub fn list(snapshot: &Snapshot, json: bool, all: bool) -> Result<(), Failure> {
         .next()
         .map(|_| ())
         .ok_or_else(|| Failure::NoDevice(NO_BATTERY.to_string()))
+}
+
+/// What `list` prints, which is nothing at all only when there is no table.
+///
+/// A JSON listing is always an array, empty or not, so a script piping into
+/// `jq` parses on a machine with nothing paired.
+fn listing(snapshot: &Snapshot, json: bool, all: bool) -> Result<String, Failure> {
+    let devices: Vec<&Device> = if all {
+        snapshot.devices.iter().collect()
+    } else {
+        snapshot.with_battery().collect()
+    };
+
+    match (json, devices.is_empty()) {
+        (true, _) => encode(&devices),
+        (_, true) => Ok(String::new()),
+        _ => Ok(table(&devices)),
+    }
 }
 
 /// Prints the one device `--device` selected, or the only one there is.
@@ -65,37 +82,30 @@ pub fn status(snapshot: &Snapshot, needle: Option<&str>, format: Format) -> Resu
 
 /// Picks the device `status` reports on.
 ///
-/// With no `--device` a single battery device is unambiguous and is used; more
-/// than one is a usage error rather than a silent guess.
-fn select<'a>(snapshot: &'a Snapshot, needle: Option<&'a str>) -> Result<&'a Device, Failure> {
-    match needle {
-        Some(needle) => snapshot
-            .matching(needle)
-            .find(|device| device.has_battery())
-            .ok_or_else(|| {
-                Failure::NoDevice(format!(
-                    "no device matching `{needle}` has a battery (is it connected?)"
-                ))
-            }),
-        None => {
-            let mut with_battery = snapshot.with_battery();
+/// One policy whether or not `--device` was given: exactly one battery device
+/// is the answer, and several is a usage error naming them rather than a silent
+/// pick of whichever happens to sort first.
+fn select<'a>(snapshot: &'a Snapshot, needle: Option<&str>) -> Result<&'a Device, Failure> {
+    let matched: Vec<&Device> = snapshot
+        .with_battery()
+        .filter(|device| needle.is_none_or(|needle| device.matches(needle)))
+        .collect();
 
-            match (with_battery.next(), with_battery.next()) {
-                (Some(only), None) => Ok(only),
-                (Some(_), Some(_)) => Err(Failure::Error(
-                    "more than one device has a battery, name one with --device".to_string(),
-                )),
-                _ => Err(Failure::NoDevice(NO_BATTERY.to_string())),
-            }
-        }
-    }
-}
-
-fn render_list(devices: &[&Device], json: bool) -> Result<String, Failure> {
-    if json {
-        encode(&devices)
-    } else {
-        Ok(table(devices))
+    match matched.as_slice() {
+        [only] => Ok(only),
+        [] => Err(Failure::NoDevice(needle.map_or_else(
+            || NO_BATTERY.to_string(),
+            |needle| format!("no device matching `{needle}` has a battery (is it connected?)"),
+        ))),
+        several => Err(Failure::Error(format!(
+            "{} devices have a battery ({}), name one with --device",
+            several.len(),
+            several
+                .iter()
+                .map(|device| device.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
     }
 }
 
@@ -117,7 +127,26 @@ fn encode<T: Serialize>(value: &T) -> Result<String, Failure> {
 
 /// The one line human reading, laid out as the shell POC lays it out.
 fn line(device: &Device) -> String {
-    format!("{}  {}  {}", device.name, percent(device), state(device))
+    format!("{}  {}  {}", name(device), percent(device), state(device))
+}
+
+/// A device name flattened onto one line.
+///
+/// macOS lets a device be named almost anything, and a control character in a
+/// name would break both this line and the table's column arithmetic. Only the
+/// rendering is flattened, so JSON stays faithful to what macOS reported.
+fn name(device: &Device) -> String {
+    device
+        .name
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
 /// The plain text table `blubat list` prints.
@@ -153,7 +182,7 @@ fn table(devices: &[&Device]) -> String {
 
 fn row(device: &Device) -> [String; 5] {
     [
-        device.name.clone(),
+        name(device),
         device.address.to_string(),
         percent(device),
         state(device),
@@ -235,6 +264,7 @@ mod tests {
         Snapshot {
             read_at: READ_AT,
             devices,
+            warnings: Vec::new(),
         }
     }
 
@@ -243,6 +273,50 @@ mod tests {
         assert_eq!(Format::of(false, false), Format::Human);
         assert_eq!(Format::of(true, false), Format::Json);
         assert_eq!(Format::of(false, true), Format::Number);
+        assert_eq!(
+            Format::of(true, true),
+            Format::Json,
+            "clap forbids the pair, and JSON is the safer resolution of it"
+        );
+    }
+
+    #[test]
+    fn listing_prints_only_battery_devices_unless_all_was_asked_for() {
+        let reading = snapshot(vec![keyboard(), trackpad()]);
+
+        let batteries = listing(&reading, false, false).expect("a table");
+        assert!(batteries.contains("Magic Trackpad"), "{batteries}");
+        assert!(!batteries.contains("MX Keys"), "{batteries}");
+
+        let everything = listing(&reading, false, true).expect("a table");
+        assert!(everything.contains("MX Keys"), "{everything}");
+    }
+
+    #[test]
+    fn listing_json_is_an_array_even_when_there_is_nothing_to_list() {
+        assert_eq!(
+            listing(&snapshot(Vec::new()), true, false).expect("json"),
+            "[]"
+        );
+        assert_eq!(
+            listing(&snapshot(Vec::new()), false, false).expect("no table"),
+            "",
+            "the human listing has nothing to lay out"
+        );
+    }
+
+    #[test]
+    fn what_list_prints_is_decoupled_from_the_code_it_exits_with() {
+        assert!(
+            list(&snapshot(vec![trackpad()]), false, false).is_ok(),
+            "a usable reading"
+        );
+
+        for (all, note) in [(true, "listed but unusable"), (false, "not even listed")] {
+            let failure = list(&snapshot(vec![keyboard()]), false, all).expect_err(note);
+
+            assert_eq!(failure.code(), 3, "{note}");
+        }
     }
 
     #[test]
@@ -279,6 +353,18 @@ mod tests {
     }
 
     #[test]
+    fn a_needle_matching_several_batteries_is_the_same_usage_error() {
+        let reading = snapshot(vec![airpods(), trackpad()]);
+
+        let failure = select(&reading, Some("Paul")).expect_err("ambiguous");
+
+        assert_eq!(failure.code(), 1);
+        assert!(failure.to_string().contains("--device"), "{failure}");
+        assert!(failure.to_string().contains("AirPods Pro"), "{failure}");
+        assert!(failure.to_string().contains("Magic Trackpad"), "{failure}");
+    }
+
+    #[test]
     fn a_match_without_a_battery_is_the_same_as_no_match() {
         let reading = snapshot(vec![keyboard(), trackpad()]);
 
@@ -302,6 +388,14 @@ mod tests {
         assert_eq!(
             line(&trackpad()),
             "Paul\u{2019}s Magic Trackpad  85%  charging"
+        );
+        assert_eq!(
+            line(&Device {
+                charge: ChargeState::Discharging,
+                ..trackpad()
+            }),
+            "Paul\u{2019}s Magic Trackpad  85%  on battery",
+            "the POC's wording for a device running down"
         );
         assert_eq!(
             line(&airpods()),
@@ -341,6 +435,21 @@ mod tests {
     }
 
     #[test]
+    fn a_name_carrying_a_control_character_still_renders_on_one_line() {
+        let awkward = Device {
+            name: "Newline\nName".to_string(),
+            ..trackpad()
+        };
+
+        assert_eq!(line(&awkward), "Newline Name  85%  charging");
+        assert_eq!(
+            table(&[&awkward]).lines().count(),
+            2,
+            "a header and one row, not three lines"
+        );
+    }
+
+    #[test]
     fn number_output_is_the_lowest_level_and_nothing_else() {
         assert_eq!(
             render_status(&trackpad(), Format::Number).expect("a level"),
@@ -348,7 +457,28 @@ mod tests {
         );
         assert_eq!(
             render_status(&airpods(), Format::Number).expect("a level"),
-            "68"
+            "68",
+            "a bare number cannot say `last seen`, so a disconnected level is still printed"
+        );
+        assert_eq!(
+            render_status(
+                &device("Flat Battery", "aa-bb-cc-00-00-0a", Some(0)),
+                Format::Number
+            )
+            .expect("a level"),
+            "0",
+            "empty is a reading, not a missing one"
+        );
+    }
+
+    #[test]
+    fn number_output_has_nothing_to_print_without_a_level() {
+        let failure = render_status(&keyboard(), Format::Number).expect_err("no level");
+
+        assert_eq!(
+            failure.code(),
+            3,
+            "unreachable through select, still honest"
         );
     }
 
@@ -369,12 +499,11 @@ mod tests {
 
     #[test]
     fn list_json_is_an_array_of_those_same_objects() {
-        let devices = [airpods(), trackpad()];
+        let reading = snapshot(vec![airpods(), trackpad()]);
 
-        let json: serde_json::Value = serde_json::from_str(
-            &render_list(&devices.iter().collect::<Vec<_>>(), true).expect("json"),
-        )
-        .expect("valid json");
+        let json: serde_json::Value =
+            serde_json::from_str(&listing(&reading, true, false).expect("json"))
+                .expect("valid json");
 
         assert_eq!(json.as_array().map(Vec::len), Some(2));
         assert_eq!(json[0]["name"], "Paul\u{2019}s AirPods Pro");

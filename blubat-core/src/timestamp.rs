@@ -1,6 +1,6 @@
 use std::fmt;
 use std::str::FromStr;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -30,6 +30,14 @@ impl Timestamp {
     pub const fn unix(self) -> i64 {
         self.0
     }
+
+    /// This moment advanced by `duration`, clamped rather than wrapped.
+    pub(crate) fn plus(self, duration: Duration) -> Self {
+        Self(
+            self.0
+                .saturating_add(i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)),
+        )
+    }
 }
 
 impl fmt::Display for Timestamp {
@@ -53,7 +61,7 @@ impl FromStr for Timestamp {
     fn from_str(text: &str) -> Result<Self> {
         parse_utc(text)
             .map(Timestamp)
-            .ok_or_else(|| Error::Parse(format!("`{text}` is not an RFC 3339 UTC timestamp")))
+            .ok_or_else(|| Error::Format(format!("`{text}` is not an RFC 3339 UTC timestamp")))
     }
 }
 
@@ -217,7 +225,28 @@ mod tests {
     }
 
     #[test]
-    fn now_is_after_this_code_was_written() {
-        assert!(Timestamp::now().unix() > 1_785_000_000);
+    fn now_round_trips_through_its_own_rendering() {
+        let now = Timestamp::now();
+
+        assert_eq!(
+            now.to_string().parse::<Timestamp>().expect("round trip"),
+            now
+        );
+    }
+
+    #[test]
+    fn a_deadline_is_this_moment_plus_a_duration() {
+        let start = Timestamp::from_unix(1_785_643_199);
+
+        assert_eq!(start.plus(Duration::ZERO), start);
+        assert_eq!(
+            start.plus(Duration::from_secs(600)),
+            Timestamp::from_unix(1_785_643_799)
+        );
+        assert_eq!(
+            Timestamp::from_unix(i64::MAX).plus(Duration::from_secs(1)),
+            Timestamp::from_unix(i64::MAX),
+            "a deadline no clock reaches beats an overflow"
+        );
     }
 }
