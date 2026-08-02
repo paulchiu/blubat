@@ -14,9 +14,11 @@ merges them, keeping the source and freshness of each reading visible.
 
 Pre-release. Milestone M0 is complete: both data sources, the merge, and the
 one-shot CLI (`list`, `status`, `wait`) that reaches parity with the
-`trackpad-battery` shell script blubat takes its inspiration from. The live
-TUI, threshold notifications and the background daemon come after it, so bare
-`blubat` prints help rather than opening a dashboard for now.
+`trackpad-battery` shell script blubat takes its inspiration from. M1 is
+underway: bare `blubat` opens a live dashboard listing every device with its
+level, charge state, trend and freshness, sorted, filtered and narrowed from
+the keyboard. The device detail view, threshold notifications and the
+background daemon come after it.
 
 blubat reads no configuration file and writes nothing, with one exception:
 `blubat wait` may create `~/.local/state/blubat/watches/`.
@@ -24,6 +26,7 @@ blubat reads no configuration file and writes nothing, with one exception:
 ## Usage
 
 ```
+blubat                              # the live dashboard: ? lists every key
 blubat list [--json] [--all]        # every device that reports a battery
 blubat status [--device <match>]    # one device, human readable
               [--json | --number]   # machine readable variants
@@ -50,6 +53,32 @@ Paul's Magic Trackpad  83%  on battery
 
 $ blubat wait --device trackpad --until 100 --interval 5m
 ```
+
+## Dashboard
+
+Bare `blubat` opens the dashboard, or prints the command help and exits 0 when
+there is no terminal to draw one on, so a piped `blubat` still answers. The trend
+column is a six cell sparkline over the levels read this run, with dots for a
+device nothing has been read from yet. Connected devices come first; disconnected
+ones sit under a dimmed `inactive` heading with their own count, keeping their
+last seen level out of the critical summary. A device no source reports a level
+for is listed as `unreported` rather than dropped, and a narrow terminal gives
+up columns from the right rather than breaking the table.
+
+```
+q      quit                  s  cycle the order: level, name, last seen
+j/k    move the selection    /  filter on name or address, esc clears it
+enter  detail view, later    h  hide the selected device, H show hidden again
+?      the full keymap
+```
+
+`q` and ctrl+c both leave the dashboard; the keymap overlay takes the keyboard
+while it is open, so `?` closes it before anything else responds again.
+
+Hiding lasts for the session: nothing is written anywhere. The charging mark is
+ascii by default and becomes the Nerd Font bolt when the environment says a
+Nerd Font is in use, which is a guess: set `BLUBAT_NERD_FONT=1` or `=0` to
+settle it either way.
 
 A disconnected device keeps the level macOS last saw, which carries no
 timestamp and can be arbitrarily old. It is labelled `last seen` wherever it is
@@ -133,8 +162,10 @@ blubat list --json | jq -r '.[] | select(.connected) | "\(.name) \(.levels.main)
 - `blubat-core`: the device model, both data sources, the poller, the event
   engine and the config types. Depends on no terminal library, so a frontend
   other than the TUI stays buildable.
-- `blubat`: the binary, holding the CLI and (later) the TUI over that core. It
-  owns argument parsing, rendering and exit codes, and nothing else.
+- `blubat`: the binary, holding the CLI and the TUI over that core. It owns
+  argument parsing, rendering and exit codes, and nothing else. The dashboard
+  is one loop over one channel: keypresses and readings arrive as events, a
+  pure `update` folds each into the next state, and a pure `render` draws it.
 
 ## Development
 
