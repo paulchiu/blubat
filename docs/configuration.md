@@ -46,8 +46,9 @@ ok       = "#57ab5a"
 charging_glyph = "+"          # overrides the Nerd Font guess either way
 
 [dashboard]
-hidden = ["MX Master"]        # matches, as --device takes them; `h` writes here
-sort   = "level"              # level, name or last_seen
+hidden        = ["MX Master"] # matches, as --device takes them; `h` writes here
+sort          = "level"       # level, name or last_seen
+hide_inactive = false         # whether the disconnected section opens shown
 
 # Per device overrides. `match` is the same case insensitive substring
 # `--device` takes, tested against the name and the address. The first
@@ -85,6 +86,10 @@ removes whatever was hiding it. The edit is surgical, so a hand written file
 keeps its comments, its blank lines and the order of everything in it. `r` on
 the [dashboard](dashboard.md) re-reads the list along with the rest of the
 file, which is what settles a hand edit made while the dashboard is open.
+
+`[dashboard] hide_inactive` only sets what the dashboard opens showing: the
+`i` key toggles it for the run and, unlike `hidden`, blubat never writes it
+back.
 
 ## The `config` subcommand
 

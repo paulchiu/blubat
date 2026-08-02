@@ -58,6 +58,7 @@ are:
 q      quit                  s  cycle the order: level, name, last seen
 j/k    move the selection    /  filter on name or address, esc clears it
 enter  the detail view       h  hide the selected device, H show hidden again
+i      hide the inactive section, i again shows it
 r      reload the config     ?  the full keymap
 ```
 

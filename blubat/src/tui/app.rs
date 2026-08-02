@@ -25,7 +25,11 @@ pub struct Binding {
 }
 
 /// The dashboard keymap, in the order the footer and the overlay list it.
-pub const KEYMAP: [Binding; 9] = [
+///
+/// `H` and `i` print here as they read while the section they toggle is
+/// showing; [`dashboard_keys`] is what actually resolves them against the
+/// view in front of the keyboard.
+pub const KEYMAP: [Binding; 10] = [
     Binding {
         keys: "q",
         label: "quit",
@@ -55,6 +59,10 @@ pub const KEYMAP: [Binding; 9] = [
         label: "show hidden",
     },
     Binding {
+        keys: "i",
+        label: "hide inactive",
+    },
+    Binding {
         keys: "r",
         label: "reload",
     },
@@ -63,6 +71,33 @@ pub const KEYMAP: [Binding; 9] = [
         label: "help",
     },
 ];
+
+/// [`KEYMAP`], with `H` and `i` reading what pressing them will do to `view`
+/// rather than what they did in the file that wrote them.
+pub(super) fn dashboard_keys(view: &View) -> Vec<Binding> {
+    KEYMAP
+        .iter()
+        .map(|binding| match binding.keys {
+            "H" => Binding {
+                label: if view.show_hidden {
+                    "hide hidden"
+                } else {
+                    "show hidden"
+                },
+                ..*binding
+            },
+            "i" => Binding {
+                label: if view.hide_inactive {
+                    "show inactive"
+                } else {
+                    "hide inactive"
+                },
+                ..*binding
+            },
+            _ => *binding,
+        })
+        .collect()
+}
 
 /// The key a filter that is no longer being typed still answers to.
 ///
@@ -182,6 +217,7 @@ pub enum Action {
     Back,
     ToggleHidden,
     ShowHidden,
+    ToggleInactive,
     /// Asks the loop to read the config file again, which the reducer cannot.
     Reload,
     /// Enter, which opens the detail view over the selected device and closes
@@ -201,6 +237,7 @@ impl Action {
             Key::Char('/') => Some(Action::OpenFilter),
             Key::Char('h') => Some(Action::ToggleHidden),
             Key::Char('H') => Some(Action::ShowHidden),
+            Key::Char('i') => Some(Action::ToggleInactive),
             Key::Char('r') => Some(Action::Reload),
             Key::Enter => Some(Action::Detail),
             Key::Escape => Some(Action::Back),
@@ -307,7 +344,7 @@ impl App {
             running: true,
             now,
             interval,
-            view: View::hiding(&config.dashboard.hidden),
+            view: View::hiding(&config.dashboard.hidden, config.dashboard.hide_inactive),
             look,
             config,
             advertised: AdvertisedThresholds::new(),
@@ -410,10 +447,11 @@ impl App {
             Mode::Keymap => OVERLAY_KEYS.to_vec(),
             Mode::Filtering => FILTER_KEYS.to_vec(),
             Mode::Detail => DETAIL_KEYS.to_vec(),
-            Mode::Dashboard if self.view.filter.narrows() => {
-                KEYMAP.iter().copied().chain([CLEAR_FILTER]).collect()
-            }
-            Mode::Dashboard => KEYMAP.to_vec(),
+            Mode::Dashboard if self.view.filter.narrows() => dashboard_keys(&self.view)
+                .into_iter()
+                .chain([CLEAR_FILTER])
+                .collect(),
+            Mode::Dashboard => dashboard_keys(&self.view),
         }
     }
 }
@@ -568,6 +606,7 @@ fn act(app: App, action: Action) -> App {
         Action::Back => backed(app),
         Action::ToggleHidden => hide_selected(app),
         Action::ShowHidden => viewed(app, |view| view.show_hidden = !view.show_hidden),
+        Action::ToggleInactive => viewed(app, |view| view.hide_inactive = !view.hide_inactive),
         Action::Reload => App {
             reload: true,
             ..app
@@ -770,7 +809,7 @@ pub(super) mod tests {
 
     /// Every key a person can reach, bound or not.
     fn every_key() -> Vec<Key> {
-        "qjksh H/?rxz1"
+        "qjksh H/?rixz1"
             .chars()
             .map(Key::Char)
             .chain([Key::Enter, Key::Escape, Key::Backspace])
@@ -863,7 +902,7 @@ pub(super) mod tests {
         let open = press(loaded(), "?");
 
         assert_eq!(
-            press(open.clone(), "jksh/H"),
+            press(open.clone(), "jksh/Hi"),
             open,
             "the dashboard keys do nothing underneath the overlay"
         );
@@ -1196,6 +1235,87 @@ pub(super) mod tests {
         assert_eq!(names(&press(unhidden, "H")).len(), 3);
     }
 
+    /// A reading with one device of each section, for the tests below.
+    fn with_an_inactive_device() -> App {
+        update(
+            app(),
+            Event::Reading(reading(vec![
+                device("Magic Trackpad", "30-82-16-f2-24-90", Some(85)),
+                Device {
+                    connected: false,
+                    ..device("AirPods Pro", "74-15-f5-02-8e-38", Some(4))
+                },
+            ])),
+        )
+    }
+
+    #[test]
+    fn i_toggles_whether_the_inactive_section_is_shown() {
+        let both = with_an_inactive_device();
+        assert_eq!(names(&both), ["Magic Trackpad", "AirPods Pro"]);
+
+        let hidden = press(both.clone(), "i");
+        assert!(hidden.view.hide_inactive);
+        assert_eq!(names(&hidden), ["Magic Trackpad"]);
+
+        assert_eq!(
+            names(&press(hidden, "i")),
+            ["Magic Trackpad", "AirPods Pro"],
+            "the same key both ways"
+        );
+    }
+
+    #[test]
+    fn hiding_the_inactive_section_pulls_the_selection_back_onto_a_row() {
+        let on_the_inactive_row = press(with_an_inactive_device(), "j");
+        assert_eq!(on_the_inactive_row.selected, 1);
+
+        let hidden = press(on_the_inactive_row, "i");
+        assert_eq!(hidden.selected, 0, "the row it sat on is gone");
+        assert_eq!(
+            hidden.current().map(|device| device.name.as_str()),
+            Some("Magic Trackpad")
+        );
+    }
+
+    #[test]
+    fn hiding_the_inactive_section_asks_the_loop_for_nothing() {
+        let hidden = press(with_an_inactive_device(), "i");
+
+        assert!(!hidden.save_hidden, "i never writes the config file");
+    }
+
+    #[test]
+    fn the_dashboard_can_open_with_the_inactive_section_already_hidden() {
+        let opened = App::new(
+            INTERVAL,
+            READ_AT,
+            Look::of(&Theme::default(), Glyphs::ASCII),
+            config("[dashboard]\nhide_inactive = true\n"),
+        );
+
+        assert!(opened.view.hide_inactive);
+    }
+
+    #[test]
+    fn h_and_i_labels_follow_the_state_they_toggle() {
+        let label = |app: &App, keys: &str| {
+            app.keys()
+                .iter()
+                .find(|binding| binding.keys == keys)
+                .map(|binding| binding.label)
+                .unwrap_or_else(|| panic!("{keys} is not advertised"))
+        };
+
+        let closed = loaded();
+        assert_eq!(label(&closed, "H"), "show hidden");
+        assert_eq!(label(&closed, "i"), "hide inactive");
+
+        let toggled = press(press(closed, "H"), "i");
+        assert_eq!(label(&toggled, "H"), "hide hidden");
+        assert_eq!(label(&toggled, "i"), "show inactive");
+    }
+
     #[test]
     fn hiding_nothing_hides_nothing() {
         let empty = press(app(), "h");
@@ -1305,7 +1425,7 @@ pub(super) mod tests {
         let open = key(loaded(), Key::Enter);
 
         assert_eq!(
-            press(open.clone(), "jksh/H?r"),
+            press(open.clone(), "jksh/Hi?r"),
             open,
             "the dashboard keys do nothing while one device is on screen"
         );

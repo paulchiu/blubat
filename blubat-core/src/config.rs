@@ -314,6 +314,9 @@ pub struct Dashboard {
     /// which are the only thing blubat ever writes back into the file.
     pub hidden: Vec<String>,
     pub sort: Sort,
+    /// Whether the dashboard opens with the disconnected section already
+    /// left off. `i` toggles this for the run; blubat never writes it back.
+    pub hide_inactive: bool,
 }
 
 /// The order the dashboard lists devices in.
@@ -447,8 +450,9 @@ low      = "#c69026"
 ok       = "#57ab5a"
 
 [dashboard]
-hidden = ["MX Master"]
-sort   = "level"
+hidden        = ["MX Master"]
+sort          = "level"
+hide_inactive = true
 
 [[device]]
 match = "trackpad"
@@ -515,6 +519,7 @@ timeout  = "10s"
         assert_eq!(config.defaults.low, Some(20));
         assert_eq!(config.dashboard.hidden, ["MX Master"]);
         assert_eq!(config.dashboard.sort, Sort::Level);
+        assert!(config.dashboard.hide_inactive);
         assert_eq!(config.devices.len(), 3);
         assert_eq!(config.hooks.len(), 3);
         assert_eq!(config.hooks[0].event, Event::LowBattery);
@@ -534,6 +539,10 @@ timeout  = "10s"
         assert_eq!(
             Config::default().thresholds_for(&trackpad(), Advertised::NONE),
             Thresholds::BUILT_IN
+        );
+        assert!(
+            !Config::default().dashboard.hide_inactive,
+            "shown by default"
         );
     }
 
