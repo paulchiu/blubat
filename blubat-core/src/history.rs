@@ -214,6 +214,7 @@ mod tests {
                     ..device
                 })
                 .collect(),
+            degraded: false,
             warnings: Vec::new(),
         }
     }
@@ -430,6 +431,7 @@ mod tests {
             history.record(&Snapshot {
                 read_at: Timestamp::from_unix(at),
                 devices: vec![cached.clone()],
+                degraded: false,
                 warnings: Vec::new(),
             });
         }

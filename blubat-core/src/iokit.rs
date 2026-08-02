@@ -23,7 +23,9 @@ use crate::timestamp::Timestamp;
 /// It bounds the iteration only. `BatteryPercent` is what decides whether an
 /// entry counts as a reading, so a driver that carries the key but not the
 /// class is a matter of widening this constant, not of reworking the parse.
-const SERVICE_CLASS: &str = "AppleDeviceManagementHIDEventService";
+/// [`crate::presence`] watches the same class, so what is read and what is
+/// noticed arriving cannot come apart.
+pub(crate) const SERVICE_CLASS: &str = "AppleDeviceManagementHIDEventService";
 
 const KEYS: [&str; 8] = [
     "Product",

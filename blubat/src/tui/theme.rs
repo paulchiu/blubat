@@ -215,15 +215,42 @@ pub fn percent(level: Option<u8>) -> String {
 ///
 /// Two strings rather than one, so each half can take its own colour while the
 /// pair always adds up to the same width and the rows keep their rhythm.
-pub fn battery_bar(level: Option<u8>) -> (String, String) {
+pub fn bar(level: Option<u8>, width: usize) -> (String, String) {
     let filled = level
-        .map_or(0, |level| (usize::from(level) * BAR_WIDTH + 50) / 100)
-        .min(BAR_WIDTH);
+        .map_or(0, |level| (usize::from(level) * width + 50) / 100)
+        .min(width);
 
-    (
-        "\u{2588}".repeat(filled),
-        "\u{2591}".repeat(BAR_WIDTH - filled),
-    )
+    ("\u{2588}".repeat(filled), "\u{2591}".repeat(width - filled))
+}
+
+/// The table's bar, which is [`BAR_WIDTH`] cells of [`bar`].
+pub fn battery_bar(level: Option<u8>) -> (String, String) {
+    bar(level, BAR_WIDTH)
+}
+
+/// A charge or drain rate, in the percent per hour the detail view names it by.
+///
+/// Unsigned: the direction is spelled out beside it, and a minus in front of a
+/// drain rate would say the same thing twice.
+pub fn rate(percent_per_hour: f64) -> String {
+    format!("{:.1}%/h", percent_per_hour.abs())
+}
+
+/// How long something takes, in the two largest units that say anything.
+///
+/// Two rather than one, since `1h 40m` and `2h` are different answers to
+/// whether there is time to go and find the cable.
+pub fn span(seconds: i64) -> String {
+    let minutes = (seconds.max(0) + 30) / 60;
+    let (hours, minutes) = (minutes / 60, minutes % 60);
+
+    match (hours / 24, hours % 24, minutes) {
+        (0, 0, minutes) => format!("{minutes}m"),
+        (0, hours, 0) => format!("{hours}h"),
+        (0, hours, minutes) => format!("{hours}h {minutes}m"),
+        (days, 0, _) => format!("{days}d"),
+        (days, hours, _) => format!("{days}d {hours}h"),
+    }
 }
 
 /// Recent levels as a sparkline, oldest first and always [`SPARK_WIDTH`] cells.
@@ -483,6 +510,44 @@ mod tests {
             "▅▅▅▅▅▅",
             "an empty battery is as flat as a full one"
         );
+    }
+
+    #[test]
+    fn a_bar_of_any_width_fills_in_proportion_and_stays_that_width() {
+        for width in [0, 1, 8, BAR_WIDTH, 40] {
+            for level in [None, Some(0), Some(37), Some(100)] {
+                let (filled, trough) = bar(level, width);
+
+                assert_eq!(
+                    filled.chars().count() + trough.chars().count(),
+                    width,
+                    "{level:?} at {width}"
+                );
+            }
+        }
+
+        assert_eq!(bar(Some(50), 40).0.chars().count(), 20);
+        assert_eq!(bar(Some(100), 40).0.chars().count(), 40);
+        assert_eq!(bar(None, 40).0.chars().count(), 0);
+    }
+
+    #[test]
+    fn a_rate_reads_as_percent_per_hour_whichever_way_it_points() {
+        assert_eq!(rate(4.24), "4.2%/h");
+        assert_eq!(rate(-4.24), "4.2%/h", "the direction is named beside it");
+        assert_eq!(rate(0.0), "0.0%/h");
+        assert_eq!(rate(18.0), "18.0%/h");
+    }
+
+    #[test]
+    fn a_span_reads_in_the_two_largest_units_that_say_something() {
+        assert_eq!(span(0), "0m");
+        assert_eq!(span(-90), "0m", "nothing left is not a negative wait");
+        assert_eq!(span(90), "2m", "rounded to the nearest minute");
+        assert_eq!(span(3_600), "1h");
+        assert_eq!(span(6_000), "1h 40m");
+        assert_eq!(span(86_400), "1d");
+        assert_eq!(span(180_000), "2d 2h");
     }
 
     #[test]

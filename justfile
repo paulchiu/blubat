@@ -48,6 +48,13 @@ check-core-isolation:
     fi
     echo "blubat-core depends on nothing beyond: $allowed"
 
+# Assert the checked-in release workflow still matches dist-workspace.toml
+#
+# release.yml is generated rather than written, and nothing else would notice it
+# had gone stale until a tag push, which is the one workflow with no dry run
+dist-check:
+    dist generate --check
+
 # The single definition of CI: the GitHub workflow runs this recipe, so a green
 # run here is a green pipeline
-ci: fmt-check lint test check-core-isolation build
+ci: fmt-check lint test check-core-isolation dist-check build

@@ -1,0 +1,75 @@
+# Versioning and tagging only. Pushing the tag is where this workflow stops:
+# `release.yml`, which cargo-dist generates and owns, triggers on that tag and
+# builds, uploads and publishes everything from there.
+
+name: Version Tag
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.event.pull_request.merged == true
+    # Version bumping only rewrites manifests and the lockfile, so this does not
+    # need the macOS runner that compiling the IOKit code requires.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine Version Bump
+        id: bump
+        uses: actions/github-script@v9
+        with:
+          result-encoding: string
+          script: |
+            const labels = context.payload.pull_request.labels.map(l => l.name);
+            return ['major', 'minor', 'patch'].find(l => labels.includes(l)) ?? '';
+
+      - name: Checkout code
+        if: steps.bump.outputs.result != ''
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+          # A tag pushed with the default GITHUB_TOKEN starts no further
+          # workflows, so release.yml would never see it. RELEASE_TOKEN is a PAT
+          # that can push to this repository; without it the bump and the tag
+          # still land and the release has to be started by hand.
+          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Setup Rust
+        if: steps.bump.outputs.result != ''
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-edit
+        if: steps.bump.outputs.result != ''
+        uses: taiki-e/install-action@v2.85.4
+        with:
+          tool: cargo-edit
+
+      - name: Configure Git
+        if: steps.bump.outputs.result != ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump Version
+        if: steps.bump.outputs.result != ''
+        run: |
+          # Version is inherited from [workspace.package], so one bump moves both
+          # crates and cargo-edit rewrites blubat's pinned dependency on blubat-core.
+          cargo set-version --workspace --bump "${{ steps.bump.outputs.result }}"
+          cargo update -w
+
+          NEW_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+
+          git add Cargo.toml Cargo.lock blubat/Cargo.toml blubat-core/Cargo.toml
+          git commit -m "chore(release): bump version to $NEW_VERSION"
+          git tag "v$NEW_VERSION"
+
+          git push origin main
+          git push origin "v$NEW_VERSION"

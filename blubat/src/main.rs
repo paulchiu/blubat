@@ -7,9 +7,14 @@
 //! has a battery, 1 for anything else.
 
 mod config;
+mod daemon;
+mod effects;
 mod hooks;
+mod lock;
 mod notify;
 mod report;
+#[cfg(test)]
+mod scratch;
 mod tui;
 mod wait;
 
@@ -32,6 +37,13 @@ struct Cli {
     /// Read configuration from this file instead of the resolved one.
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
+    /// Keep blubat's own state in this directory instead of the resolved one.
+    ///
+    /// The installed agent is pinned to the directory that installed it named,
+    /// since launchd hands the daemon almost none of the environment the
+    /// resolved one is worked out from.
+    #[arg(long, global = true, value_name = "PATH")]
+    state_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -58,11 +70,21 @@ enum Command {
         number: bool,
     },
     /// Wait until a device reaches a level, then notify.
+    ///
+    /// With a daemon running the wait is handed to it: blubat registers a
+    /// one-shot watch, prints where it registered it and returns at once, and
+    /// the daemon posts the banner when the level arrives. With no daemon the
+    /// wait polls here until then and holds the terminal while it does.
     Wait(wait::Args),
     /// Show, open or check the configuration file.
     Config {
         #[command(subcommand)]
         command: config::Command,
+    },
+    /// Run blubat in the background, or install the agent that does.
+    Daemon {
+        #[command(subcommand)]
+        command: daemon::Command,
     },
     /// Send a test banner and report the identity it was delivered under.
     ///
@@ -128,6 +150,8 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<(), Failure> {
+    let files = || paths(cli.config.clone(), cli.state_dir.clone());
+
     match cli.command {
         Some(Command::List { json, all }) => report::list(&reading(), json, all),
         Some(Command::Status {
@@ -135,22 +159,27 @@ fn run(cli: Cli) -> Result<(), Failure> {
             json,
             number,
         }) => report::status(&reading(), device.as_deref(), Format::of(json, number)),
-        Some(Command::Wait(args)) => wait::run(&args, &paths(cli.config)?),
-        Some(Command::Config { command }) => config::run(&command, &paths(cli.config)?),
-        Some(Command::NotifyTest) => notify::run(&paths(cli.config)?),
-        None if io::stdout().is_terminal() => tui::run(&paths(cli.config)?),
+        Some(Command::Wait(args)) => wait::run(&args, &files()?),
+        Some(Command::Config { command }) => config::run(&command, &files()?),
+        Some(Command::Daemon { command }) => daemon::run(&command, &files()?),
+        Some(Command::NotifyTest) => notify::run(&files()?),
+        None if io::stdout().is_terminal() => tui::run(&files()?),
         None => offer_the_commands(),
     }
 }
 
-/// Where blubat's files are, with `--config` replacing the resolved config file.
-fn paths(config: Option<PathBuf>) -> Result<Paths, Failure> {
-    let paths = Paths::resolve()?;
+/// Where blubat's files are, with each flag replacing the resolved location.
+fn paths(config: Option<PathBuf>, state_dir: Option<PathBuf>) -> Result<Paths, Failure> {
+    let mut paths = Paths::resolve()?;
 
-    Ok(match config {
-        Some(path) => paths.with_config_file(path),
-        None => paths,
-    })
+    if let Some(path) = config {
+        paths = paths.with_config_file(path);
+    }
+    if let Some(dir) = state_dir {
+        paths = paths.with_state_dir(dir);
+    }
+
+    Ok(paths)
 }
 
 /// What a bare `blubat` says when there is no screen to draw a dashboard on.
@@ -169,14 +198,25 @@ fn offer_the_commands() -> Result<(), Failure> {
 ///
 /// The core hands its warnings back rather than printing them, so a frontend
 /// that owns the screen can place them. This one only owes stdout a clean value.
+/// A degraded reading is said there too rather than in `--json`, which is a
+/// compatibility surface carrying devices rather than anything about the read.
 fn reading() -> Snapshot {
     let snapshot = blubat_core::snapshot();
 
+    if snapshot.degraded {
+        eprintln!("blubat: warning: a source could not be read, so this is its last good answer");
+    }
     for warning in &snapshot.warnings {
         eprintln!("blubat: warning: {warning}");
     }
 
     snapshot
+}
+
+impl From<io::Error> for Failure {
+    fn from(error: io::Error) -> Self {
+        Failure::Error(error.to_string())
+    }
 }
 
 fn fail(failure: Failure) -> ExitCode {

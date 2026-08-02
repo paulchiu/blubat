@@ -10,24 +10,24 @@
 
 mod app;
 mod columns;
-mod effects;
+mod detail;
 mod events;
 mod glyph;
+mod journal;
 mod render;
 mod terminal;
 mod theme;
 mod view;
 
-use std::io;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
 
 use blubat_core::{Config, Paths, Poll, Tiers, Timestamp};
 
-use crate::Failure;
+use crate::effects::{Effects, Observed};
 use crate::hooks::Outcome;
+use crate::{Failure, lock};
 use app::{App, Event, Notice, update};
-use effects::Effects;
 use glyph::Glyphs;
 use theme::Look;
 
@@ -49,14 +49,26 @@ const REDRAW: Duration = Duration::from_millis(250);
 /// The caller decides there is a terminal to take: `blubat` piped into
 /// something has a reading to offer instead, and that choice belongs where the
 /// bare invocation is handled rather than here.
+///
+/// The lock is taken beside the terminal and released with it: for as long as
+/// the dashboard is up it owns the notifications and the hooks, and a daemon
+/// running behind it records what it sees and fires none of it. A dashboard
+/// that did not get the lock draws everything and announces nothing, so a
+/// second one opened in a second pane does not double every banner.
 pub fn run(paths: &Paths) -> Result<(), Failure> {
+    // Held for the whole function, since dropping it hands the effects back.
+    let (dashboard, unlocked) = claim(paths);
+    let owned = dashboard.is_some();
     let (config, unreadable) = load(paths);
     let tiers = tiers(&config.poll);
     let (notes, events) = events::events(blubat_core::poll(tiers));
-    let (mut effects, stale_state) = Effects::live(paths, reporter(notes));
+    let (effects, stale_state) = Effects::live(paths, reporter(notes));
+    // Nothing can take the lock from a dashboard holding it, so this answer
+    // stands for the whole session.
+    let mut effects = effects.deferring_to(move || !owned);
     let mut session = terminal::Session::open()?;
     let mut app = App {
-        notice: notice([unreadable, stale_state]),
+        notice: notice([unreadable, stale_state, unlocked]),
         advertised: effects.advertised().clone(),
         ..App::new(
             tiers.fast,
@@ -70,22 +82,52 @@ pub fn run(paths: &Paths) -> Result<(), Failure> {
         session.draw(&app)?;
 
         let Some(event) = next(&events) else { break };
-        let problems = match &event {
+        let observed = match &event {
             Event::Reading(reading) => effects.observe(reading, &app.config),
-            _ => Vec::new(),
+            _ => Observed::default(),
         };
 
         app = update(app, event);
 
-        if !problems.is_empty() {
-            app = update(app, Event::Note(Notice::problem(problems.join("; "))));
+        // After the reading they came from, so the detail view's log and the
+        // chart under it are drawn from the same tick.
+        if !observed.raised.is_empty() {
+            app = update(app, Event::Raised(observed.raised));
+        }
+        if !observed.problems.is_empty() {
+            app = update(
+                app,
+                Event::Note(Notice::problem(observed.problems.join("; "))),
+            );
         }
         if app.reload {
             app = update(app, Event::Reloaded(effects.reload()));
         }
+        if app.save_hidden {
+            let written = effects.save_hidden(&app.view.hidden);
+
+            app = update(app, Event::Saved(written));
+        }
     }
 
     Ok(())
+}
+
+/// The lock the dashboard owns the notifications and the hooks by, and the line
+/// to open with when it has none.
+///
+/// Not having it is not a reason to refuse to draw: the dashboard is a monitor
+/// first. It hands the banners and the hooks to whichever blubat does hold it
+/// and says so on the status line.
+fn claim(paths: &Paths) -> (Option<lock::Held>, Option<String>) {
+    match lock::take(&paths.tui_lock()) {
+        Ok(Some(held)) => (Some(held), None),
+        Ok(None) => (
+            None,
+            Some("another blubat owns the notifications and hooks".to_string()),
+        ),
+        Err(problem) => (None, Some(problem)),
+    }
 }
 
 /// The config in force at startup, with whatever was wrong with the file.
@@ -116,11 +158,12 @@ fn tiers(poll: &Poll) -> Tiers {
             DASHBOARD_INTERVAL
         },
         slow: poll.profiler_interval,
+        timeout: poll.profiler_timeout,
     }
 }
 
 /// The one line the dashboard opens with, out of everything that was wrong.
-fn notice(problems: [Option<String>; 2]) -> Option<Notice> {
+fn notice(problems: [Option<String>; 3]) -> Option<Notice> {
     let problems: Vec<String> = problems.into_iter().flatten().collect();
 
     (!problems.is_empty()).then(|| Notice::problem(problems.join("; ")))
@@ -147,18 +190,49 @@ fn next(events: &Receiver<Event>) -> Option<Event> {
     }
 }
 
-impl From<io::Error> for Failure {
-    fn from(error: io::Error) -> Self {
-        Failure::Error(error.to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use crate::scratch::Scratch;
+
     use super::*;
 
     fn poll(written: &str) -> Poll {
         Config::parse(written).expect("the test config parses").poll
+    }
+
+    /// The handover is one file, so the dashboard has to take the very lock the
+    /// daemon asks about before every side effect.
+    #[test]
+    fn a_second_dashboard_hands_the_side_effects_to_the_first() {
+        let scratch = Scratch::new();
+        let paths = scratch.paths();
+
+        let (first, quiet) = claim(&paths);
+        let (second, deferring) = claim(&paths);
+
+        assert!(first.is_some());
+        assert_eq!(quiet, None);
+        assert!(second.is_none(), "the first one up keeps them");
+        assert!(
+            deferring.is_some_and(|line| line.contains("another blubat")),
+            "and the second one says so"
+        );
+        assert!(
+            lock::held(&paths.tui_lock()),
+            "the file the daemon checks is the file the dashboard took"
+        );
+    }
+
+    #[test]
+    fn the_dashboard_closing_hands_the_side_effects_back() {
+        let scratch = Scratch::new();
+        let paths = scratch.paths();
+
+        let (first, _) = claim(&paths);
+        drop(first);
+
+        assert!(!lock::held(&paths.tui_lock()));
+        assert!(claim(&paths).0.is_some());
     }
 
     #[test]
@@ -197,18 +271,19 @@ mod tests {
 
     #[test]
     fn a_startup_problem_becomes_one_line_and_a_clean_start_becomes_none() {
-        assert_eq!(notice([None, None]), None);
+        assert_eq!(notice([None, None, None]), None);
         assert_eq!(
-            notice([Some("config.toml: line 3".to_string()), None]),
+            notice([Some("config.toml: line 3".to_string()), None, None]),
             Some(Notice::problem("config.toml: line 3"))
         );
         assert_eq!(
             notice([
                 Some("bad config".to_string()),
-                Some("bad state".to_string())
+                Some("bad state".to_string()),
+                Some("no lock".to_string())
             ])
             .map(|notice| notice.text),
-            Some("bad config; bad state".to_string())
+            Some("bad config; bad state; no lock".to_string())
         );
     }
 

@@ -61,6 +61,7 @@ fn reading(level: u8, second: i64) -> Snapshot {
             connected: true,
             read_at: at,
         }],
+        degraded: false,
         warnings: Vec::new(),
     }
 }

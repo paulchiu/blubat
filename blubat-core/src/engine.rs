@@ -197,7 +197,7 @@ impl Engine {
             level,
             charge: device.charge,
             settled: state.settle(device.connected, now),
-            overdue: overdue(device, stale_after, now),
+            overdue: device.is_stale(stale_after, now),
         };
 
         let raised = Event::ALL
@@ -260,7 +260,7 @@ impl DeviceState {
             level,
             charge: device.charge,
             settled: Some(device.connected),
-            overdue: overdue(device, stale_after, now),
+            overdue: device.is_stale(stale_after, now),
         };
         let fired = |event| signal(event, observed, thresholds) == Signal::Fire;
 
@@ -371,6 +371,9 @@ struct Observed {
     charge: ChargeState,
     /// The link state a change has settled into, absent while none has.
     settled: Option<bool>,
+    /// Whether the reading is older than the stale window. A timeout that
+    /// clears itself: the next reading inside the window re-arms the pair
+    /// silently, with no recovery event to go with it.
     overdue: bool,
 }
 
@@ -473,14 +476,6 @@ fn battery(event: Event, observed: Observed, thresholds: Thresholds) -> Signal {
         })
 }
 
-/// Whether a device's newest reading is older than the stale window.
-///
-/// Stale is a timeout that clears itself: the next reading to arrive inside the
-/// window re-arms the pair silently, with no recovery event to go with it.
-fn overdue(device: &Device, stale_after: Duration, now: Timestamp) -> bool {
-    now >= device.read_at.plus(stale_after)
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -557,6 +552,7 @@ mod tests {
         Snapshot {
             read_at: at(second),
             devices,
+            degraded: false,
             warnings: Vec::new(),
         }
     }
@@ -868,6 +864,45 @@ mod tests {
         );
 
         assert!(seeded.is_empty(), "{seeded:?}");
+    }
+
+    #[test]
+    fn a_multi_battery_device_is_judged_on_its_emptiest_part() {
+        let config = Config::default();
+        let earbuds = |case, second| Device {
+            levels: Levels {
+                main: None,
+                left: Some(100),
+                right: Some(100),
+                case: Some(case),
+            },
+            ..device(None, second)
+        };
+        let advance = |engine: Engine, case, second| {
+            engine.step(
+                &reading(vec![earbuds(case, second)], second),
+                &config,
+                &AdvertisedThresholds::new(),
+                at(second),
+            )
+        };
+
+        let (engine, _) = advance(Engine::default(), 50, 0);
+        let (engine, raised) = advance(engine, 19, 1);
+        let (_, full) = advance(engine, 100, 2);
+
+        assert_eq!(
+            kinds(&raised),
+            [Event::LowBattery],
+            "a full pair of buds in a flat case is a low battery"
+        );
+        assert_eq!(raised[0].level, Some(19), "the lowest present sub level");
+        assert_eq!(raised[0].previous, Some(50));
+        assert_eq!(
+            kinds(&full),
+            [Event::Charged],
+            "and the whole device is charged only once its case is too"
+        );
     }
 
     #[test]

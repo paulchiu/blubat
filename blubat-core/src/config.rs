@@ -88,14 +88,6 @@ impl Config {
             .filter(move |hook| hook.event == event && hook.covers(device))
     }
 
-    /// Whether the dashboard hides this device.
-    pub fn hides(&self, device: &Device) -> bool {
-        self.dashboard
-            .hidden
-            .iter()
-            .any(|hidden| device.matches(hidden))
-    }
-
     /// The `[[device]]` blocks that match nothing in a reading.
     ///
     /// A warning rather than an error: the device may simply be switched off.
@@ -184,6 +176,13 @@ pub struct Poll {
     /// The slow tier's own interval, cached in between.
     #[serde(deserialize_with = "de_duration")]
     pub profiler_interval: Duration,
+    /// How long `system_profiler` may take before blubat gives up on the call.
+    ///
+    /// Generous on purpose: the call costs about 150ms here and scales with how
+    /// many devices have ever been paired, so this is a ceiling on a wedged
+    /// call rather than a budget for a slow one.
+    #[serde(deserialize_with = "de_duration")]
+    pub profiler_timeout: Duration,
     /// A device silent for this long is stale.
     #[serde(deserialize_with = "de_duration")]
     pub stale_after: Duration,
@@ -195,6 +194,7 @@ impl Default for Poll {
             foreground_interval: Duration::from_secs(30),
             daemon_interval: Duration::from_secs(120),
             profiler_interval: Duration::from_secs(300),
+            profiler_timeout: Tiers::default().timeout,
             stale_after: Duration::from_secs(600),
         }
     }
@@ -209,6 +209,7 @@ impl Poll {
         Tiers {
             fast: self.daemon_interval,
             slow: self.profiler_interval,
+            timeout: self.profiler_timeout,
         }
     }
 }
@@ -309,7 +310,8 @@ impl Hook {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Dashboard {
-    /// Matches for devices hidden from the table, which `h` maintains.
+    /// Matches for devices the dashboard leaves out, which `h` maintains and
+    /// which are the only thing blubat ever writes back into the file.
     pub hidden: Vec<String>,
     pub sort: Sort,
 }
@@ -421,6 +423,7 @@ mod tests {
 foreground_interval = "30s"
 daemon_interval     = "120s"
 profiler_interval   = "5m"
+profiler_timeout    = "15s"
 stale_after         = "10m"
 
 [notifications]
@@ -505,6 +508,7 @@ timeout  = "10s"
         let config = Config::parse(SAMPLE).expect("the sample parses");
 
         assert_eq!(config.poll.profiler_interval, Duration::from_secs(300));
+        assert_eq!(config.poll.profiler_timeout, Duration::from_secs(15));
         assert_eq!(config.poll.stale_after, Duration::from_secs(600));
         assert_eq!(config.notifications.sound, "Glass");
         assert!(!config.notifications.connect);
@@ -748,15 +752,6 @@ timeout  = "10s"
     }
 
     #[test]
-    fn the_hidden_list_matches_devices_the_way_everything_else_does() {
-        let config = Config::parse(SAMPLE).expect("parses");
-
-        assert!(config.hides(&device("MX Master 3S", "aa-bb-cc-00-00-0a")));
-        assert!(!config.hides(&trackpad()));
-        assert!(!Config::default().hides(&trackpad()));
-    }
-
-    #[test]
     fn a_block_matching_nothing_visible_is_named_so_a_typo_shows_up() {
         let config = Config::parse(SAMPLE).expect("parses");
 
@@ -798,6 +793,7 @@ timeout  = "10s"
             Tiers {
                 fast: Duration::from_secs(120),
                 slow: Duration::from_secs(300),
+                timeout: Duration::from_secs(15),
             },
             "the slower tick, since nothing is watching the daemon"
         );
