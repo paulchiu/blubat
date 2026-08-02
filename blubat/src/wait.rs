@@ -2,12 +2,12 @@
 //! the wait to a running daemon and return immediately.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use blubat_core::{Device, Snapshot, Watch, watch_dir};
+use blubat_core::{Config, Device, Paths, Snapshot, Watch, parse_duration};
 
+use crate::notify::{Banner, Desktop, Notifier};
 use crate::{Failure, reading};
 
 /// Arguments of `blubat wait`.
@@ -20,30 +20,34 @@ pub struct Args {
     #[arg(long, short, value_parser = level)]
     until: u8,
     /// How long to leave between readings, such as `90s`, `5m` or `2h`.
-    #[arg(long, short, default_value = "60s", value_parser = duration)]
+    #[arg(long, short, default_value = "60s", value_parser = parse_duration)]
     interval: Duration,
     /// Give up after this long instead of waiting indefinitely.
-    #[arg(long, short, value_parser = duration)]
+    #[arg(long, short, value_parser = parse_duration)]
     timeout: Option<Duration>,
 }
 
 /// Runs `blubat wait` in whichever of its two modes applies.
-pub fn run(args: &Args) -> Result<(), Failure> {
+///
+/// What ends a wait is the `--until` level and nothing else: the config's
+/// thresholds are about the events blubat raises, and a wait is a question the
+/// caller has already answered. The banner that ends one is the config's, since
+/// nothing else decides what a blubat notification sounds like.
+pub fn run(args: &Args, paths: &Paths) -> Result<(), Failure> {
     if daemon_is_running() {
-        watch_dir()
-            .map_err(Failure::from)
-            .and_then(|directory| register(args, &directory))
-            .map(|path| {
-                println!(
-                    "watching {} for {}%, registered as {}",
-                    args.device,
-                    args.until,
-                    path.display()
-                );
-            })
+        register(args, &paths.watch_dir()).map(|path| {
+            println!(
+                "watching {} for {}%, registered as {}",
+                args.device,
+                args.until,
+                path.display()
+            );
+        })
     } else {
+        let sound = Config::load(paths.config_file())?.notifications.sound;
+
         wait_for_level(args, reading).map(|(device, level)| {
-            notify(&format!("{device} is at {level}%, safe to unplug."));
+            notify(&Desktop, &completed(&device, level), &sound);
             println!("{device} reached {level}%");
         })
     }
@@ -139,22 +143,16 @@ fn wait_for_level(args: &Args, read: impl Fn() -> Snapshot) -> Result<(String, u
     }
 }
 
-/// Posts a desktop banner through osascript.
-///
-/// Deliberately minimal: the notifier that replaces this gains a configurable
-/// sound and a delivery fallback. A wait that cannot notify still exits 0.
-fn notify(body: &str) {
-    let script = format!(
-        "display notification {} with title \"blubat\" sound name \"Glass\"",
-        applescript_string(body)
-    );
-
-    let _ = Command::new("osascript").arg("-e").arg(script).status();
+/// What the banner ending a wait says.
+fn completed(device: &str, level: u8) -> String {
+    format!("{device} is at {level}%, safe to unplug.")
 }
 
-/// An AppleScript string literal, with the two characters that can escape it.
-fn applescript_string(text: &str) -> String {
-    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+/// Posts the banner that ends a wait, which cannot fail the wait itself.
+fn notify(notifier: &dyn Notifier, body: &str, sound: &str) {
+    if let Err(problem) = notifier.post(&Banner::new("blubat", body, sound)) {
+        eprintln!("blubat: {problem}");
+    }
 }
 
 /// Parses a battery percentage, rejecting anything no device can report.
@@ -164,24 +162,6 @@ fn level(text: &str) -> Result<u8, String> {
         .ok()
         .filter(|level| *level <= 100)
         .ok_or_else(|| format!("`{text}` is not a percentage between 0 and 100"))
-}
-
-/// Parses a duration written as bare seconds or with an `s`, `m` or `h` suffix.
-fn duration(text: &str) -> Result<Duration, String> {
-    let text = text.trim();
-    let (digits, per_unit) = match text.chars().last() {
-        Some('s') => (&text[..text.len() - 1], 1),
-        Some('m') => (&text[..text.len() - 1], 60),
-        Some('h') => (&text[..text.len() - 1], 3_600),
-        _ => (text, 1),
-    };
-
-    digits
-        .parse::<u64>()
-        .ok()
-        .and_then(|count| count.checked_mul(per_unit))
-        .map(Duration::from_secs)
-        .ok_or_else(|| format!("`{text}` is not a duration such as `90s`, `5m` or `2h`"))
 }
 
 #[cfg(test)]
@@ -277,31 +257,6 @@ mod tests {
     }
 
     #[test]
-    fn a_duration_is_seconds_unless_it_names_its_unit() {
-        assert_eq!(duration("90"), Ok(Duration::from_secs(90)));
-        assert_eq!(duration("90s"), Ok(Duration::from_secs(90)));
-        assert_eq!(duration("5m"), Ok(Duration::from_secs(300)));
-        assert_eq!(duration("2h"), Ok(Duration::from_secs(7_200)));
-        assert_eq!(duration(" 0s "), Ok(Duration::ZERO));
-    }
-
-    #[test]
-    fn a_duration_rejects_what_it_cannot_measure() {
-        for text in [
-            "",
-            "s",
-            "m",
-            "-5s",
-            "5 m",
-            "5d",
-            "1.5h",
-            "99999999999999999999h",
-        ] {
-            assert!(duration(text).is_err(), "{text} should be rejected");
-        }
-    }
-
-    #[test]
     fn progress_completes_only_at_or_above_the_target() {
         assert_eq!(
             progress(&snapshot(Some(100), true), "trackpad", 100),
@@ -367,6 +322,37 @@ mod tests {
     }
 
     #[test]
+    fn the_banner_ending_a_wait_carries_the_sound_the_config_asked_for() {
+        let recorder = crate::notify::fake::Recorder::new();
+        let (device, level) =
+            wait_for_level(&args("trackpad", 100, None), || snapshot(Some(100), true))
+                .expect("it reached the target");
+
+        notify(&recorder, &completed(&device, level), "Ping");
+
+        assert_eq!(recorder.posted().len(), 1);
+        assert_eq!(recorder.posted()[0].title, "blubat");
+        assert_eq!(
+            recorder.posted()[0].body,
+            format!("{TRACKPAD} is at 100%, safe to unplug.")
+        );
+        assert_eq!(
+            recorder.posted()[0].sound.as_deref(),
+            Some("Ping"),
+            "the file's sound, not a hardcoded one"
+        );
+    }
+
+    #[test]
+    fn a_banner_that_cannot_be_delivered_does_not_fail_the_wait() {
+        let recorder = crate::notify::fake::Recorder::failing("no notification centre");
+
+        notify(&recorder, &completed(TRACKPAD, 100), "Glass");
+
+        assert_eq!(recorder.posted().len(), 1, "it was attempted");
+    }
+
+    #[test]
     fn a_wait_that_runs_out_of_time_is_an_error_exit() {
         let failure = wait_for_level(&args("trackpad", 100, Some(Duration::ZERO)), || {
             snapshot(Some(85), true)
@@ -418,14 +404,5 @@ mod tests {
         assert_ne!(eighty, full, "the second must not overwrite the first");
         assert_eq!(Watch::read(&eighty).expect("reads back").target, 80);
         assert_eq!(Watch::read(&full).expect("reads back").target, 100);
-    }
-
-    #[test]
-    fn a_notification_body_survives_the_quotes_a_device_name_may_carry() {
-        assert_eq!(applescript_string("plain"), "\"plain\"");
-        assert_eq!(
-            applescript_string("a \"quoted\" back\\slash"),
-            "\"a \\\"quoted\\\" back\\\\slash\""
-        );
     }
 }

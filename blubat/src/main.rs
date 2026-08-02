@@ -6,15 +6,19 @@
 //! a script can branch on: 0 for a usable reading, 3 when no matching device
 //! has a battery, 1 for anything else.
 
+mod config;
+mod hooks;
+mod notify;
 mod report;
 mod tui;
 mod wait;
 
 use std::fmt;
 use std::io::{self, IsTerminal};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
-use blubat_core::Snapshot;
+use blubat_core::{Paths, Snapshot};
 use clap::{CommandFactory, Parser, Subcommand};
 
 use report::Format;
@@ -25,6 +29,9 @@ use report::Format;
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+    /// Read configuration from this file instead of the resolved one.
+    #[arg(long, global = true, value_name = "PATH")]
+    config: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -52,6 +59,18 @@ enum Command {
     },
     /// Wait until a device reaches a level, then notify.
     Wait(wait::Args),
+    /// Show, open or check the configuration file.
+    Config {
+        #[command(subcommand)]
+        command: config::Command,
+    },
+    /// Send a test banner and report the identity it was delivered under.
+    ///
+    /// blubat has no notification identity of its own, so macOS attributes its
+    /// banners to another app: Terminal, or Script Editor on the fallback path.
+    /// A silent success usually means that borrowed identity is muted, either
+    /// by a Focus mode or in the notification settings for that app.
+    NotifyTest,
 }
 
 /// Why a command stopped, carrying the exit code it owes a script.
@@ -116,10 +135,22 @@ fn run(cli: Cli) -> Result<(), Failure> {
             json,
             number,
         }) => report::status(&reading(), device.as_deref(), Format::of(json, number)),
-        Some(Command::Wait(args)) => wait::run(&args),
-        None if io::stdout().is_terminal() => tui::run(),
+        Some(Command::Wait(args)) => wait::run(&args, &paths(cli.config)?),
+        Some(Command::Config { command }) => config::run(&command, &paths(cli.config)?),
+        Some(Command::NotifyTest) => notify::run(&paths(cli.config)?),
+        None if io::stdout().is_terminal() => tui::run(&paths(cli.config)?),
         None => offer_the_commands(),
     }
+}
+
+/// Where blubat's files are, with `--config` replacing the resolved config file.
+fn paths(config: Option<PathBuf>) -> Result<Paths, Failure> {
+    let paths = Paths::resolve()?;
+
+    Ok(match config {
+        Some(path) => paths.with_config_file(path),
+        None => paths,
+    })
 }
 
 /// What a bare `blubat` says when there is no screen to draw a dashboard on.

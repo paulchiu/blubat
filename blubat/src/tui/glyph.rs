@@ -1,24 +1,42 @@
 //! The glyphs the dashboard draws with, and the guess behind the default.
 
+use std::borrow::Cow;
+
 /// The marks the dashboard draws that not every font can render.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Glyphs {
     /// Prefixes the charging state in the table.
-    pub charging: &'static str,
+    pub charging: Cow<'static, str>,
 }
 
 impl Glyphs {
     /// What every terminal can draw, and what blubat falls back to.
-    pub const ASCII: Self = Self { charging: "+" };
+    pub const ASCII: Self = Self {
+        charging: Cow::Borrowed("+"),
+    };
 
     /// The Nerd Fonts bolt, single width so it cannot shift a column.
     pub const NERD_FONT: Self = Self {
-        charging: "\u{f0e7}",
+        charging: Cow::Borrowed("\u{f0e7}"),
     };
 
     /// The glyphs to draw with, guessed from the environment.
     pub fn detected() -> Self {
         Self::from_env(|name| std::env::var(name).ok())
+    }
+
+    /// The charging mark the config named, in place of the guessed one.
+    ///
+    /// The guess is best effort and the file is not, so anything written wins.
+    /// Blank is nothing written: a mark of no characters would leave the state
+    /// column reading as a stray space.
+    pub fn overridden(self, charging: Option<&str>) -> Self {
+        charging
+            .map(str::trim)
+            .filter(|glyph| !glyph.is_empty())
+            .map_or(self, |glyph| Self {
+                charging: Cow::Owned(glyph.to_string()),
+            })
     }
 
     /// Guesses whether the terminal can draw the Nerd Fonts private use area.
@@ -53,6 +71,13 @@ impl Glyphs {
         } else {
             Self::ASCII
         }
+    }
+}
+
+impl Default for Glyphs {
+    /// What every terminal can draw, since a wrong yes prints tofu.
+    fn default() -> Self {
+        Self::ASCII
     }
 }
 
@@ -125,5 +150,29 @@ mod tests {
     fn the_bolt_is_one_cell_so_it_cannot_shift_a_column() {
         assert_eq!(Glyphs::NERD_FONT.charging.chars().count(), 1);
         assert_eq!(Glyphs::ASCII.charging.chars().count(), 1);
+    }
+
+    #[test]
+    fn a_configured_mark_wins_over_whatever_was_guessed() {
+        assert_eq!(
+            Glyphs::NERD_FONT.overridden(Some("^")).charging,
+            "^",
+            "the escape hatch for a terminal the guess reads wrong"
+        );
+        assert_eq!(
+            Glyphs::ASCII.overridden(Some(" \u{26a1} ")).charging,
+            "\u{26a1}"
+        );
+    }
+
+    #[test]
+    fn nothing_written_leaves_the_guess_standing() {
+        for written in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                Glyphs::NERD_FONT.overridden(written),
+                Glyphs::NERD_FONT,
+                "{written:?}"
+            );
+        }
     }
 }

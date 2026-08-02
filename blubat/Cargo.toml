@@ -19,6 +19,7 @@ ratatui = { workspace = true }
 crossterm = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+mac-notification-sys = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

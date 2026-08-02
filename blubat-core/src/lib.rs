@@ -20,21 +20,38 @@
 //! ```
 
 mod address;
+mod atomic;
+mod config;
 mod device;
+mod duration;
+mod engine;
 mod error;
+mod event;
 mod history;
 mod iokit;
+mod paths;
 mod poll;
 mod profiler;
 mod snapshot;
+mod theme;
 mod timestamp;
 mod watch;
 
 pub use address::Address;
+pub use config::{
+    Advertised, AdvertisedThresholds, Config, Dashboard, Defaults, DeviceRule, Hook, Notifications,
+    Poll, Sort, Thresholds,
+};
 pub use device::{ChargeState, Device, Levels, Source};
+pub use duration::{Debounce, parse_duration};
+pub use engine::{Engine, Raised};
 pub use error::{Error, Result};
+pub use event::Event;
 pub use history::{Direction, History, Sample, Trend};
+pub use iokit::advertised;
+pub use paths::Paths;
 pub use poll::{Tiers, poll, snapshot};
 pub use snapshot::Snapshot;
+pub use theme::{Rgb, Scheme, Theme};
 pub use timestamp::Timestamp;
-pub use watch::{Watch, watch_dir};
+pub use watch::Watch;

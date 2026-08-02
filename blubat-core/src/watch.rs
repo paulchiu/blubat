@@ -4,15 +4,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use etcetera::base_strategy::{BaseStrategy, Xdg};
 use serde::{Deserialize, Serialize};
 
+use crate::atomic;
 use crate::error::{Error, Result};
 use crate::timestamp::Timestamp;
 
 /// A request to notify once, when one device reaches one level.
 ///
-/// `blubat wait` writes a watch into [`watch_dir`] and exits; a running daemon
+/// `blubat wait` writes a watch into the watch directory and exits; a running daemon
 /// drains that directory on each poll. A file drop rather than a socket is what
 /// lets the handover exist without blubat growing an IPC surface, and it means
 /// an interrupted wait leaves behind only a file that will be consumed or expire.
@@ -57,20 +57,13 @@ impl Watch {
     }
 
     /// Writes the watch into `directory`, creating it if needed.
-    ///
-    /// Through a partial file and a rename, which is atomic on one filesystem,
-    /// so a daemon draining the directory never reads half a watch.
     pub fn write(&self, directory: &Path) -> Result<PathBuf> {
         let path = directory.join(self.file_name());
-        let partial = path.with_extension("toml.partial");
-        let contents = toml::to_string(self)
-            .map_err(|error| Error::Format(format!("watch file is unwritable: {error}")))?;
 
-        fs::create_dir_all(directory)
-            .and_then(|()| fs::write(&partial, contents))
-            .and_then(|()| fs::rename(&partial, &path))
-            .map(|()| path.clone())
-            .map_err(|source| Error::Io { path, source })
+        toml::to_string(self)
+            .map_err(|error| Error::Format(format!("watch file is unwritable: {error}")))
+            .and_then(|contents| atomic::write(&path, &contents))
+            .map(|()| path)
     }
 
     /// Names the file after what it is waiting for, so the directory reads.
@@ -85,17 +78,6 @@ impl Watch {
             self.target
         )
     }
-}
-
-/// The directory `blubat wait` drops watches into and a daemon drains.
-pub fn watch_dir() -> Result<PathBuf> {
-    let home = Xdg::new().map_err(|error| Error::Path(error.to_string()))?;
-
-    Ok(home
-        .state_dir()
-        .unwrap_or_else(|| home.data_dir())
-        .join("blubat")
-        .join("watches"))
 }
 
 fn slug(device: &str) -> String {
@@ -231,13 +213,5 @@ mod tests {
 
         assert!(deadline.unix() >= before + 600, "{deadline:?}");
         assert_eq!(Watch::new("trackpad", 100, None).deadline, None);
-    }
-
-    #[test]
-    fn the_watch_directory_sits_under_the_xdg_state_home() {
-        let directory = watch_dir().expect("a home directory");
-
-        assert!(directory.ends_with("blubat/watches"), "{directory:?}");
-        assert!(directory.is_absolute());
     }
 }

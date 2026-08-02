@@ -1,6 +1,6 @@
 use std::fmt;
 
-use serde::Serialize;
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// A Bluetooth address normalised to lowercase hex octets joined by hyphens.
 ///
@@ -30,6 +30,20 @@ impl Address {
 impl fmt::Display for Address {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// Reads an address back through the same normalising parse that wrote it.
+///
+/// The state file keys its devices on this, and a key blubat cannot make sense
+/// of is worth rejecting there for the same reason it is worth rejecting from
+/// a source: an unparsed address matches no device and would leak state.
+impl<'de> Deserialize<'de> for Address {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+
+        Address::parse(&raw)
+            .ok_or_else(|| serde::de::Error::custom(format!("`{raw}` is not a Bluetooth address")))
     }
 }
 
@@ -76,5 +90,14 @@ mod tests {
             serde_json::to_string(&address).expect("serialisable"),
             "\"30-82-16-f2-24-90\""
         );
+    }
+
+    #[test]
+    fn deserialises_through_the_same_parse_that_wrote_it() {
+        let address: Address =
+            serde_json::from_str("\"30:82:16:F2:24:90\"").expect("deserialisable");
+
+        assert_eq!(address.as_str(), "30-82-16-f2-24-90");
+        assert!(serde_json::from_str::<Address>("\"nonsense\"").is_err());
     }
 }
