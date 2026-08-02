@@ -180,7 +180,13 @@ pub(crate) fn annotate(path: &Path) -> Result<(), String> {
 /// hook sample, the file does not already have.
 fn compose(original: &str, document: &DocumentMut, parsed: &Config) -> String {
     let mut composed = String::from(template::MIGRATED);
-    template::append(&mut composed, original);
+
+    // An empty original (an existing but empty file) has nothing to append,
+    // so skip it rather than let append's blank-line separator run for text
+    // that turns out to be nothing.
+    if !original.is_empty() {
+        template::append(&mut composed, original);
+    }
 
     let missing = template::SCALAR_SECTIONS
         .iter()
@@ -694,6 +700,18 @@ mod tests {
             config.theme.accent,
             Some(Rgb::parse("#39c5cf").expect("parses"))
         );
+        assert_eq!(
+            config.theme.critical,
+            Some(Rgb::parse("#f47067").expect("parses"))
+        );
+        assert_eq!(
+            config.theme.low,
+            Some(Rgb::parse("#c69026").expect("parses"))
+        );
+        assert_eq!(
+            config.theme.ok,
+            Some(Rgb::parse("#57ab5a").expect("parses"))
+        );
         assert_eq!(config.theme.charging_glyph.as_deref(), Some("+"));
         assert_eq!(config.devices.len(), 1, "the device sample took effect");
         assert_eq!(config.devices[0].pattern, "trackpad");
@@ -765,6 +783,25 @@ mod tests {
 
         assert_eq!(annotate(&scratch.config_file()), Ok(()));
         assert!(!scratch.config_file().exists(), "annotate created nothing");
+    }
+
+    /// An existing but empty file (created with `touch`, or truncated) is a
+    /// real file, not the missing-file case seeding handles, so it still
+    /// takes the single blank line every other migration produces rather
+    /// than an extra one where the absent original text would have gone.
+    #[test]
+    fn an_empty_existing_file_migrates_with_a_single_blank_line() {
+        let scratch = Scratch::new();
+        let path = scratch.write_config("");
+
+        assert_eq!(annotate(&path), Ok(()));
+
+        let written = fs::read_to_string(&path).expect("still there");
+        assert!(
+            !written.contains("\n\n\n"),
+            "no run of blank lines anywhere in the file: {written}"
+        );
+        assert!(Config::parse(&written).is_ok(), "{written}");
     }
 
     #[test]
