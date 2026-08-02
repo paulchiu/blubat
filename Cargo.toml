@@ -44,3 +44,8 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
 
 # Testing only.
 assert_cmd = "2.0"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
