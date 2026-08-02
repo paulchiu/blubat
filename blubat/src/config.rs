@@ -1,14 +1,17 @@
-//! `blubat config`: where the file is, opening it, checking it, and the two
-//! lines the dashboard writes into it.
+//! `blubat config`: where the file is, opening it, checking it, and the
+//! commented guide a config file is introduced to.
 //!
-//! `edit` hands the file to the editor and waits, and whether a file exists
-//! afterwards is the editor's decision, not blubat's, so a machine that has
-//! never been configured stays that way. [`save_dashboard`] is the exception:
-//! `h` and `i` on the dashboard write `[dashboard] hidden` and `[dashboard]
-//! hide_inactive` respectively, each only its own key and nothing else, ever.
-//! [`editor`] and the private `edit` below it are also what the dashboard's
-//! own `c` opens the file in, reached through [`crate::tui::editor::Cli`]
-//! rather than duplicated there.
+//! `edit` seeds the full template before opening the editor when there is no
+//! file yet, and introduces a file that predates the template to its own
+//! defaults the same way, once, before handing either to the editor; see
+//! [`annotate`] for what that adds and what it leaves alone. [`save_dashboard`]
+//! is the exception: `h` and `i` on the dashboard write `[dashboard] hidden`
+//! and `[dashboard] hide_inactive` respectively, each only its own key and
+//! nothing else, ever. [`editor`] and the private `edit` below it are also
+//! what the dashboard's own `c` opens the file in, reached through
+//! [`crate::tui::editor::Cli`] rather than duplicated there.
+
+mod template;
 
 use std::ffi::OsString;
 use std::fs;
@@ -131,6 +134,75 @@ fn write_atomically(path: &Path, contents: &str) -> Result<(), String> {
     written.map_err(|error| error.to_string())
 }
 
+/// Introduces a config file that predates the self-documenting template to
+/// its own defaults, once, leaving the user's text exactly as it was.
+///
+/// Additive rather than a rewrite: a marker line and a short pointer go in
+/// front, and a guide section for whichever tables, or the device or hook
+/// samples, the file does not already have goes on the end. A file already
+/// carrying the marker is left alone, whether blubat wrote it or the user
+/// kept the line after deleting the sections under it as an opt out, and so
+/// is a file `Config::parse` rejects: the load path is what reports a parse
+/// error, not this. Every call site runs this ahead of its own load and
+/// swallows what it returns, since a config blubat cannot document is still
+/// a config it can read.
+pub(crate) fn annotate(path: &Path) -> Result<(), String> {
+    let original = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+
+    if original
+        .lines()
+        .any(|line| line.starts_with(template::MARKER))
+    {
+        return Ok(());
+    }
+
+    let Ok(parsed) = Config::parse(&original) else {
+        return Ok(());
+    };
+    let Ok(document) = original.parse::<DocumentMut>() else {
+        return Ok(());
+    };
+
+    let composed = compose(&original, &document, &parsed);
+
+    match Config::parse(&composed) {
+        Ok(reparsed) if reparsed == parsed => write_atomically(path, &composed),
+        _ => Ok(()),
+    }
+}
+
+/// The annotated file: the marker block, a blank line, the original text
+/// exactly as it was, then a guide section for each table, or the device or
+/// hook sample, the file does not already have.
+fn compose(original: &str, document: &DocumentMut, parsed: &Config) -> String {
+    let mut composed = String::from(template::MIGRATED);
+
+    // An empty original (an existing but empty file) has nothing to append,
+    // so skip it rather than let append's blank-line separator run for text
+    // that turns out to be nothing.
+    if !original.is_empty() {
+        template::append(&mut composed, original);
+    }
+
+    let missing = template::SCALAR_SECTIONS
+        .iter()
+        .copied()
+        .filter(|(table, _)| !document.contains_key(table))
+        .map(|(_, section)| section)
+        .chain(parsed.devices.is_empty().then_some(template::DEVICE_SAMPLE))
+        .chain(parsed.hooks.is_empty().then_some(template::HOOK_SAMPLE));
+
+    for section in missing {
+        template::append(&mut composed, section);
+    }
+
+    composed
+}
+
 /// The editor to open the file in, `$EDITOR` or failing that `$VISUAL`.
 ///
 /// Takes the lookup rather than reading the environment, since a test that set
@@ -149,16 +221,24 @@ pub(crate) fn editor(variable: impl Fn(&str) -> Option<String>) -> Result<String
 
 /// Opens the config file in the editor and waits for it to close.
 ///
-/// The parent directory is created so the editor has somewhere to save to. The
-/// file itself is not: an editor closed without saving leaves no config behind.
-/// `pub(crate)` for the same reason [`editor`] is: the dashboard's `c` spawns
-/// this rather than a second copy of it.
+/// A file that does not exist yet is seeded with the full template first, so
+/// a machine that has never been configured opens the whole schema rather
+/// than a blank page; the parent directory that creates is the only one the
+/// editor needs. A file that already exists is introduced to its own
+/// defaults by [`annotate`] instead, which never rewrites a file it cannot
+/// read: an editor that then leaves the file unparsable is a load error
+/// exactly as it was before. `pub(crate)` for the same reason [`editor`] is:
+/// the dashboard's `c` spawns this rather than a second copy of it.
 pub(crate) fn edit(path: &Path, editor: &str) -> Result<(), Failure> {
     let (program, arguments) = split(editor);
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| Failure::Error(format!("{}: {error}", parent.display())))?;
+    if path.exists() {
+        // Best effort: never keep the editor from opening a file annotate
+        // cannot read or has already introduced to the guide.
+        let _ = annotate(path);
+    } else {
+        write_atomically(path, &template::full())
+            .map_err(|error| Failure::Error(format!("{}: {error}", path.display())))?;
     }
 
     Process::new(program)
@@ -232,7 +312,10 @@ fn validate(
 
 #[cfg(test)]
 mod tests {
-    use blubat_core::{Address, ChargeState, Levels, Source, Timestamp};
+    use blubat_core::{
+        Address, ChargeState, Dashboard, Defaults, Levels, Notifications, Poll, Rgb, Scheme,
+        Source, Thresholds, Timestamp,
+    };
 
     use crate::scratch::Scratch;
 
@@ -541,15 +624,17 @@ mod tests {
     }
 
     #[test]
-    fn editing_makes_room_for_the_file_without_creating_it() {
+    fn editing_seeds_the_template_when_there_is_no_file_yet() {
         let scratch = Scratch::new();
         let path = scratch.config_file();
 
         assert_eq!(edit(&path, "/usr/bin/true"), Ok(()));
-        assert!(path.parent().expect("a parent").is_dir(), "nowhere to save");
-        assert!(
-            !path.exists(),
-            "an editor that saved nothing leaves nothing"
+
+        assert!(path.exists(), "the editor had something to open");
+        assert_eq!(
+            Config::load(&path).expect("the template parses"),
+            Config::default(),
+            "a template only file behaves exactly like no file at all"
         );
     }
 
@@ -564,5 +649,170 @@ mod tests {
 
         assert!(failed.to_string().contains("exited"), "{failed}");
         assert!(matches!(missing, Failure::Error(_)));
+    }
+
+    /// The template is what a config file is seeded with, so it has to be
+    /// exactly as inert as no file at all.
+    #[test]
+    fn the_template_as_written_is_the_built_in_config() {
+        let config = Config::parse(&template::full()).expect("the template parses");
+
+        assert_eq!(config, Config::default());
+        assert!(config.problems().is_empty(), "{:?}", config.problems());
+    }
+
+    /// Uncommenting every `# key = value` line, and only those, has to
+    /// reproduce the numbers the prose above each section claims: this is
+    /// what keeps the template honest when a struct gains a key.
+    #[test]
+    fn uncommenting_every_key_reproduces_the_defaults_it_names() {
+        let uncommented = template::full()
+            .lines()
+            .map(|line| {
+                if line.starts_with("##") {
+                    line
+                } else {
+                    line.strip_prefix("# ").unwrap_or(line)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let config = Config::parse(&uncommented).expect("every commented line is valid TOML");
+
+        assert!(config.problems().is_empty(), "{:?}", config.problems());
+        assert_eq!(config.poll, Poll::default());
+        assert_eq!(config.notifications, Notifications::default());
+        assert_eq!(config.dashboard, Dashboard::default());
+        assert_eq!(
+            config.defaults,
+            Defaults {
+                low: Some(Thresholds::BUILT_IN.low),
+                critical: Some(Thresholds::BUILT_IN.critical),
+                high: Some(Thresholds::BUILT_IN.high),
+                rearm_margin: Some(Thresholds::BUILT_IN.rearm_margin),
+            },
+            "commented as the built-in numbers a device without a block falls \
+             through to, not the unset default the struct itself has"
+        );
+        assert_eq!(config.theme.scheme, Scheme::Dark);
+        assert_eq!(
+            config.theme.accent,
+            Some(Rgb::parse("#39c5cf").expect("parses"))
+        );
+        assert_eq!(
+            config.theme.critical,
+            Some(Rgb::parse("#f47067").expect("parses"))
+        );
+        assert_eq!(
+            config.theme.low,
+            Some(Rgb::parse("#c69026").expect("parses"))
+        );
+        assert_eq!(
+            config.theme.ok,
+            Some(Rgb::parse("#57ab5a").expect("parses"))
+        );
+        assert_eq!(config.theme.charging_glyph.as_deref(), Some("+"));
+        assert_eq!(config.devices.len(), 1, "the device sample took effect");
+        assert_eq!(config.devices[0].pattern, "trackpad");
+        assert_eq!(config.hooks.len(), 1, "the hook sample took effect");
+        assert_eq!(config.hooks[0].command, "~/.config/blubat/hooks/nag.sh");
+    }
+
+    #[test]
+    fn annotating_a_minimal_file_adds_only_the_missing_tables() {
+        let scratch = Scratch::new();
+        let original = "[dashboard]\nhidden = [\"MX Master\"]\nhide_inactive = true\n";
+        let path = scratch.write_config(original);
+
+        assert_eq!(annotate(&path), Ok(()));
+
+        let written = fs::read_to_string(&path).expect("still there");
+        assert!(written.contains(original), "{written}");
+        assert_eq!(
+            Config::parse(&written).expect("parses"),
+            Config::parse(original).expect("parses")
+        );
+        assert_eq!(
+            written.matches("[dashboard]").count(),
+            1,
+            "the table the file already had gains no second header"
+        );
+        for table in ["[poll]", "[notifications]", "[defaults]", "[theme]"] {
+            assert!(written.contains(table), "{written}");
+        }
+    }
+
+    #[test]
+    fn annotating_twice_changes_nothing_the_second_time() {
+        let scratch = Scratch::new();
+        let path = scratch.write_config("[defaults]\nlow = 25\n");
+
+        assert_eq!(annotate(&path), Ok(()));
+        let once = fs::read_to_string(&path).expect("annotated");
+
+        assert_eq!(annotate(&path), Ok(()));
+        let twice = fs::read_to_string(&path).expect("still there");
+
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn a_file_that_already_carries_the_marker_is_left_alone() {
+        let scratch = Scratch::new();
+        let written = "## blubat configuration, guide v1\nwhatever the user left here\n";
+        let path = scratch.write_config(written);
+
+        assert_eq!(annotate(&path), Ok(()));
+        assert_eq!(fs::read_to_string(&path).expect("still there"), written);
+    }
+
+    #[test]
+    fn an_unparsable_file_is_left_for_the_load_path_to_report() {
+        let scratch = Scratch::new();
+        let written = "[defaults\nlow = 25\n";
+        let path = scratch.write_config(written);
+
+        assert_eq!(annotate(&path), Ok(()));
+        assert_eq!(fs::read_to_string(&path).expect("still there"), written);
+    }
+
+    #[test]
+    fn a_missing_file_is_left_for_seeding_to_write() {
+        let scratch = Scratch::new();
+
+        assert_eq!(annotate(&scratch.config_file()), Ok(()));
+        assert!(!scratch.config_file().exists(), "annotate created nothing");
+    }
+
+    /// An existing but empty file (created with `touch`, or truncated) is a
+    /// real file, not the missing-file case seeding handles, so it still
+    /// takes the single blank line every other migration produces rather
+    /// than an extra one where the absent original text would have gone.
+    #[test]
+    fn an_empty_existing_file_migrates_with_a_single_blank_line() {
+        let scratch = Scratch::new();
+        let path = scratch.write_config("");
+
+        assert_eq!(annotate(&path), Ok(()));
+
+        let written = fs::read_to_string(&path).expect("still there");
+        assert!(
+            !written.contains("\n\n\n"),
+            "no run of blank lines anywhere in the file: {written}"
+        );
+        assert!(Config::parse(&written).is_ok(), "{written}");
+    }
+
+    #[test]
+    fn a_file_without_a_trailing_newline_still_migrates_to_valid_toml() {
+        let scratch = Scratch::new();
+        let path = scratch.write_config("[defaults]\nlow = 25");
+
+        assert_eq!(annotate(&path), Ok(()));
+
+        let written = fs::read_to_string(&path).expect("still there");
+        assert!(written.contains("[defaults]\nlow = 25"), "{written}");
+        assert!(Config::parse(&written).is_ok(), "{written}");
     }
 }

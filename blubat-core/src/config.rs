@@ -1,10 +1,14 @@
 //! The TOML file at `~/.config/blubat/config.toml`.
 //!
-//! The file is user intent and blubat never writes it. It is also optional:
-//! everything here has a built-in default, so a machine with no config file
-//! behaves exactly as one whose file repeats the defaults back. What blubat
-//! knows about itself, the armed and fired flags and the debounce clocks, is
-//! machine state and lives under the state directory instead.
+//! The file is user intent: blubat maintains `[dashboard] hidden` and
+//! `[dashboard] hide_inactive` from the dashboard's own `h` and `i`, and
+//! introduces a file that predates the self-documenting template to it once,
+//! but everything else in the file stays exactly as the user left it. It is
+//! also optional: everything here has a built-in default, so a machine with
+//! no config file behaves exactly as one whose file repeats the defaults
+//! back. What blubat knows about itself, the armed and fired flags and the
+//! debounce clocks, is machine state and lives under the state directory
+//! instead.
 //!
 //! Parsing is strict in the other direction: an unknown key, an unknown event
 //! name or a duration that does not parse is an error carrying the line it is
