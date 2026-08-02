@@ -7,6 +7,8 @@
 //! has a battery, 1 for anything else.
 
 mod config;
+mod hooks;
+mod notify;
 mod report;
 mod tui;
 mod wait;
@@ -62,6 +64,13 @@ enum Command {
         #[command(subcommand)]
         command: config::Command,
     },
+    /// Send a test banner and report the identity it was delivered under.
+    ///
+    /// blubat has no notification identity of its own, so macOS attributes its
+    /// banners to another app: Terminal, or Script Editor on the fallback path.
+    /// A silent success usually means that borrowed identity is muted, either
+    /// by a Focus mode or in the notification settings for that app.
+    NotifyTest,
 }
 
 /// Why a command stopped, carrying the exit code it owes a script.
@@ -128,6 +137,7 @@ fn run(cli: Cli) -> Result<(), Failure> {
         }) => report::status(&reading(), device.as_deref(), Format::of(json, number)),
         Some(Command::Wait(args)) => wait::run(&args),
         Some(Command::Config { command }) => config::run(&command, &paths(cli.config)?),
+        Some(Command::NotifyTest) => notify::run(&paths(cli.config)?),
         None if io::stdout().is_terminal() => tui::run(),
         None => offer_the_commands(),
     }

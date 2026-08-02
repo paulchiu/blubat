@@ -2,12 +2,12 @@
 //! the wait to a running daemon and return immediately.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use blubat_core::{Device, Snapshot, Watch, parse_duration, watch_dir};
+use blubat_core::{Device, Notifications, Snapshot, Watch, parse_duration, watch_dir};
 
+use crate::notify::{Banner, Desktop, Notifier};
 use crate::{Failure, reading};
 
 /// Arguments of `blubat wait`.
@@ -139,22 +139,16 @@ fn wait_for_level(args: &Args, read: impl Fn() -> Snapshot) -> Result<(String, u
     }
 }
 
-/// Posts a desktop banner through osascript.
+/// Posts the banner that ends a wait.
 ///
-/// Deliberately minimal: the notifier that replaces this gains a configurable
-/// sound and a delivery fallback. A wait that cannot notify still exits 0.
+/// Sounds as an unconfigured blubat does: a wait is a one-shot command that
+/// resolves no config of its own. A wait that cannot notify still exits 0.
 fn notify(body: &str) {
-    let script = format!(
-        "display notification {} with title \"blubat\" sound name \"Glass\"",
-        applescript_string(body)
-    );
+    let sound = Notifications::default().sound;
 
-    let _ = Command::new("osascript").arg("-e").arg(script).status();
-}
-
-/// An AppleScript string literal, with the two characters that can escape it.
-fn applescript_string(text: &str) -> String {
-    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+    if let Err(problem) = Desktop.post(&Banner::new("blubat", body, &sound)) {
+        eprintln!("blubat: {problem}");
+    }
 }
 
 /// Parses a battery percentage, rejecting anything no device can report.
@@ -375,14 +369,5 @@ mod tests {
         assert_ne!(eighty, full, "the second must not overwrite the first");
         assert_eq!(Watch::read(&eighty).expect("reads back").target, 80);
         assert_eq!(Watch::read(&full).expect("reads back").target, 100);
-    }
-
-    #[test]
-    fn a_notification_body_survives_the_quotes_a_device_name_may_carry() {
-        assert_eq!(applescript_string("plain"), "\"plain\"");
-        assert_eq!(
-            applescript_string("a \"quoted\" back\\slash"),
-            "\"a \\\"quoted\\\" back\\\\slash\""
-        );
     }
 }

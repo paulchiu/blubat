@@ -37,6 +37,8 @@ blubat wait --device <match>        # poll until the level is reached, then
 blubat config path                  # print the resolved config path
 blubat config edit                  # open it in $EDITOR
 blubat config validate              # parse it and report what is wrong
+blubat notify-test                  # post a test banner, name the identity it
+                                    # was delivered under
 
   --config <path>                   # read configuration from here instead
 ```
@@ -236,6 +238,49 @@ advertises, then the built-in 20, 10, 100 and 1.
 it is not, so it fits a dotfiles check. A `[[device]]` block matching nothing
 currently visible is a warning rather than a failure, since the device may
 simply be switched off.
+
+## Notifications and hooks
+
+Both subscribe to the same events, and both fire on a threshold crossing rather
+than on a level sitting past one.
+
+blubat is an unbundled binary, so it has no notification identity of its own and
+macOS attributes its banners to another app: Terminal on the primary path,
+Script Editor on the `osascript` fallback taken when that path errors. A muted
+identity, or a Focus mode, swallows the banner while the send still reports
+success, which is what `blubat notify-test` is for:
+
+```
+$ blubat notify-test
+test banner delivered by the notification centre as com.apple.Terminal
+If no banner appeared, that identity is muted: check Focus and the notification
+settings for it.
+```
+
+A hook runs under `sh -c`, on its own thread, with its output discarded and
+these variables in its environment. Each is always set, and empty where the
+reading has no answer.
+
+| Variable | Value |
+| --- | --- |
+| `BLUBAT_DEVICE` | Device name, as the dashboard shows it |
+| `BLUBAT_DEVICE_ADDRESS` | Bluetooth address, hyphenated |
+| `BLUBAT_EVENT` | `low_battery`, `critical_battery`, `charged`, `connected`, `disconnected` or `stale` |
+| `BLUBAT_LEVEL` | Level in percent that raised the event |
+| `BLUBAT_PREVIOUS_LEVEL` | Last level seen before it |
+| `BLUBAT_CHARGING` | `true`, `false`, or empty where no source knows |
+| `BLUBAT_SOURCE` | `iokit` or `system_profiler` |
+| `BLUBAT_THRESHOLD` | The threshold crossed, empty for the events that watch no level |
+
+```sh
+#!/bin/sh
+# ~/bin/nag, run on [[hook]] event = "low_battery"
+test "$BLUBAT_LEVEL" -lt 10 && say "$BLUBAT_DEVICE needs charging"
+```
+
+A hook that outlives its `timeout` is killed, and one that hangs, cannot start
+or exits non-zero is reported rather than retried. Nothing a hook does can hold
+up a poll, a keystroke or another hook.
 
 ## Layout
 

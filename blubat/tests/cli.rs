@@ -53,9 +53,19 @@ fn help_still_lists_every_subcommand() {
     let printed = stdout(&blubat(&["--help"]));
 
     assert!(printed.contains("Usage: blubat"), "{printed}");
-    for subcommand in ["list", "status", "wait", "config"] {
+    for subcommand in ["list", "status", "wait", "config", "notify-test"] {
         assert!(printed.contains(subcommand), "{subcommand} is missing");
     }
+}
+
+/// `notify-test` itself is not run here: it posts a real banner. Its help is,
+/// because the diagnosis it exists for is the text rather than the banner.
+#[test]
+fn notify_test_documents_what_a_silent_success_means() {
+    let printed = stdout(&blubat(&["notify-test", "--help"]));
+
+    assert!(printed.contains("identity"), "{printed}");
+    assert!(printed.contains("muted"), "{printed}");
 }
 
 #[test]
