@@ -225,6 +225,7 @@ mod tests {
         Snapshot {
             read_at: Timestamp::from_unix(READ_AT + second),
             devices: vec![device(level, second)],
+            degraded: false,
             warnings: Vec::new(),
         }
     }

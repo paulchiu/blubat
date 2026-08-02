@@ -588,6 +588,7 @@ pub(super) mod tests {
         Snapshot {
             read_at: READ_AT,
             devices,
+            degraded: false,
             warnings: Vec::new(),
         }
     }
@@ -828,6 +829,7 @@ pub(super) mod tests {
         let app = update(
             app(),
             Event::Reading(Snapshot {
+                degraded: false,
                 warnings: vec!["system_profiler exited with 1".to_string()],
                 ..three_devices()
             }),
@@ -1142,6 +1144,7 @@ pub(super) mod tests {
                 read_at: an_hour_ago,
                 ..device("Magic Trackpad", "30-82-16-f2-24-90", Some(90))
             }],
+            degraded: false,
             warnings: Vec::new(),
         };
         let app = update(app(), Event::Reading(earlier));

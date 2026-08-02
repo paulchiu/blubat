@@ -676,6 +676,7 @@ mod tests {
                     ..device.clone()
                 })
                 .collect(),
+            degraded: false,
             warnings: Vec::new(),
         };
 
@@ -914,6 +915,7 @@ mod tests {
         let degraded = update(
             app(),
             Event::Reading(Snapshot {
+                degraded: false,
                 warnings: vec!["system_profiler exited with 1".to_string()],
                 ..three_devices()
             }),

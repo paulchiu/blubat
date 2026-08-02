@@ -552,6 +552,7 @@ mod tests {
         Snapshot {
             read_at: at(second),
             devices,
+            degraded: false,
             warnings: Vec::new(),
         }
     }

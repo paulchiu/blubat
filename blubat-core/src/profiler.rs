@@ -4,7 +4,11 @@
 //! field is optional and anything unrecognised is collected into `warnings` and
 //! skipped rather than treated as fatal.
 
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -14,21 +18,69 @@ use crate::error::{Error, Result};
 use crate::timestamp::Timestamp;
 
 /// Runs `system_profiler SPBluetoothDataType -json` and parses what comes back.
-pub(crate) fn read(read_at: Timestamp, warnings: &mut Vec<String>) -> Result<Vec<Device>> {
-    let output = Command::new("system_profiler")
-        .args(["SPBluetoothDataType", "-json"])
-        .output()
+pub(crate) fn read(
+    read_at: Timestamp,
+    timeout: Duration,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<Device>> {
+    let mut command = Command::new("system_profiler");
+    command.args(["SPBluetoothDataType", "-json"]);
+    let output = run(command, timeout)?;
+
+    parse(&String::from_utf8_lossy(&output), read_at, warnings)
+}
+
+/// Runs `command` and hands back its stdout, giving up after `timeout`.
+///
+/// Both pipes are drained on their own threads as the child writes them, so a
+/// long reading cannot fill a pipe buffer and stall the process being timed. A
+/// child still running at the deadline is killed rather than waited out, which
+/// is what keeps a wedged call from holding the slow tier open forever.
+fn run(mut command: Command, timeout: Duration) -> Result<Vec<u8>> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| Error::Command(format!("system_profiler could not be run: {error}")))?;
 
-    if !output.status.success() {
+    let stdout = drain(child.stdout.take().expect("stdout was piped"));
+    let stderr = drain(child.stderr.take().expect("stderr was piped"));
+
+    let Ok(output) = stdout.recv_timeout(timeout) else {
+        let _ = child.kill();
+        let _ = child.wait();
+
         return Err(Error::Command(format!(
-            "system_profiler exited with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
+            "system_profiler took longer than {}s and was stopped",
+            timeout.as_secs()
+        )));
+    };
+
+    let status = child.wait().map_err(|error| {
+        Error::Command(format!("system_profiler could not be waited on: {error}"))
+    })?;
+    if !status.success() {
+        return Err(Error::Command(format!(
+            "system_profiler exited with {status}: {}",
+            String::from_utf8_lossy(&stderr.recv().unwrap_or_default()).trim()
         )));
     }
 
-    parse(&String::from_utf8_lossy(&output.stdout), read_at, warnings)
+    Ok(output)
+}
+
+/// Reads one child pipe to its end on a thread of its own.
+fn drain(mut pipe: impl Read + Send + 'static) -> Receiver<Vec<u8>> {
+    let (read, drained) = mpsc::channel();
+
+    thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = pipe.read_to_end(&mut buffer);
+        let _ = read.send(buffer);
+    });
+
+    drained
 }
 
 /// Parses one `SPBluetoothDataType` document.
@@ -338,5 +390,55 @@ mod tests {
             parse("not json at all", READ_AT, &mut Vec::new()),
             Err(Error::Format(_))
         ));
+    }
+
+    /// A shell command, so the timing is exercised on something that behaves
+    /// the way a wedged or failing `system_profiler` would without being one.
+    fn shell(script: &str) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", script]);
+
+        command
+    }
+
+    #[test]
+    fn a_command_that_finishes_hands_back_everything_it_wrote() {
+        let output = run(shell("printf '{}'"), Duration::from_secs(10)).expect("it finishes");
+
+        assert_eq!(String::from_utf8_lossy(&output), "{}");
+    }
+
+    #[test]
+    fn a_command_that_outlasts_the_timeout_is_stopped_rather_than_waited_out() {
+        let started = std::time::Instant::now();
+
+        let error = run(shell("sleep 30"), Duration::from_millis(100))
+            .expect_err("it never finishes on its own");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "it gave up early"
+        );
+        assert!(error.to_string().contains("took longer than"), "{error}");
+    }
+
+    #[test]
+    fn a_command_that_fails_reports_what_it_said_about_it() {
+        let error = run(shell("echo trouble >&2; exit 3"), Duration::from_secs(10))
+            .expect_err("a non-zero exit");
+
+        assert!(error.to_string().contains("trouble"), "{error}");
+        assert!(matches!(error, Error::Command(_)));
+    }
+
+    #[test]
+    fn a_command_that_is_not_there_is_an_error_rather_than_a_panic() {
+        let error = run(
+            Command::new("/nonexistent/blubat-not-a-command"),
+            Duration::from_secs(10),
+        )
+        .expect_err("nothing to run");
+
+        assert!(error.to_string().contains("could not be run"), "{error}");
     }
 }

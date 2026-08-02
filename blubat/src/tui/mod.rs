@@ -116,6 +116,7 @@ fn tiers(poll: &Poll) -> Tiers {
             DASHBOARD_INTERVAL
         },
         slow: poll.profiler_interval,
+        timeout: poll.profiler_timeout,
     }
 }
 

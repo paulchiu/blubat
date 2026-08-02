@@ -8,7 +8,7 @@ use crate::snapshot::{Snapshot, merge};
 use crate::timestamp::Timestamp;
 use crate::{iokit, profiler};
 
-/// How often each tier reads its source.
+/// How often each tier reads its source, and how long the slow one may take.
 ///
 /// The fast tier is the whole hot path: an IOKit read costs single digit
 /// milliseconds, so it can run on every tick without being noticeable.
@@ -19,6 +19,8 @@ use crate::{iokit, profiler};
 pub struct Tiers {
     pub fast: Duration,
     pub slow: Duration,
+    /// The ceiling on one `system_profiler` call, past which it is given up on.
+    pub timeout: Duration,
 }
 
 impl Default for Tiers {
@@ -27,14 +29,22 @@ impl Default for Tiers {
         Self {
             fast: Duration::from_secs(30),
             slow: Duration::from_secs(300),
+            timeout: Duration::from_secs(10),
         }
     }
 }
 
 /// Takes one merged reading from both sources.
+///
+/// The one-shot path, on the default timeout: there is no earlier reading for
+/// a degraded one to fall back on here, so a failing slow source leaves the
+/// IOKit devices and the warning that says why.
 pub fn snapshot() -> Snapshot {
     let read_at = Timestamp::now();
-    let cached = read_slow(read_at, profiler::read);
+    let timeout = Tiers::default().timeout;
+    let cached = read_slow(&Cached::default(), read_at, |at, warnings| {
+        profiler::read(at, timeout, warnings)
+    });
 
     read_fast(read_at, iokit::read, &cached)
 }
@@ -47,7 +57,12 @@ pub fn snapshot() -> Snapshot {
 /// so a consumer that renders slowly is never made to wait on a reading, and a
 /// `system_profiler` call that hangs holds up nothing but its own tier.
 pub fn poll(tiers: Tiers) -> Receiver<Snapshot> {
-    poll_with(tiers, iokit::read, profiler::read, Timestamp::now)
+    poll_with(
+        tiers,
+        iokit::read,
+        move |at, warnings| profiler::read(at, tiers.timeout, warnings),
+        Timestamp::now,
+    )
 }
 
 fn poll_with<F, S, C>(tiers: Tiers, fast: F, slow: S, clock: C) -> Receiver<Snapshot>
@@ -72,24 +87,35 @@ where
 struct Cached {
     devices: Vec<Device>,
     warnings: Vec<String>,
+    /// Whether these devices are held over from a call that has since failed.
+    degraded: bool,
 }
 
-/// Reads the slow source, degrading a failure to a warning.
+/// Reads the slow source, keeping the last good devices when it fails.
 ///
-/// A `system_profiler` failure degrades the reading to the IOKit devices rather
-/// than failing it: the fast source alone still answers the question the POC
-/// could answer, and the failure leaves as a warning.
+/// A timeout or an unparseable document degrades the reading rather than
+/// emptying it: the devices only that source can see stay in the merge,
+/// carrying the timestamps that say how old they now are, and the failure
+/// travels as a warning until a later call replaces it. A poll never fails.
 fn read_slow(
+    held: &Cached,
     read_at: Timestamp,
     read: impl Fn(Timestamp, &mut Vec<String>) -> Result<Vec<Device>>,
 ) -> Cached {
     let mut warnings = Vec::new();
-    let devices = read(read_at, &mut warnings).unwrap_or_else(|error| {
-        warnings.push(error.to_string());
-        Vec::new()
-    });
 
-    Cached { devices, warnings }
+    match read(read_at, &mut warnings) {
+        Ok(devices) => Cached {
+            devices,
+            warnings,
+            degraded: false,
+        },
+        Err(error) => Cached {
+            devices: held.devices.clone(),
+            warnings: vec![format!("{error}, keeping the last good reading")],
+            degraded: true,
+        },
+    }
 }
 
 /// Reads the fast source and reconciles it with the cached slow one.
@@ -104,7 +130,10 @@ fn read_fast(
     let mut warnings = cached.warnings.clone();
     let devices = read(read_at, &mut warnings);
 
-    merge(devices, cached.devices.clone(), read_at, warnings)
+    Snapshot {
+        degraded: cached.degraded,
+        ..merge(devices, cached.devices.clone(), read_at, warnings)
+    }
 }
 
 /// Reads the slow source on its own thread, publishing each result to the fast tier.
@@ -119,8 +148,12 @@ fn slow_tier(
     refreshed: &Sender<Cached>,
     wanted: &Receiver<()>,
 ) {
+    let mut held = Cached::default();
+
     loop {
-        if refreshed.send(read_slow(clock(), &read)).is_err() {
+        held = read_slow(&held, clock(), &read);
+
+        if refreshed.send(held.clone()).is_err() {
             break;
         }
         if !matches!(
@@ -231,29 +264,61 @@ mod tests {
             .collect()
     }
 
+    /// A first slow reading, with nothing held over from before it.
+    fn first(read: impl Fn(Timestamp, &mut Vec<String>) -> Result<Vec<Device>>) -> Cached {
+        read_slow(&Cached::default(), READ_AT, read)
+    }
+
+    fn failing(_: Timestamp, _: &mut Vec<String>) -> Result<Vec<Device>> {
+        Err(Error::Command("system_profiler exited with 1".to_string()))
+    }
+
     #[test]
     fn both_sources_merge_into_one_reading() {
-        let cached = read_slow(READ_AT, |_, _| Ok(vec![keyboard()]));
+        let cached = first(|_, _| Ok(vec![keyboard()]));
         let reading = read_fast(READ_AT, |_, _| vec![trackpad()], &cached);
 
         assert_eq!(reading.devices.len(), 2);
         assert!(reading.warnings.is_empty());
+        assert!(!reading.degraded);
     }
 
     #[test]
     fn a_failed_system_profiler_degrades_the_reading_rather_than_failing_it() {
-        let cached = read_slow(READ_AT, |_, _| {
-            Err(Error::Command("system_profiler exited with 1".to_string()))
-        });
+        let cached = first(failing);
         let reading = read_fast(READ_AT, |_, _| vec![trackpad()], &cached);
 
         assert_eq!(reading.devices.len(), 1, "the fast source still answers");
-        assert_eq!(reading.warnings, ["system_profiler exited with 1"]);
+        assert!(reading.degraded);
+        assert_eq!(
+            reading.warnings,
+            ["system_profiler exited with 1, keeping the last good reading"]
+        );
+    }
+
+    #[test]
+    fn a_failure_keeps_the_last_good_slow_devices_rather_than_dropping_them() {
+        let good = first(|_, _| Ok(vec![keyboard()]));
+        let degraded = read_slow(&good, READ_AT, failing);
+        let recovered = read_slow(&degraded, READ_AT, |_, _| Ok(vec![keyboard()]));
+
+        let reading = read_fast(READ_AT, |_, _| vec![trackpad()], &degraded);
+
+        assert_eq!(
+            reading.devices.len(),
+            2,
+            "the device only the slow source can see is still listed"
+        );
+        assert!(reading.degraded);
+        assert!(
+            !read_fast(READ_AT, |_, _| vec![trackpad()], &recovered).degraded,
+            "and the next good call clears it"
+        );
     }
 
     #[test]
     fn a_cached_warning_travels_on_every_reading_it_applies_to() {
-        let cached = read_slow(READ_AT, |_, warnings| {
+        let cached = first(|_, warnings| {
             warnings.push("skipped a malformed device".to_string());
             Ok(Vec::new())
         });
@@ -267,7 +332,7 @@ mod tests {
 
     #[test]
     fn what_a_source_reports_this_tick_is_added_to_the_cached_warnings() {
-        let cached = read_slow(READ_AT, |_, warnings| {
+        let cached = first(|_, warnings| {
             warnings.push("from the slow source".to_string());
             Ok(Vec::new())
         });
@@ -293,6 +358,7 @@ mod tests {
             Tiers {
                 fast: Duration::from_millis(1),
                 slow: Duration::from_secs(60),
+                ..Tiers::default()
             },
             counting_fast(Arc::clone(&reads)),
             |_, _| Ok(Vec::new()),
@@ -309,6 +375,7 @@ mod tests {
             Tiers {
                 fast: Duration::from_millis(1),
                 slow: Duration::from_secs(60),
+                ..Tiers::default()
             },
             |_, _| vec![trackpad()],
             counting_slow(Arc::clone(&slow_reads)),
@@ -338,6 +405,7 @@ mod tests {
             Tiers {
                 fast: Duration::from_millis(1),
                 slow: Duration::from_millis(1),
+                ..Tiers::default()
             },
             counting_fast(Arc::new(AtomicI64::new(0))),
             move |_, _| {
@@ -358,6 +426,7 @@ mod tests {
             Tiers {
                 fast: Duration::from_millis(1),
                 slow: Duration::from_millis(1),
+                ..Tiers::default()
             },
             counting_fast(Arc::clone(&fast_reads)),
             counting_slow(Arc::clone(&slow_reads)),

@@ -371,6 +371,7 @@ mod tests {
         Snapshot {
             read_at: Timestamp::from_unix(1_785_643_199),
             devices: devices.to_vec(),
+            degraded: false,
             warnings: Vec::new(),
         }
     }

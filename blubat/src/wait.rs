@@ -199,6 +199,7 @@ mod tests {
                 connected,
                 read_at: Timestamp::from_unix(1_785_643_199),
             }],
+            degraded: false,
             warnings: Vec::new(),
         }
     }

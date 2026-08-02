@@ -184,6 +184,13 @@ pub struct Poll {
     /// The slow tier's own interval, cached in between.
     #[serde(deserialize_with = "de_duration")]
     pub profiler_interval: Duration,
+    /// How long `system_profiler` may take before blubat gives up on the call.
+    ///
+    /// Generous on purpose: the call costs about 150ms here and scales with how
+    /// many devices have ever been paired, so this is a ceiling on a wedged
+    /// call rather than a budget for a slow one.
+    #[serde(deserialize_with = "de_duration")]
+    pub profiler_timeout: Duration,
     /// A device silent for this long is stale.
     #[serde(deserialize_with = "de_duration")]
     pub stale_after: Duration,
@@ -195,6 +202,7 @@ impl Default for Poll {
             foreground_interval: Duration::from_secs(30),
             daemon_interval: Duration::from_secs(120),
             profiler_interval: Duration::from_secs(300),
+            profiler_timeout: Tiers::default().timeout,
             stale_after: Duration::from_secs(600),
         }
     }
@@ -209,6 +217,7 @@ impl Poll {
         Tiers {
             fast: self.daemon_interval,
             slow: self.profiler_interval,
+            timeout: self.profiler_timeout,
         }
     }
 }
@@ -421,6 +430,7 @@ mod tests {
 foreground_interval = "30s"
 daemon_interval     = "120s"
 profiler_interval   = "5m"
+profiler_timeout    = "15s"
 stale_after         = "10m"
 
 [notifications]
@@ -505,6 +515,7 @@ timeout  = "10s"
         let config = Config::parse(SAMPLE).expect("the sample parses");
 
         assert_eq!(config.poll.profiler_interval, Duration::from_secs(300));
+        assert_eq!(config.poll.profiler_timeout, Duration::from_secs(15));
         assert_eq!(config.poll.stale_after, Duration::from_secs(600));
         assert_eq!(config.notifications.sound, "Glass");
         assert!(!config.notifications.connect);
@@ -798,6 +809,7 @@ timeout  = "10s"
             Tiers {
                 fast: Duration::from_secs(120),
                 slow: Duration::from_secs(300),
+                timeout: Duration::from_secs(15),
             },
             "the slower tick, since nothing is watching the daemon"
         );

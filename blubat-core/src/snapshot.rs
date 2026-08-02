@@ -11,6 +11,10 @@ use crate::timestamp::Timestamp;
 pub struct Snapshot {
     pub read_at: Timestamp,
     pub devices: Vec<Device>,
+    /// Whether the slow source is failing and its devices are held over from an
+    /// earlier call. A frontend marks the reading rather than hiding it: the
+    /// numbers are real, they have simply stopped being refreshed.
+    pub degraded: bool,
     /// Input a source could not use and carried on past, for a frontend to place.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
@@ -77,6 +81,7 @@ pub(crate) fn merge(
     Snapshot {
         read_at,
         devices,
+        degraded: false,
         warnings,
     }
 }

@@ -11,6 +11,13 @@ peripherals such as the Magic Trackpad report through IOKit and are absent from
 `system_profiler` and never appear in the HID class. blubat reads both and
 merges them, keeping the source and freshness of each reading visible.
 
+The two sources run on their own tiers: the IOKit read on every tick, and the
+much more expensive `system_profiler` call on a slower one with its result
+cached in between. That call has a timeout (`profiler_timeout`), and a call
+that times out or comes back unreadable never fails the poll: blubat keeps the
+last good reading, marks it degraded, and says so on stderr or on the dashboard,
+so the levels stay visible while they age.
+
 ## Status
 
 Pre-release. Milestone M0 is complete: both data sources, the merge, and the
@@ -208,6 +215,7 @@ silently does nothing is worse than one that says so.
 foreground_interval = "30s"   # tick while the dashboard or a command runs
 daemon_interval     = "120s"  # tick under launchd
 profiler_interval   = "5m"    # slow tier, cached in between
+profiler_timeout    = "10s"   # ceiling on one system_profiler call
 stale_after         = "10m"   # no reading for this long raises `stale`
 
 [notifications]
