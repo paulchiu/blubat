@@ -44,6 +44,8 @@ Paul's Magic Trackpad  30-82-16-f2-24-90  83%    on battery  iokit
 
 $ blubat status --device trackpad
 Paul's Magic Trackpad  83%  on battery
+
+$ blubat wait --device trackpad --until 100 --interval 5m
 ```
 
 Bare `blubat` opens the dashboard. The keys worth knowing on sight:
