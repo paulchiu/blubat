@@ -34,6 +34,8 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
     "CFDictionary",
     "CFString",
     "CFNumber",
+    # IOKit delivers its device notifications through a run loop source.
+    "CFRunLoop",
 ] }
 
 # Testing only.

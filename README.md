@@ -18,6 +18,12 @@ that times out or comes back unreadable never fails the poll: blubat keeps the
 last good reading, marks it degraded, and says so on stderr or on the dashboard,
 so the levels stay visible while they age.
 
+An Apple HID peripheral connecting or disconnecting cuts both tiers' waits
+short, through IOKit's own matched and terminated notifications, so a
+reconnected trackpad is read at once rather than at the next tick. Devices that
+only `system_profiler` sees, AirPods among them, publish no such notification
+and are still picked up on the ordinary tick.
+
 ## Status
 
 Pre-release. Milestone M0 is complete: both data sources, the merge, and the

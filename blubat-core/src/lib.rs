@@ -32,6 +32,7 @@ mod iokit;
 mod json;
 mod paths;
 mod poll;
+mod presence;
 mod profiler;
 mod snapshot;
 mod theme;

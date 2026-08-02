@@ -6,7 +6,7 @@ use crate::device::Device;
 use crate::error::Result;
 use crate::snapshot::{Snapshot, merge};
 use crate::timestamp::Timestamp;
-use crate::{iokit, profiler};
+use crate::{iokit, presence, profiler};
 
 /// How often each tier reads its source, and how long the slow one may take.
 ///
@@ -56,16 +56,26 @@ pub fn snapshot() -> Snapshot {
 /// polling. The channel is unbounded and only ever sent on from the fast tier,
 /// so a consumer that renders slowly is never made to wait on a reading, and a
 /// `system_profiler` call that hangs holds up nothing but its own tier.
+///
+/// A device arriving or going away cuts the wait short on both tiers, since
+/// that is the moment a held reading is most misleading.
 pub fn poll(tiers: Tiers) -> Receiver<Snapshot> {
     poll_with(
         tiers,
         iokit::read,
         move |at, warnings| profiler::read(at, tiers.timeout, warnings),
         Timestamp::now,
+        presence::watch(),
     )
 }
 
-fn poll_with<F, S, C>(tiers: Tiers, fast: F, slow: S, clock: C) -> Receiver<Snapshot>
+fn poll_with<F, S, C>(
+    tiers: Tiers,
+    fast: F,
+    slow: S,
+    clock: C,
+    nudges: Receiver<()>,
+) -> Receiver<Snapshot>
 where
     F: Fn(Timestamp, &mut Vec<String>) -> Vec<Device> + Send + 'static,
     S: Fn(Timestamp, &mut Vec<String>) -> Result<Vec<Device>> + Send + 'static,
@@ -77,7 +87,11 @@ where
     let slow_clock = clock.clone();
 
     thread::spawn(move || slow_tier(tiers.slow, slow, slow_clock, &refreshed, &wanted));
-    thread::spawn(move || fast_tier(tiers.fast, fast, clock, &snapshots, &cached, polling));
+    thread::spawn(move || {
+        fast_tier(
+            tiers.fast, fast, clock, &snapshots, &cached, polling, &nudges,
+        )
+    });
 
     readings
 }
@@ -138,9 +152,9 @@ fn read_fast(
 
 /// Reads the slow source on its own thread, publishing each result to the fast tier.
 ///
-/// `wanted` carries nothing. Waiting on it is both how this tier sleeps and how
-/// it learns the fast tier has ended, so a shutdown does not wait out an
-/// interval measured in minutes.
+/// Waiting on `wanted` is how this tier sleeps, how the fast tier asks it for
+/// an early read, and how it learns the fast tier has ended, so a shutdown does
+/// not wait out an interval measured in minutes.
 fn slow_tier(
     interval: Duration,
     read: impl Fn(Timestamp, &mut Vec<String>) -> Result<Vec<Device>>,
@@ -156,9 +170,9 @@ fn slow_tier(
         if refreshed.send(held.clone()).is_err() {
             break;
         }
-        if !matches!(
+        if matches!(
             wanted.recv_timeout(interval),
-            Err(RecvTimeoutError::Timeout)
+            Err(RecvTimeoutError::Disconnected)
         ) {
             break;
         }
@@ -169,15 +183,17 @@ fn slow_tier(
 ///
 /// Takes whatever the slow tier has published without ever waiting for it, so
 /// the first readings carry IOKit alone and fill in once a slow reading lands.
-/// `_polling` is never sent on: dropping it as this loop ends is what stops the
-/// slow tier.
+/// A nudge cuts the tick short here and is passed on to the slow tier, whose
+/// answer lands on the tick after it. Dropping `polling` as this loop ends is
+/// what stops that tier.
 fn fast_tier(
     interval: Duration,
     read: impl Fn(Timestamp, &mut Vec<String>) -> Vec<Device>,
     clock: impl Fn() -> Timestamp,
     snapshots: &Sender<Snapshot>,
     cached: &Receiver<Cached>,
-    _polling: Sender<()>,
+    polling: Sender<()>,
+    nudges: &Receiver<()>,
 ) {
     let mut latest = Cached::default();
 
@@ -187,7 +203,37 @@ fn fast_tier(
         if snapshots.send(read_fast(clock(), &read, &latest)).is_err() {
             break;
         }
-        thread::sleep(interval);
+        if waited(nudges, interval) == Wake::Nudged {
+            let _ = polling.send(());
+        }
+    }
+}
+
+/// Why a tier stopped waiting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Wake {
+    Tick,
+    Nudged,
+}
+
+/// Waits out one tick, cut short by a device arriving or going away.
+///
+/// One nudge stands for however many arrived while the tier was reading, since
+/// they all ask for the same thing. A nudge source that has gone away leaves
+/// the tier on its plain interval rather than spinning on a dead channel.
+fn waited(nudges: &Receiver<()>, interval: Duration) -> Wake {
+    match nudges.recv_timeout(interval) {
+        Ok(()) => {
+            nudges.try_iter().for_each(drop);
+
+            Wake::Nudged
+        }
+        Err(RecvTimeoutError::Timeout) => Wake::Tick,
+        Err(RecvTimeoutError::Disconnected) => {
+            thread::sleep(interval);
+
+            Wake::Tick
+        }
     }
 }
 
@@ -232,6 +278,12 @@ mod tests {
 
     fn frozen() -> impl Fn() -> Timestamp + Clone + Send + 'static {
         || READ_AT
+    }
+
+    /// A nudge channel whose far end is already gone, which is a machine where
+    /// IOKit refused a notification port.
+    fn unnudged() -> Receiver<()> {
+        mpsc::channel().1
     }
 
     /// A fast source that stamps each device with the number of reads before it.
@@ -363,6 +415,7 @@ mod tests {
             counting_fast(Arc::clone(&reads)),
             |_, _| Ok(Vec::new()),
             frozen(),
+            unnudged(),
         );
 
         assert_eq!(stamps(&receiver, 3), [0, 1, 2]);
@@ -380,6 +433,7 @@ mod tests {
             |_, _| vec![trackpad()],
             counting_slow(Arc::clone(&slow_reads)),
             frozen(),
+            unnudged(),
         );
 
         let merged = receiver
@@ -399,6 +453,61 @@ mod tests {
     }
 
     #[test]
+    fn a_nudge_reads_both_tiers_without_waiting_out_the_interval() {
+        let fast_reads = Arc::new(AtomicI64::new(0));
+        let slow_reads = Arc::new(AtomicI64::new(0));
+        let (nudge, nudges) = mpsc::channel();
+        let receiver = poll_with(
+            Tiers {
+                fast: Duration::from_secs(3_600),
+                slow: Duration::from_secs(3_600),
+                ..Tiers::default()
+            },
+            counting_fast(Arc::clone(&fast_reads)),
+            counting_slow(Arc::clone(&slow_reads)),
+            frozen(),
+            nudges,
+        );
+
+        receiver.recv().expect("the first reading");
+        for _ in 0..3 {
+            nudge.send(()).expect("the poller is listening");
+        }
+
+        assert_eq!(
+            stamps(&receiver, 1),
+            [1],
+            "a second reading long before the hour is up"
+        );
+        assert!(
+            (0..500).any(|_| {
+                thread::sleep(Duration::from_millis(10));
+                slow_reads.load(Ordering::SeqCst) > 1
+            }),
+            "and the slow tier was asked to read again too"
+        );
+    }
+
+    #[test]
+    fn a_silent_nudge_source_leaves_the_tiers_on_their_intervals() {
+        let reads = Arc::new(AtomicI64::new(0));
+        let (_silent, nudges) = mpsc::channel();
+        let receiver = poll_with(
+            Tiers {
+                fast: Duration::from_millis(1),
+                slow: Duration::from_secs(60),
+                ..Tiers::default()
+            },
+            counting_fast(Arc::clone(&reads)),
+            |_, _| Ok(Vec::new()),
+            frozen(),
+            nudges,
+        );
+
+        assert_eq!(stamps(&receiver, 3), [0, 1, 2]);
+    }
+
+    #[test]
     fn a_hung_slow_source_never_delays_a_fast_reading() {
         let (_blocked, never) = mpsc::channel::<()>();
         let receiver = poll_with(
@@ -413,6 +522,7 @@ mod tests {
                 Ok(vec![keyboard()])
             },
             frozen(),
+            unnudged(),
         );
 
         assert_eq!(stamps(&receiver, 3), [0, 1, 2]);
@@ -431,6 +541,7 @@ mod tests {
             counting_fast(Arc::clone(&fast_reads)),
             counting_slow(Arc::clone(&slow_reads)),
             frozen(),
+            unnudged(),
         );
 
         receiver.recv().expect("the first reading");
