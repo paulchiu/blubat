@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::atomic;
 use crate::error::{Error, Result};
 use crate::paths::Paths;
 use crate::timestamp::Timestamp;
@@ -57,20 +58,13 @@ impl Watch {
     }
 
     /// Writes the watch into `directory`, creating it if needed.
-    ///
-    /// Through a partial file and a rename, which is atomic on one filesystem,
-    /// so a daemon draining the directory never reads half a watch.
     pub fn write(&self, directory: &Path) -> Result<PathBuf> {
         let path = directory.join(self.file_name());
-        let partial = path.with_extension("toml.partial");
-        let contents = toml::to_string(self)
-            .map_err(|error| Error::Format(format!("watch file is unwritable: {error}")))?;
 
-        fs::create_dir_all(directory)
-            .and_then(|()| fs::write(&partial, contents))
-            .and_then(|()| fs::rename(&partial, &path))
-            .map(|()| path.clone())
-            .map_err(|source| Error::Io { path, source })
+        toml::to_string(self)
+            .map_err(|error| Error::Format(format!("watch file is unwritable: {error}")))
+            .and_then(|contents| atomic::write(&path, &contents))
+            .map(|()| path)
     }
 
     /// Names the file after what it is waiting for, so the directory reads.

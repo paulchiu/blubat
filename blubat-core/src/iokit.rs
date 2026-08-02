@@ -14,7 +14,9 @@ use objc2_io_kit::{
 };
 
 use crate::address::Address;
+use crate::config::Advertised;
 use crate::device::{ChargeState, Device, Levels, Source};
+use crate::engine::AdvertisedThresholds;
 use crate::timestamp::Timestamp;
 
 /// The class Apple's HID peripherals register under.
@@ -24,13 +26,15 @@ use crate::timestamp::Timestamp;
 /// class is a matter of widening this constant, not of reworking the parse.
 const SERVICE_CLASS: &str = "AppleDeviceManagementHIDEventService";
 
-const KEYS: [&str; 6] = [
+const KEYS: [&str; 8] = [
     "Product",
     "DeviceAddress",
     "BatteryPercent",
     "BatteryStatusFlags",
     "HasBattery",
     "Transport",
+    "LowBatteryNotificationPercentage",
+    "CriticallyLowBatteryNotificationPercentage",
 ];
 
 /// Reads every Apple HID peripheral that reports a battery.
@@ -39,6 +43,45 @@ pub(crate) fn read(read_at: Timestamp, warnings: &mut Vec<String>) -> Vec<Device
         .into_iter()
         .filter_map(|properties| device(&properties, read_at, warnings))
         .collect()
+}
+
+/// Reads the thresholds Apple's own nodes publish for themselves.
+///
+/// A separate pass from a reading, and deliberately not on the poll tick: these
+/// numbers describe the device rather than its charge and never move, so a
+/// caller resolves them once and again on a config reload. Devices that publish
+/// neither are absent rather than empty, which keeps the map to what it is for.
+pub fn advertised() -> AdvertisedThresholds {
+    matching_entries()
+        .iter()
+        .filter_map(advertised_by)
+        .collect()
+}
+
+/// The thresholds one registry entry publishes, absent where it publishes none.
+fn advertised_by(properties: &Properties) -> Option<(Address, Advertised)> {
+    let percentage = |key| {
+        properties
+            .get(key)
+            .and_then(Property::number)
+            .and_then(|percent| u8::try_from(percent).ok())
+            .filter(|&percent| percent <= 100)
+    };
+
+    let advertised = Advertised {
+        low: percentage("LowBatteryNotificationPercentage"),
+        critical: percentage("CriticallyLowBatteryNotificationPercentage"),
+    };
+
+    (advertised != Advertised::NONE)
+        .then(|| {
+            properties
+                .get("DeviceAddress")
+                .and_then(Property::text)
+                .and_then(Address::parse)
+                .map(|address| (address, advertised))
+        })
+        .flatten()
 }
 
 /// One registry property, narrowed to the three types these keys use.
@@ -296,6 +339,47 @@ mod tests {
         let device = device(&anonymous, Timestamp::from_unix(0), &mut Vec::new())
             .expect("a battery reading");
         assert_eq!(device.name, "30-82-16-f2-24-90");
+    }
+
+    #[test]
+    fn apples_own_thresholds_are_read_where_the_node_publishes_them() {
+        let mut publishing = trackpad();
+        publishing.insert("LowBatteryNotificationPercentage", Property::Number(6));
+        publishing.insert(
+            "CriticallyLowBatteryNotificationPercentage",
+            Property::Number(3),
+        );
+
+        let (address, advertised) = advertised_by(&publishing).expect("both thresholds");
+
+        assert_eq!(address.as_str(), "30-82-16-f2-24-90");
+        assert_eq!(advertised.low, Some(6));
+        assert_eq!(advertised.critical, Some(3));
+    }
+
+    #[test]
+    fn a_node_publishing_one_threshold_contributes_only_that_one() {
+        let mut half = trackpad();
+        half.insert("LowBatteryNotificationPercentage", Property::Number(6));
+
+        let (_, advertised) = advertised_by(&half).expect("the one it publishes");
+
+        assert_eq!(advertised.low, Some(6));
+        assert_eq!(advertised.critical, None);
+    }
+
+    #[test]
+    fn a_node_publishing_nothing_usable_contributes_nothing() {
+        let mut unusable = trackpad();
+        unusable.insert("LowBatteryNotificationPercentage", Property::Number(101));
+
+        assert_eq!(advertised_by(&trackpad()), None, "no thresholds at all");
+        assert_eq!(advertised_by(&unusable), None, "not a percentage");
+
+        let mut anonymous = trackpad();
+        anonymous.insert("LowBatteryNotificationPercentage", Property::Number(6));
+        anonymous.remove("DeviceAddress");
+        assert_eq!(advertised_by(&anonymous), None, "nothing to key it on");
     }
 
     #[test]

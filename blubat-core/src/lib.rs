@@ -20,9 +20,11 @@
 //! ```
 
 mod address;
+mod atomic;
 mod config;
 mod device;
 mod duration;
+mod engine;
 mod error;
 mod event;
 mod history;
@@ -42,9 +44,11 @@ pub use config::{
 };
 pub use device::{ChargeState, Device, Levels, Source};
 pub use duration::{Debounce, parse_duration};
+pub use engine::{AdvertisedThresholds, Engine, Raised};
 pub use error::{Error, Result};
 pub use event::Event;
 pub use history::{Direction, History, Sample, Trend};
+pub use iokit::advertised;
 pub use paths::Paths;
 pub use poll::{Tiers, poll, snapshot};
 pub use snapshot::Snapshot;
