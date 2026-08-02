@@ -5,6 +5,12 @@
 //! outlives its timeout, and reports what it came to rather than being waited
 //! on: nothing here can stall a poll, a keystroke or another hook.
 //!
+//! Those threads are detached, and the timeout is blubat's to enforce rather
+//! than the shell's, so it lasts only as long as blubat does: a hook still
+//! running when the dashboard is quit is reparented and runs to completion.
+//! Quitting cannot be made to wait out whatever a hook is doing, and a hook
+//! that has to be bounded past that has to bound itself.
+//!
 //! Whether a hook is due at all is the engine's decision, not this module's.
 //! [`dispatch`] asks it, because recording the run is part of allowing it.
 
@@ -89,11 +95,6 @@ impl Runner {
     /// How long a hook that names no timeout of its own may run for.
     pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-    /// A runner that logs every hook that went wrong to stderr.
-    pub fn new() -> Self {
-        Self::reporting(log)
-    }
-
     /// A runner that hands every outcome to `report`, which the dashboard uses
     /// to put a hook that went wrong on its status line rather than on top of
     /// the frame it is drawing.
@@ -102,12 +103,6 @@ impl Runner {
             timeout: Self::DEFAULT_TIMEOUT,
             report: Arc::new(report),
         }
-    }
-}
-
-impl Default for Runner {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -173,7 +168,7 @@ pub fn dispatch(
 ///
 /// Every variable is always set and empty where the reading has no answer, so a
 /// script can read one without testing whether it is there.
-pub fn environment(raised: &Raised) -> [(&'static str, String); 8] {
+fn environment(raised: &Raised) -> [(&'static str, String); 8] {
     let percent = |level: Option<u8>| level.map(|level| level.to_string()).unwrap_or_default();
 
     [
@@ -188,12 +183,13 @@ pub fn environment(raised: &Raised) -> [(&'static str, String); 8] {
     ]
 }
 
-/// `BLUBAT_CHARGING` as a shell test reads it, empty where no source knows.
+/// `BLUBAT_CHARGING` as a shell test reads it, and as the documented contract
+/// names it: `1`, `0`, or `unknown` where no source can say.
 fn charging(charge: ChargeState) -> &'static str {
     match charge {
-        ChargeState::Charging => "true",
-        ChargeState::Discharging => "false",
-        ChargeState::Unknown => "",
+        ChargeState::Charging => "1",
+        ChargeState::Discharging => "0",
+        ChargeState::Unknown => "unknown",
     }
 }
 
@@ -235,25 +231,32 @@ fn wait_out(mut child: Child, timeout: Duration) -> Ran {
     }
 }
 
-/// The default report: a line on stderr for every hook that went wrong.
-fn log(outcome: Outcome) {
-    if outcome.went_wrong() {
-        eprintln!("blubat: {outcome}");
-    }
-}
-
 /// A hook sink that records what would have run, for the modules that wire the
 /// real runner up.
 #[cfg(test)]
 pub mod fake {
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use blubat_core::{Address, Event};
 
     use super::{Hook, Hooks, Raised};
+
+    /// One start, in enough detail to show what travelled with the command.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Started {
+        pub command: String,
+        pub event: Event,
+        pub device: String,
+        pub address: Address,
+        pub cycle: u64,
+        pub timeout: Option<Duration>,
+    }
 
     /// Records every hook it is handed instead of running it.
     #[derive(Debug, Default)]
     pub struct Recorder {
-        started: Mutex<Vec<String>>,
+        started: Mutex<Vec<Started>>,
     }
 
     impl Recorder {
@@ -261,18 +264,33 @@ pub mod fake {
             Self::default()
         }
 
-        /// The commands started so far, in order.
-        pub fn started(&self) -> Vec<String> {
+        /// Everything started so far, in order.
+        pub fn started(&self) -> Vec<Started> {
             self.started.lock().expect("an unpoisoned recorder").clone()
+        }
+
+        /// The commands alone, for a test the rest of the detail says nothing to.
+        pub fn commands(&self) -> Vec<String> {
+            self.started()
+                .into_iter()
+                .map(|started| started.command)
+                .collect()
         }
     }
 
     impl Hooks for Recorder {
-        fn start(&self, hook: &Hook, _raised: &Raised) {
+        fn start(&self, hook: &Hook, raised: &Raised) {
             self.started
                 .lock()
                 .expect("an unpoisoned recorder")
-                .push(hook.command.clone());
+                .push(Started {
+                    command: hook.command.clone(),
+                    event: raised.event,
+                    device: raised.device.clone(),
+                    address: raised.address.clone(),
+                    cycle: raised.cycle,
+                    timeout: hook.timeout,
+                });
         }
     }
 
@@ -294,7 +312,7 @@ mod tests {
 
     use blubat_core::{Address, Device, Levels, Source};
 
-    use super::fake::Recorder;
+    use super::fake::{Recorder, Started};
     use super::*;
 
     const TRACKPAD: &str = "30-82-16-f2-24-90";
@@ -438,15 +456,15 @@ mod tests {
 
         assert_eq!(values[3], "", "no level");
         assert_eq!(values[4], "", "no previous level");
-        assert_eq!(values[5], "", "no charge state");
+        assert_eq!(values[5], "unknown", "no charge state");
         assert_eq!(values[7], "", "an event that watches no threshold");
     }
 
     #[test]
     fn a_charging_device_reads_as_a_shell_test_expects() {
-        assert_eq!(charging(ChargeState::Charging), "true");
-        assert_eq!(charging(ChargeState::Discharging), "false");
-        assert_eq!(charging(ChargeState::Unknown), "");
+        assert_eq!(charging(ChargeState::Charging), "1");
+        assert_eq!(charging(ChargeState::Discharging), "0");
+        assert_eq!(charging(ChargeState::Unknown), "unknown");
     }
 
     #[test]
@@ -507,7 +525,7 @@ mod tests {
                 "low_battery",
                 "18",
                 "30",
-                "false",
+                "0",
                 "iokit",
                 "20"
             ]
@@ -579,7 +597,7 @@ mod tests {
     #[test]
     fn dispatch_starts_the_hooks_the_config_runs_for_that_event_and_device() {
         let config = Config::parse(
-            "[[hook]]\nevent = \"low_battery\"\ncommand = \"nag\"\n\n\
+            "[[hook]]\nevent = \"low_battery\"\ncommand = \"nag\"\ntimeout = \"10s\"\n\n\
              [[hook]]\nevent = \"low_battery\"\nmatch = \"keys\"\ncommand = \"keys-only\"\n\n\
              [[hook]]\nevent = \"charged\"\ncommand = \"unplug\"\n",
         )
@@ -597,7 +615,19 @@ mod tests {
             Timestamp::from_unix(1_785_643_199),
         );
 
-        assert_eq!(recorder.started(), ["nag"]);
+        assert_eq!(
+            recorder.started(),
+            [Started {
+                command: String::from("nag"),
+                event: Event::LowBattery,
+                device: String::from("Trackpad"),
+                address: address(TRACKPAD),
+                cycle: 0,
+                timeout: Some(Duration::from_secs(10)),
+            }],
+            "the event, the device it was raised for and the hook's own timeout \
+             all travel with the command"
+        );
     }
 
     #[test]
@@ -624,7 +654,7 @@ mod tests {
         }
 
         assert_eq!(
-            recorder.started(),
+            recorder.commands(),
             ["nag", "nag"],
             "the run a minute in is inside the window, the one half an hour in is not"
         );

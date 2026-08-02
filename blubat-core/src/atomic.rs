@@ -29,14 +29,22 @@ pub(crate) fn write(path: &Path, contents: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
     use super::*;
+
+    static NEXT: AtomicU32 = AtomicU32::new(0);
 
     /// A directory that removes itself, so a failing test leaves nothing behind.
     struct Scratch(PathBuf);
 
     impl Scratch {
         fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("blubat-atomic-{name}"));
+            let path = std::env::temp_dir().join(format!(
+                "blubat-atomic-{}-{}-{name}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::SeqCst)
+            ));
             let _ = fs::remove_dir_all(&path);
 
             Self(path)

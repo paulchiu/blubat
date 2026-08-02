@@ -29,20 +29,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::address::Address;
 use crate::atomic;
-use crate::config::{Advertised, Config, Hook, Thresholds};
+use crate::config::{Advertised, AdvertisedThresholds, Config, Hook, Thresholds};
 use crate::device::{ChargeState, Device, Source};
 use crate::duration::Debounce;
 use crate::error::{Error, Result};
 use crate::event::Event;
 use crate::snapshot::Snapshot;
 use crate::timestamp::Timestamp;
-
-/// What a device advertises about itself, keyed by address.
-///
-/// Apple's HID nodes publish their own low and critical percentages. Reading
-/// them is a separate pass from a poll, so the engine takes them as an input
-/// and a test hands one in without a registry.
-pub type AdvertisedThresholds = BTreeMap<Address, Advertised>;
 
 /// One raised event, with everything a banner or a hook needs to describe it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -200,18 +193,18 @@ impl Engine {
 
         let level = device.active_level();
         let previous = state.level;
-        let settled = state.settle(device.connected, now);
-        let overdue = overdue(device, stale_after, now);
+        let observed = Observed {
+            level,
+            charge: device.charge,
+            settled: state.settle(device.connected, now),
+            overdue: overdue(device, stale_after, now),
+        };
 
         let raised = Event::ALL
             .into_iter()
             .filter_map(|event| {
                 state
-                    .apply(
-                        event,
-                        signal(event, level, thresholds, settled, overdue),
-                        now,
-                    )
+                    .apply(event, signal(event, observed, thresholds), now)
                     .map(|cycle| Raised {
                         event,
                         device: device.name.clone(),
@@ -263,10 +256,13 @@ impl DeviceState {
         now: Timestamp,
     ) -> Self {
         let level = device.active_level();
-        let overdue = overdue(device, stale_after, now);
-        let fired = |event| {
-            signal(event, level, thresholds, Some(device.connected), overdue) == Signal::Fire
+        let observed = Observed {
+            level,
+            charge: device.charge,
+            settled: Some(device.connected),
+            overdue: overdue(device, stale_after, now),
         };
+        let fired = |event| signal(event, observed, thresholds) == Signal::Fire;
 
         Self {
             level,
@@ -368,12 +364,24 @@ impl Signal {
     }
 }
 
+/// One reading reduced to what the six event rules read of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Observed {
+    level: Option<u8>,
+    charge: ChargeState,
+    /// The link state a change has settled into, absent while none has.
+    settled: Option<bool>,
+    overdue: bool,
+}
+
 /// The threshold one battery event watches, and which side of it fires.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Trigger {
     threshold: u8,
     /// Whether it fires below the threshold rather than at or above it.
     below: bool,
+    /// Whether a device known to be draining is barred from firing it.
+    while_charging: bool,
 }
 
 impl Trigger {
@@ -383,25 +391,37 @@ impl Trigger {
             Event::LowBattery => Some(Self {
                 threshold: thresholds.low,
                 below: true,
+                while_charging: false,
             }),
             Event::CriticalBattery => Some(Self {
                 threshold: thresholds.critical,
                 below: true,
+                while_charging: false,
             }),
             Event::Charged => Some(Self {
                 threshold: thresholds.high,
                 below: false,
+                while_charging: true,
             }),
             _ => None,
         }
     }
 
-    fn fires(self, level: u8) -> bool {
-        if self.below {
+    /// Whether the level is on the firing side, in a charge state that allows it.
+    ///
+    /// `charged` says a charge has finished, so a device reporting that it is
+    /// draining cannot raise it however high it reads: a multi battery device
+    /// rises again whenever its emptiest part is put back. A device that
+    /// reports no charge state at all still can, which is every `system_profiler`
+    /// device and so most of them.
+    fn fires(self, level: u8, charge: ChargeState) -> bool {
+        let crossed = if self.below {
             level < self.threshold
         } else {
             level >= self.threshold
-        }
+        };
+
+        crossed && !(self.while_charging && charge == ChargeState::Discharging)
     }
 
     /// Whether the level has recovered past the threshold by the margin.
@@ -419,18 +439,12 @@ impl Trigger {
 }
 
 /// What one event makes of a reading, whatever the pair's arm state is.
-fn signal(
-    event: Event,
-    level: Option<u8>,
-    thresholds: Thresholds,
-    settled: Option<bool>,
-    overdue: bool,
-) -> Signal {
+fn signal(event: Event, observed: Observed, thresholds: Thresholds) -> Signal {
     match event {
-        Event::Connected => link(settled, true),
-        Event::Disconnected => link(settled, false),
-        Event::Stale => Signal::of(overdue),
-        _ => battery(event, level, thresholds),
+        Event::Connected => link(observed.settled, true),
+        Event::Disconnected => link(observed.settled, false),
+        Event::Stale => Signal::of(observed.overdue),
+        _ => battery(event, observed, thresholds),
     }
 }
 
@@ -445,11 +459,11 @@ fn link(settled: Option<bool>, connected: bool) -> Signal {
 /// A device with no live level holds everything. macOS keeps reporting the last
 /// level of a disconnected device with no timestamp, and a number that old
 /// cannot be allowed to fire or to re-arm anything.
-fn battery(event: Event, level: Option<u8>, thresholds: Thresholds) -> Signal {
+fn battery(event: Event, observed: Observed, thresholds: Thresholds) -> Signal {
     Trigger::of(event, thresholds)
-        .zip(level)
+        .zip(observed.level)
         .map_or(Signal::Hold, |(trigger, level)| {
-            if trigger.fires(level) {
+            if trigger.fires(level, observed.charge) {
                 Signal::Fire
             } else if trigger.rearms(level, thresholds.rearm_margin) {
                 Signal::Rearm
@@ -519,6 +533,9 @@ mod tests {
     }
 
     /// A connected device reading `level`, taken at `second`.
+    ///
+    /// Its charge state is unknown, as every `system_profiler` device's is, so
+    /// the level path alone decides what a test raises.
     fn device(level: Option<u8>, second: i64) -> Device {
         Device {
             address: address(TRACKPAD),
@@ -529,7 +546,7 @@ mod tests {
                 main: level,
                 ..Levels::default()
             },
-            charge: ChargeState::Discharging,
+            charge: ChargeState::Unknown,
             source: Source::IoKit,
             connected: true,
             read_at: at(second),
@@ -658,6 +675,71 @@ mod tests {
         let raised = levels(&Config::default(), &[50, 99, 100, 98, 100]);
 
         assert_eq!(kinds(&raised), [Event::Charged, Event::Charged]);
+    }
+
+    #[test]
+    fn a_device_that_says_it_is_draining_cannot_raise_charged_however_high_it_reads() {
+        let config = Config::default();
+        let draining = |level, second| Device {
+            charge: ChargeState::Discharging,
+            ..device(Some(level), second)
+        };
+        let advance = |engine: Engine, level, second| {
+            engine.step(
+                &reading(vec![draining(level, second)], second),
+                &config,
+                &AdvertisedThresholds::new(),
+                at(second),
+            )
+        };
+
+        let (engine, _) = advance(Engine::default(), 100, 0);
+        let (engine, wobbling) = [97, 100, 97, 100].into_iter().enumerate().fold(
+            (engine, Vec::new()),
+            |(engine, mut raised), (tick, level)| {
+                let (engine, step) = advance(engine, level, 1 + tick as i64);
+                raised.extend(step);
+
+                (engine, raised)
+            },
+        );
+        let (_, plugged) = step(engine, &config, 100, 5);
+
+        assert!(
+            wobbling.is_empty(),
+            "an earbud back in its case is not a finished charge: {wobbling:?}"
+        );
+        assert_eq!(
+            kinds(&plugged),
+            [Event::Charged],
+            "and the same level does raise it once the device stops draining"
+        );
+    }
+
+    #[test]
+    fn a_margin_of_zero_re_arms_the_moment_the_level_is_back_at_the_threshold() {
+        let unhysteretic = config("[defaults]\nrearm_margin = 0\n");
+
+        let raised = levels(&unhysteretic, &[50, 19, 20, 19, 20, 19]);
+
+        assert_eq!(
+            kinds(&raised),
+            [Event::LowBattery, Event::LowBattery, Event::LowBattery],
+            "a margin of zero is hysteresis switched off, which is the caller's to ask for"
+        );
+    }
+
+    #[test]
+    fn a_margin_wider_than_the_scale_leaves_an_event_latched_once_it_has_fired() {
+        let unreachable = config("[defaults]\nlow = 100\nrearm_margin = 100\n");
+
+        let raised = levels(&unreachable, &[100, 99, 100, 99]);
+
+        assert_eq!(
+            kinds(&raised),
+            [Event::LowBattery],
+            "re-arming would take 200%, so the crossing is announced once and never again"
+        );
     }
 
     #[test]
@@ -1025,6 +1107,11 @@ mod tests {
 
         assert_eq!(warning, None);
         assert_eq!(restored, engine, "every flag and clock survived");
+        assert_eq!(
+            restored.devices[&address(TRACKPAD)].events[&Event::LowBattery].last_fired,
+            Some(at(1)),
+            "the moment it fired is part of that state"
+        );
 
         let (stepped, quiet) = step(restored.clone(), &config, 19, 2);
         let (_, again) = levels_after(stepped, &config, &[21, 19], 3);

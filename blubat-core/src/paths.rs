@@ -27,15 +27,14 @@ pub struct Paths {
 impl Paths {
     /// The XDG locations: `~/.config/blubat` and `~/.local/state/blubat`.
     pub fn resolve() -> Result<Self> {
-        let base = Xdg::new().map_err(|error| Error::Path(error.to_string()))?;
-
-        Ok(Self {
-            config_file: base.config_dir().join(APP).join(CONFIG_FILE),
-            state_dir: base
-                .state_dir()
-                .unwrap_or_else(|| base.data_dir())
-                .join(APP),
-        })
+        Xdg::new()
+            .map_err(|error| Error::Path(error.to_string()))
+            .map(|base| {
+                Self::based(
+                    &base.config_dir(),
+                    &base.state_dir().unwrap_or_else(|| base.data_dir()),
+                )
+            })
     }
 
     /// Both trees under one directory, which is what a test hands a scratch dir.
@@ -43,6 +42,15 @@ impl Paths {
         Self {
             config_file: root.join(CONFIG_FILE),
             state_dir: root.join("state"),
+        }
+    }
+
+    /// blubat's own layout under two XDG bases, which is the half of
+    /// [`Paths::resolve`] that does not depend on the environment.
+    fn based(config: &Path, state: &Path) -> Self {
+        Self {
+            config_file: config.join(APP).join(CONFIG_FILE),
+            state_dir: state.join(APP),
         }
     }
 
@@ -57,11 +65,6 @@ impl Paths {
     /// The TOML file holding user intent, which may not exist.
     pub fn config_file(&self) -> &Path {
         &self.config_file
-    }
-
-    /// The directory holding everything blubat writes about itself.
-    pub fn state_dir(&self) -> &Path {
-        &self.state_dir
     }
 
     /// The event engine's armed and fired state, which is machine state.
@@ -79,27 +82,42 @@ impl Paths {
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_resolved_paths_sit_under_the_xdg_bases() {
-        let paths = Paths::resolve().expect("a home directory");
+    /// The bases the XDG strategy resolves to, handed in so no test depends on
+    /// the home directory of whoever is running it.
+    fn xdg() -> Paths {
+        Paths::based(
+            Path::new("/home/blubat/.config"),
+            Path::new("/home/blubat/.local/state"),
+        )
+    }
 
-        assert!(paths.config_file().is_absolute());
-        assert!(
-            paths.config_file().ends_with("blubat/config.toml"),
-            "{paths:?}"
+    #[test]
+    fn each_file_sits_under_its_own_xdg_base() {
+        let paths = xdg();
+
+        assert_eq!(
+            paths.config_file(),
+            Path::new("/home/blubat/.config/blubat/config.toml")
         );
-        assert!(
-            paths.state_file().ends_with("blubat/state.toml"),
-            "{paths:?}"
+        assert_eq!(
+            paths.state_file(),
+            PathBuf::from("/home/blubat/.local/state/blubat/state.toml")
         );
-        assert!(paths.watch_dir().ends_with("blubat/watches"), "{paths:?}");
+        assert_eq!(
+            paths.watch_dir(),
+            PathBuf::from("/home/blubat/.local/state/blubat/watches")
+        );
     }
 
     #[test]
     fn intent_and_machine_state_never_share_a_directory() {
-        let paths = Paths::resolve().expect("a home directory");
-
-        assert_ne!(paths.config_file().parent(), Some(paths.state_dir()));
+        for paths in [xdg(), Paths::rooted(Path::new("/tmp/blubat-test-root"))] {
+            assert_ne!(
+                paths.config_file().parent(),
+                Some(paths.state_dir.as_path()),
+                "{paths:?}"
+            );
+        }
     }
 
     #[test]

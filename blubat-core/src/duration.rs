@@ -43,16 +43,6 @@ pub enum Debounce {
     Window(Duration),
 }
 
-impl Debounce {
-    /// The window to hold off for, which a per cycle debounce does not have.
-    pub fn window(self) -> Option<Duration> {
-        match self {
-            Debounce::Once => None,
-            Debounce::Window(window) => Some(window),
-        }
-    }
-}
-
 impl FromStr for Debounce {
     type Err = Error;
 
@@ -149,11 +139,6 @@ mod tests {
         assert_eq!(
             "30m".parse::<Debounce>().expect("parses"),
             Debounce::Window(Duration::from_secs(1_800))
-        );
-        assert_eq!(Debounce::Once.window(), None);
-        assert_eq!(
-            Debounce::Window(Duration::from_secs(60)).window(),
-            Some(Duration::from_secs(60))
         );
         assert!("never".parse::<Debounce>().is_err());
     }

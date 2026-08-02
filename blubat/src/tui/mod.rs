@@ -57,6 +57,7 @@ pub fn run(paths: &Paths) -> Result<(), Failure> {
     let mut session = terminal::Session::open()?;
     let mut app = App {
         notice: notice([unreadable, stale_state]),
+        advertised: effects.advertised().clone(),
         ..App::new(
             tiers.fast,
             Timestamp::now(),

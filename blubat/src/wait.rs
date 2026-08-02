@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use blubat_core::{Config, Device, Paths, Snapshot, Watch, parse_duration, watch_dir};
+use blubat_core::{Config, Device, Paths, Snapshot, Watch, parse_duration};
 
 use crate::notify::{Banner, Desktop, Notifier};
 use crate::{Failure, reading};
@@ -35,22 +35,19 @@ pub struct Args {
 /// nothing else decides what a blubat notification sounds like.
 pub fn run(args: &Args, paths: &Paths) -> Result<(), Failure> {
     if daemon_is_running() {
-        watch_dir()
-            .map_err(Failure::from)
-            .and_then(|directory| register(args, &directory))
-            .map(|path| {
-                println!(
-                    "watching {} for {}%, registered as {}",
-                    args.device,
-                    args.until,
-                    path.display()
-                );
-            })
+        register(args, &paths.watch_dir()).map(|path| {
+            println!(
+                "watching {} for {}%, registered as {}",
+                args.device,
+                args.until,
+                path.display()
+            );
+        })
     } else {
         let sound = Config::load(paths.config_file())?.notifications.sound;
 
         wait_for_level(args, reading).map(|(device, level)| {
-            notify(&format!("{device} is at {level}%, safe to unplug."), &sound);
+            notify(&Desktop, &completed(&device, level), &sound);
             println!("{device} reached {level}%");
         })
     }
@@ -146,9 +143,14 @@ fn wait_for_level(args: &Args, read: impl Fn() -> Snapshot) -> Result<(String, u
     }
 }
 
+/// What the banner ending a wait says.
+fn completed(device: &str, level: u8) -> String {
+    format!("{device} is at {level}%, safe to unplug.")
+}
+
 /// Posts the banner that ends a wait, which cannot fail the wait itself.
-fn notify(body: &str, sound: &str) {
-    if let Err(problem) = Desktop.post(&Banner::new("blubat", body, sound)) {
+fn notify(notifier: &dyn Notifier, body: &str, sound: &str) {
+    if let Err(problem) = notifier.post(&Banner::new("blubat", body, sound)) {
         eprintln!("blubat: {problem}");
     }
 }
@@ -317,6 +319,37 @@ mod tests {
             Ok((TRACKPAD.to_string(), 100))
         );
         assert_eq!(reads.load(Ordering::SeqCst), 3, "it read until it crossed");
+    }
+
+    #[test]
+    fn the_banner_ending_a_wait_carries_the_sound_the_config_asked_for() {
+        let recorder = crate::notify::fake::Recorder::new();
+        let (device, level) =
+            wait_for_level(&args("trackpad", 100, None), || snapshot(Some(100), true))
+                .expect("it reached the target");
+
+        notify(&recorder, &completed(&device, level), "Ping");
+
+        assert_eq!(recorder.posted().len(), 1);
+        assert_eq!(recorder.posted()[0].title, "blubat");
+        assert_eq!(
+            recorder.posted()[0].body,
+            format!("{TRACKPAD} is at 100%, safe to unplug.")
+        );
+        assert_eq!(
+            recorder.posted()[0].sound.as_deref(),
+            Some("Ping"),
+            "the file's sound, not a hardcoded one"
+        );
+    }
+
+    #[test]
+    fn a_banner_that_cannot_be_delivered_does_not_fail_the_wait() {
+        let recorder = crate::notify::fake::Recorder::failing("no notification centre");
+
+        notify(&recorder, &completed(TRACKPAD, 100), "Glass");
+
+        assert_eq!(recorder.posted().len(), 1, "it was attempted");
     }
 
     #[test]

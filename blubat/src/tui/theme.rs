@@ -6,7 +6,7 @@
 //! that palette beside the glyphs, which the same table also has a say in. Both
 //! are values rather than constants so `r` can replace them mid run.
 
-use blubat_core::{Rgb, Scheme, Theme};
+use blubat_core::{Rgb, Scheme, Theme, Thresholds};
 use ratatui::style::Color;
 
 use super::glyph::Glyphs;
@@ -114,11 +114,16 @@ impl Palette {
         }
     }
 
-    /// Green from 50, yellow from 15, red below it, dim for no reading at all.
-    pub fn level(self, level: Option<u8>) -> Color {
+    /// Green from [`HEALTHY_FROM`], yellow down to the device's own critical
+    /// threshold, red below it, dim for no reading at all.
+    ///
+    /// The red band is the engine's number rather than one of this module's, so
+    /// a device the dashboard paints red is one blubat has raised
+    /// `critical_battery` for and not merely one it drew that way.
+    pub fn level(self, level: Option<u8>, thresholds: Thresholds) -> Color {
         match level {
-            Some(50..) => self.ok,
-            Some(CRITICAL_BELOW..) => self.low,
+            Some(HEALTHY_FROM..) => self.ok,
+            Some(level) if !is_critical(Some(level), thresholds) => self.low,
             Some(_) => self.critical,
             None => self.dim,
         }
@@ -166,8 +171,12 @@ fn colour(rgb: Option<Rgb>) -> Option<Color> {
 /// Stands in for anything no source reported, as the CLI prints it.
 pub const UNKNOWN: &str = "--";
 
-/// Below this level a live reading wants attention rather than a glance.
-pub const CRITICAL_BELOW: u8 = 15;
+/// At or above this level a battery is nobody's problem, whatever is configured.
+///
+/// The top of the scale rather than the bottom of it: what counts as critical
+/// is the device's own threshold, which the config and the device itself have a
+/// say in, but half full is half full everywhere.
+pub const HEALTHY_FROM: u8 = 50;
 
 /// Cells in the battery bar.
 pub const BAR_WIDTH: usize = 12;
@@ -188,11 +197,13 @@ const NO_DATA: char = '\u{b7}';
 
 /// Whether a level is low enough to want attention.
 ///
-/// Takes the level rather than the device, so a caller has to have decided the
-/// reading is live: a disconnected device's level is last seen data and can be
-/// arbitrarily old, which is never an alert.
-pub fn is_critical(level: Option<u8>) -> bool {
-    level.is_some_and(|level| level < CRITICAL_BELOW)
+/// The same test the event engine applies, so the count on the status line and
+/// the events blubat raises cannot disagree. Takes the level rather than the
+/// device, so a caller has to have decided the reading is live: a disconnected
+/// device's level is last seen data and can be arbitrarily old, which is never
+/// an alert.
+pub fn is_critical(level: Option<u8>, thresholds: Thresholds) -> bool {
+    level.is_some_and(|level| level < thresholds.critical)
 }
 
 /// A level as the dashboard prints it.
@@ -268,21 +279,40 @@ mod tests {
             .theme
     }
 
+    /// The thresholds a device with nothing configured for it is judged by.
+    fn built_in() -> Thresholds {
+        Thresholds::BUILT_IN
+    }
+
     #[test]
     fn the_level_scale_colours_each_band() {
         let palette = Palette::DARK;
+        let level = |level| palette.level(level, built_in());
 
-        assert_eq!(palette.level(Some(100)), palette.ok);
-        assert_eq!(palette.level(Some(50)), palette.ok);
-        assert_eq!(palette.level(Some(49)), palette.low);
-        assert_eq!(palette.level(Some(15)), palette.low);
-        assert_eq!(palette.level(Some(14)), palette.critical);
-        assert_eq!(
-            palette.level(Some(0)),
-            palette.critical,
-            "empty is still a reading"
+        assert_eq!(level(Some(100)), palette.ok);
+        assert_eq!(level(Some(50)), palette.ok);
+        assert_eq!(level(Some(49)), palette.low);
+        assert_eq!(level(Some(10)), palette.low, "the built-in critical is 10");
+        assert_eq!(level(Some(9)), palette.critical);
+        assert_eq!(level(Some(0)), palette.critical, "empty is still a reading");
+        assert_eq!(level(None), palette.dim);
+    }
+
+    #[test]
+    fn the_red_band_is_the_one_the_device_is_judged_by() {
+        let palette = Palette::DARK;
+        let jumpy = Thresholds {
+            critical: 40,
+            ..Thresholds::BUILT_IN
+        };
+
+        assert_eq!(palette.level(Some(39), jumpy), palette.critical);
+        assert_eq!(palette.level(Some(40), jumpy), palette.low);
+        assert!(is_critical(Some(39), jumpy));
+        assert!(
+            !is_critical(Some(39), built_in()),
+            "the same level under the built-in threshold is a glance"
         );
-        assert_eq!(palette.level(None), palette.dim);
     }
 
     #[test]
@@ -296,7 +326,7 @@ mod tests {
         assert_eq!(Palette::of(&theme("scheme = \"light\"")), Palette::LIGHT);
         assert_eq!(Palette::of(&theme("scheme = \"mono\"")), Palette::MONO);
         assert_eq!(
-            Palette::of(&theme("scheme = \"light\"")).level(Some(10)),
+            Palette::of(&theme("scheme = \"light\"")).level(Some(5), built_in()),
             Palette::LIGHT.critical,
             "the level scale follows the scheme too"
         );
@@ -373,10 +403,16 @@ mod tests {
 
     #[test]
     fn the_critical_band_is_the_red_one() {
-        assert!(is_critical(Some(0)));
-        assert!(is_critical(Some(14)));
-        assert!(!is_critical(Some(15)), "the yellow band is a glance");
-        assert!(!is_critical(None), "nothing read is not an alert");
+        assert!(is_critical(Some(0), built_in()));
+        assert!(is_critical(Some(9), built_in()));
+        assert!(
+            !is_critical(Some(10), built_in()),
+            "the yellow band is a glance"
+        );
+        assert!(
+            !is_critical(None, built_in()),
+            "nothing read is not an alert"
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! already says. Every function takes the state borrowed and returns a widget,
 //! so a view can be drawn into a test buffer without a terminal.
 
-use blubat_core::{ChargeState, Device};
+use blubat_core::{ChargeState, Device, Thresholds};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -297,7 +297,8 @@ fn device_row<'a>(
     section: Section,
 ) -> Row<'a> {
     let palette = app.look.palette;
-    let critical = section == Section::Active && theme::is_critical(device.active_level());
+    let critical = section == Section::Active
+        && theme::is_critical(device.active_level(), app.thresholds(device));
     let cells = columns
         .iter()
         .map(|column| cell(app, device, *column, section, critical))
@@ -315,6 +316,7 @@ fn cell<'a>(
 ) -> Cell<'a> {
     let palette = app.look.palette;
     let level = device.levels.lowest();
+    let thresholds = app.thresholds(device);
 
     match column {
         Column::Name => Cell::from(name(device, section, critical, palette)),
@@ -322,12 +324,12 @@ fn cell<'a>(
             device.kind.as_deref().unwrap_or(theme::UNKNOWN),
             section.tint(palette.dim, palette),
         )),
-        Column::Bar => Cell::from(bar(level, section, palette)),
+        Column::Bar => Cell::from(bar(level, section, palette, thresholds)),
         Column::Level => Cell::from(
             Line::from(Span::styled(
                 theme::percent(level),
                 Style::new()
-                    .fg(section.tint(palette.level(level), palette))
+                    .fg(section.tint(palette.level(level, thresholds), palette))
                     .add_modifier(Modifier::BOLD),
             ))
             .right_aligned(),
@@ -389,11 +391,19 @@ fn name(device: &Device, section: Section, critical: bool, palette: Palette) -> 
 }
 
 /// The filled run in the level colour, the trough behind it dim.
-fn bar(level: Option<u8>, section: Section, palette: Palette) -> Line<'static> {
+fn bar(
+    level: Option<u8>,
+    section: Section,
+    palette: Palette,
+    thresholds: Thresholds,
+) -> Line<'static> {
     let (filled, trough) = theme::battery_bar(level);
 
     Line::from(vec![
-        Span::styled(filled, section.tint(palette.level(level), palette)),
+        Span::styled(
+            filled,
+            section.tint(palette.level(level, thresholds), palette),
+        ),
         Span::styled(trough, palette.dim),
     ])
 }
@@ -630,7 +640,7 @@ mod tests {
                 ..typed("Magic Trackpad", "trackpad", "30-82-16-f2-24-90", Some(23))
             },
             typed("MX Keys M Mac", "keyboard", "de-df-38-f0-46-9b", Some(67)),
-            typed("Soundcore Liberty", "audio", "d0-03-4b-0b-e6-4e", Some(12)),
+            typed("Soundcore Liberty", "audio", "d0-03-4b-0b-e6-4e", Some(8)),
             Device {
                 connected: false,
                 read_at: Timestamp::from_unix(READ_AT.unix() - 10_800),
@@ -701,7 +711,7 @@ mod tests {
         let expected = " blubat   3 active   sort level   poll 5s   next 5s                                    ▲ 1 critical
 
      Device                   Type         Battery         % State       Trend  Last seen
- ▎ ▲ Soundcore Liberty        audio        █░░░░░░░░░░░  12% on battery  █▇▅▄▂▁ now
+ ▎ ▲ Soundcore Liberty        audio        █░░░░░░░░░░░   8% on battery  █▇▅▄▂▁ now
      Magic Trackpad           trackpad     ███░░░░░░░░░  23% + charging  █▇▅▄▂▁ now
      MX Keys M Mac            keyboard     ████████░░░░  67% on battery  █▇▅▄▂▁ now
 
@@ -736,7 +746,7 @@ mod tests {
         let expected = " blubat   3 active   sort level   poll 5s      ▲ 1 critical
 
      Device                   Battery         % State
- ▎ ▲ Soundcore Liberty        █░░░░░░░░░░░  12% on battery
+ ▎ ▲ Soundcore Liberty        █░░░░░░░░░░░   8% on battery
      Magic Trackpad           ███░░░░░░░░░  23% + charging
      MX Keys M Mac            ████████░░░░  67% on battery
 
@@ -812,6 +822,7 @@ mod tests {
             "/ filter",
             "h hide",
             "H show hidden",
+            "r reload",
             "? help",
         ] {
             assert!(footer.contains(key), "{key} is missing from `{footer}`");
@@ -827,7 +838,7 @@ mod tests {
         let expected = " blubat   3 active   sort level   poll 5s   next 5s                                    ▲ 1 critical
 
      Device                   Type         Battery         % State       Trend  Last seen
- ▎ ▲ Soundcore Liberty        audio        █░░░░░░░░░░░  12% on battery  █▇▅▄▂▁ now
+ ▎ ▲ Soundcore Liberty        audio        █░░░░░░░░░░░   8% on battery  █▇▅▄▂▁ now
      Magic Trackpad           trackpad     ███░░░░░░░░░  23% + charging  █▇▅▄▂▁ now
      MX Keys M Mac            keyboard     ████████░░░░  67% on battery  █▇▅▄▂▁ now
 
@@ -1098,8 +1109,8 @@ mod tests {
         assert!(cell("blubat").modifier.contains(Modifier::BOLD));
 
         assert_eq!(cell("Soundcore").fg, dark.alert, "a critical name");
-        assert_eq!(cell("12%").fg, dark.critical, "and the level under it");
-        assert!(cell("12%").modifier.contains(Modifier::BOLD));
+        assert_eq!(cell("8%").fg, dark.critical, "and the level under it");
+        assert!(cell("8%").modifier.contains(Modifier::BOLD));
         assert_eq!(cell("67%").fg, dark.ok);
 
         assert_eq!(
@@ -1134,7 +1145,7 @@ mod tests {
             Color::Rgb(0x39, 0xc5, 0xcf),
             "the accent"
         );
-        assert_eq!(cell("12%").fg, overridden, "the bottom band of the scale");
+        assert_eq!(cell("8%").fg, overridden, "the bottom band of the scale");
         assert_eq!(
             cell("Soundcore").fg,
             overridden,
@@ -1189,7 +1200,7 @@ mod tests {
         for width in 20..=120 {
             let screen = drawn(&dashboard(), width, 30).join("\n");
 
-            assert!(screen.contains("12%"), "at {width}:\n{screen}");
+            assert!(screen.contains("8%"), "at {width}:\n{screen}");
         }
     }
 }

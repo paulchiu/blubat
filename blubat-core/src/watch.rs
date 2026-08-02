@@ -8,12 +8,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::atomic;
 use crate::error::{Error, Result};
-use crate::paths::Paths;
 use crate::timestamp::Timestamp;
 
 /// A request to notify once, when one device reaches one level.
 ///
-/// `blubat wait` writes a watch into [`watch_dir`] and exits; a running daemon
+/// `blubat wait` writes a watch into the watch directory and exits; a running daemon
 /// drains that directory on each poll. A file drop rather than a socket is what
 /// lets the handover exist without blubat growing an IPC surface, and it means
 /// an interrupted wait leaves behind only a file that will be consumed or expire.
@@ -79,11 +78,6 @@ impl Watch {
             self.target
         )
     }
-}
-
-/// The directory `blubat wait` drops watches into and a daemon drains.
-pub fn watch_dir() -> Result<PathBuf> {
-    Paths::resolve().map(|paths| paths.watch_dir())
 }
 
 fn slug(device: &str) -> String {
@@ -219,13 +213,5 @@ mod tests {
 
         assert!(deadline.unix() >= before + 600, "{deadline:?}");
         assert_eq!(Watch::new("trackpad", 100, None).deadline, None);
-    }
-
-    #[test]
-    fn the_watch_directory_sits_under_the_xdg_state_home() {
-        let directory = watch_dir().expect("a home directory");
-
-        assert!(directory.ends_with("blubat/watches"), "{directory:?}");
-        assert!(directory.is_absolute());
     }
 }

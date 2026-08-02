@@ -7,7 +7,7 @@
 //! a test drives the whole chain from a reading to a started hook with no
 //! notification centre and no shell.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use blubat_core::{AdvertisedThresholds, Config, Engine, Paths, Snapshot};
 
@@ -21,8 +21,12 @@ pub struct Effects {
     /// Where the arm flags and the debounce clocks are kept between runs.
     state_file: PathBuf,
     engine: Engine,
-    /// What each device's own IOKit node publishes, read once: it describes
-    /// the hardware rather than the config, so a reload says nothing about it.
+    /// The engine as the state file last held it, so a reading that moved
+    /// nothing costs no write. Most of them move nothing.
+    saved: Engine,
+    /// What each device's own IOKit node publishes, read once: it describes the
+    /// hardware rather than the config, so a reload says nothing about it, and
+    /// a device paired mid session contributes its own thresholds next run.
     advertised: AdvertisedThresholds,
     notifier: Box<dyn Notifier>,
     hooks: Box<dyn Hooks>,
@@ -64,11 +68,17 @@ impl Effects {
         Self {
             config_file: paths.config_file().to_path_buf(),
             state_file: paths.state_file(),
+            saved: engine.clone(),
             engine,
             advertised,
             notifier,
             hooks,
         }
+    }
+
+    /// What each device advertises, which the dashboard judges levels by too.
+    pub fn advertised(&self) -> &AdvertisedThresholds {
+        &self.advertised
     }
 
     /// Steps the engine over one reading, announces and dispatches what that
@@ -106,7 +116,7 @@ impl Effects {
         }
 
         // After dispatch, since allowing a hook to run is what records it.
-        problems.extend(save(&self.engine, &self.state_file));
+        problems.extend(self.persist());
 
         problems
     }
@@ -119,11 +129,27 @@ impl Effects {
     pub fn reload(&self) -> Result<Config, String> {
         Config::load(&self.config_file).map_err(|error| error.to_string())
     }
-}
 
-/// Writes the state file, keeping whatever stopped it as something to say.
-fn save(engine: &Engine, path: &Path) -> Option<String> {
-    engine.save(path).err().map(|error| error.to_string())
+    /// Writes the state file, and only when the last reading moved anything.
+    ///
+    /// A dashboard tick that raised nothing has nothing new to say about
+    /// itself, and at one reading every few seconds those are almost all of
+    /// them. A write that failed leaves the last saved state where it was, so
+    /// the next reading tries again rather than treating the file as current.
+    fn persist(&mut self) -> Option<String> {
+        if self.engine == self.saved {
+            return None;
+        }
+
+        match self.engine.save(&self.state_file) {
+            Ok(()) => {
+                self.saved = self.engine.clone();
+
+                None
+            }
+            Err(error) => Some(error.to_string()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -216,7 +242,15 @@ mod tests {
 
     /// The effects under test, with both sinks recording instead of acting.
     fn effects(scratch: &Scratch) -> (Effects, Arc<PostedBanners>, Arc<StartedHooks>) {
-        let banners = Arc::new(PostedBanners::new());
+        recording(scratch, PostedBanners::new())
+    }
+
+    /// The same, over whichever notifier the test wants to give it.
+    fn recording(
+        scratch: &Scratch,
+        banners: PostedBanners,
+    ) -> (Effects, Arc<PostedBanners>, Arc<StartedHooks>) {
+        let banners = Arc::new(banners);
         let hooks = Arc::new(StartedHooks::new());
         let effects = Effects::new(
             &scratch.paths(),
@@ -255,7 +289,7 @@ mod tests {
         assert_eq!(banners.posted().len(), 1);
         assert_eq!(banners.posted()[0].body, "Battery low at 19%");
         assert_eq!(banners.posted()[0].sound.as_deref(), Some("Glass"));
-        assert_eq!(hooks.started(), ["nag"], "the charged hook waits its turn");
+        assert_eq!(hooks.commands(), ["nag"], "the charged hook waits its turn");
     }
 
     #[test]
@@ -275,7 +309,7 @@ mod tests {
             "the toggle is honoured: {:?}",
             banners.posted()
         );
-        assert_eq!(hooks.started(), ["nag"], "which says nothing about hooks");
+        assert_eq!(hooks.commands(), ["nag"], "which says nothing about hooks");
     }
 
     #[test]
@@ -338,6 +372,86 @@ mod tests {
             banners.posted().is_empty(),
             "and a restart at the same level says nothing: {:?}",
             banners.posted()
+        );
+    }
+
+    #[test]
+    fn a_banner_that_could_not_be_posted_comes_back_while_the_hook_still_runs() {
+        let scratch = Scratch::new();
+        let config = Config::parse("[[hook]]\nevent = \"low_battery\"\ncommand = \"nag\"\n")
+            .expect("parses");
+        let (mut effects, _, hooks) =
+            recording(&scratch, PostedBanners::failing("no notification centre"));
+
+        let problems = observe(&mut effects, &config, &[50, 19]);
+
+        assert_eq!(problems, ["no notification centre"]);
+        assert_eq!(
+            hooks.commands(),
+            ["nag"],
+            "a banner nobody saw says nothing about the hooks"
+        );
+    }
+
+    #[test]
+    fn state_that_cannot_be_written_comes_back_rather_than_being_printed() {
+        let scratch = Scratch::new();
+        let (mut effects, _, _) = effects(&scratch);
+        // A directory where the state file belongs, which is the shape of every
+        // unwritable path a test can arrange without changing permissions.
+        fs::create_dir_all(scratch.paths().state_file()).expect("a directory in the way");
+
+        let problems = observe(&mut effects, &Config::default(), &[50, 19]);
+
+        assert_eq!(
+            problems.len(),
+            2,
+            "one per reading: a failed write is retried rather than assumed done"
+        );
+        assert!(
+            problems
+                .iter()
+                .all(|problem| problem.contains("state.toml")),
+            "each names the file: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_reading_that_moved_nothing_leaves_the_state_file_alone() {
+        let scratch = Scratch::new();
+        let config = Config::default();
+        let (mut effects, _, _) = effects(&scratch);
+        observe(&mut effects, &config, &[50, 19]);
+
+        let written = fs::metadata(scratch.paths().state_file()).expect("a written state file");
+        effects.observe(&reading(Some(19), 2), &config);
+
+        assert_eq!(
+            fs::metadata(scratch.paths().state_file())
+                .expect("still there")
+                .modified()
+                .ok(),
+            written.modified().ok(),
+            "the level was already fired, so there was nothing to write"
+        );
+    }
+
+    #[test]
+    fn a_hooks_debounce_clock_is_in_the_state_the_reading_wrote() {
+        let scratch = Scratch::new();
+        let config = Config::parse(
+            "[[hook]]\nevent = \"low_battery\"\ncommand = \"nag\"\ndebounce = \"30m\"\n",
+        )
+        .expect("parses");
+        let (mut effects, _, _) = effects(&scratch);
+
+        observe(&mut effects, &config, &[50, 19]);
+
+        let written =
+            fs::read_to_string(scratch.paths().state_file()).expect("a written state file");
+        assert!(
+            written.contains("hook.nag"),
+            "the state was saved after dispatch, so the clock is in it: {written}"
         );
     }
 

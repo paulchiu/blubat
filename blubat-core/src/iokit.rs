@@ -14,9 +14,8 @@ use objc2_io_kit::{
 };
 
 use crate::address::Address;
-use crate::config::Advertised;
+use crate::config::{Advertised, AdvertisedThresholds};
 use crate::device::{ChargeState, Device, Levels, Source};
-use crate::engine::AdvertisedThresholds;
 use crate::timestamp::Timestamp;
 
 /// The class Apple's HID peripherals register under.
@@ -49,8 +48,8 @@ pub(crate) fn read(read_at: Timestamp, warnings: &mut Vec<String>) -> Vec<Device
 ///
 /// A separate pass from a reading, and deliberately not on the poll tick: these
 /// numbers describe the device rather than its charge and never move, so a
-/// caller resolves them once and again on a config reload. Devices that publish
-/// neither are absent rather than empty, which keeps the map to what it is for.
+/// caller resolves them once per run. Devices that publish neither are absent
+/// rather than empty, which keeps the map to what it is for.
 pub fn advertised() -> AdvertisedThresholds {
     matching_entries()
         .iter()
@@ -68,20 +67,16 @@ fn advertised_by(properties: &Properties) -> Option<(Address, Advertised)> {
             .filter(|&percent| percent <= 100)
     };
 
+    let address = properties
+        .get("DeviceAddress")
+        .and_then(Property::text)
+        .and_then(Address::parse)?;
     let advertised = Advertised {
         low: percentage("LowBatteryNotificationPercentage"),
         critical: percentage("CriticallyLowBatteryNotificationPercentage"),
     };
 
-    (advertised != Advertised::NONE)
-        .then(|| {
-            properties
-                .get("DeviceAddress")
-                .and_then(Property::text)
-                .and_then(Address::parse)
-                .map(|address| (address, advertised))
-        })
-        .flatten()
+    (advertised != Advertised::NONE).then_some((address, advertised))
 }
 
 /// One registry property, narrowed to the three types these keys use.

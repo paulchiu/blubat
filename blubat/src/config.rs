@@ -34,16 +34,19 @@ pub fn run(command: &Command, paths: &Paths) -> Result<(), Failure> {
 
             Ok(())
         }
-        Command::Edit => edit(path, &editor()?),
+        Command::Edit => edit(path, &editor(|name| std::env::var(name).ok())?),
         Command::Validate => validate(path, &mut io::stdout(), || reading().devices),
     }
 }
 
 /// The editor to open the file in, `$EDITOR` or failing that `$VISUAL`.
-fn editor() -> Result<String, Failure> {
+///
+/// Takes the lookup rather than reading the environment, since a test that set
+/// a variable would be setting it for every other test running beside it.
+fn editor(variable: impl Fn(&str) -> Option<String>) -> Result<String, Failure> {
     ["EDITOR", "VISUAL"]
-        .iter()
-        .filter_map(|name| std::env::var(name).ok())
+        .into_iter()
+        .filter_map(variable)
         .find(|editor| !editor.trim().is_empty())
         .ok_or_else(|| {
             Failure::Error("set $EDITOR to the editor blubat should open the config in".to_string())
@@ -277,6 +280,44 @@ mod tests {
         assert_eq!(unmatched, Ok(()), "a device may simply be switched off");
         assert!(warned.contains("warning"), "{warned}");
         assert!(warned.contains("trackpad"), "{warned}");
+    }
+
+    #[test]
+    fn the_editor_is_the_first_of_the_two_variables_that_names_one() {
+        let set = |variables: [(&'static str, &'static str); 2]| {
+            move |name: &str| {
+                variables
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_string())
+                    .filter(|value| !value.is_empty())
+            }
+        };
+
+        assert_eq!(
+            editor(set([("EDITOR", "vim"), ("VISUAL", "")])),
+            Ok("vim".to_string())
+        );
+        assert_eq!(
+            editor(set([("EDITOR", ""), ("VISUAL", "code -w")])),
+            Ok("code -w".to_string())
+        );
+        assert_eq!(
+            editor(set([("EDITOR", "vim"), ("VISUAL", "code -w")])),
+            Ok("vim".to_string()),
+            "EDITOR is asked first"
+        );
+        assert_eq!(
+            editor(set([("EDITOR", "   "), ("VISUAL", "code -w")])),
+            Ok("code -w".to_string()),
+            "a variable set to nothing but spaces names no editor"
+        );
+        assert!(
+            editor(|_| None)
+                .expect_err("nothing to open it in")
+                .to_string()
+                .contains("set $EDITOR")
+        );
     }
 
     #[test]

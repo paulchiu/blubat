@@ -7,7 +7,9 @@
 
 use std::time::Duration;
 
-use blubat_core::{Config, Device, History, Snapshot, Timestamp};
+use blubat_core::{
+    Advertised, AdvertisedThresholds, Config, Device, History, Snapshot, Thresholds, Timestamp,
+};
 
 use super::theme::{self, Look};
 use super::view::{Filter, Rows, View};
@@ -248,6 +250,9 @@ pub struct App {
     pub look: Look,
     /// The config in force, which the loop judges each reading against.
     pub config: Config,
+    /// What each device publishes about itself, which sits under the config in
+    /// the same order the engine resolves thresholds in.
+    pub advertised: AdvertisedThresholds,
     /// What the dashboard has to say about itself, if anything.
     pub notice: Option<Notice>,
     /// Set by `r` and cleared by what the loop reads: the reducer cannot touch
@@ -269,9 +274,22 @@ impl App {
             view: View::default(),
             look,
             config,
+            advertised: AdvertisedThresholds::new(),
             notice: None,
             reload: false,
         }
+    }
+
+    /// The thresholds one device is judged by, which are also the ones its row
+    /// is coloured by.
+    pub fn thresholds(&self, device: &Device) -> Thresholds {
+        self.config.thresholds_for(
+            device,
+            self.advertised
+                .get(&device.address)
+                .copied()
+                .unwrap_or(Advertised::NONE),
+        )
     }
 
     /// The devices of the last reading, empty before the first one lands.
@@ -295,7 +313,7 @@ impl App {
     /// persisted, so it is history rather than an alert.
     pub fn critical(&self) -> usize {
         self.connected()
-            .filter(|device| theme::is_critical(device.active_level()))
+            .filter(|device| theme::is_critical(device.active_level(), self.thresholds(device)))
             .count()
     }
 
@@ -945,6 +963,46 @@ pub(super) mod tests {
         assert_eq!(filtered.rows().len(), 1, "the low device is off screen");
         assert_eq!(filtered.critical(), 1, "and still counted");
         assert_eq!(filtered.connected().count(), 2);
+    }
+
+    #[test]
+    fn the_alert_count_uses_the_thresholds_the_events_are_raised_by() {
+        let jumpy = App {
+            config: config("[[device]]\nmatch = \"keys\"\ncritical = 45\n"),
+            ..loaded()
+        };
+
+        assert_eq!(
+            jumpy.critical(),
+            1,
+            "42% is critical for a device configured to call it that"
+        );
+        assert_eq!(
+            loaded().critical(),
+            0,
+            "and is nobody's problem under the built-in 10"
+        );
+    }
+
+    #[test]
+    fn a_device_that_advertises_its_own_threshold_is_counted_by_that() {
+        let keys = device("MX Keys M Mac", "de-df-38-f0-46-9b", Some(42));
+        let app = App {
+            advertised: AdvertisedThresholds::from([(
+                keys.address.clone(),
+                Advertised {
+                    low: Some(60),
+                    critical: Some(45),
+                },
+            )]),
+            ..update(app(), Event::Reading(reading(vec![keys])))
+        };
+
+        assert_eq!(
+            app.critical(),
+            1,
+            "Apple's number, in the absence of a file"
+        );
     }
 
     #[test]

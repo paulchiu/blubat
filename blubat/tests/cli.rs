@@ -129,13 +129,33 @@ fn an_unknown_subcommand_is_an_error_exit() {
 
 #[test]
 fn wait_requires_a_device_and_a_target() {
-    assert_eq!(code(&blubat(&["wait"])), 1);
-    assert_eq!(code(&blubat(&["wait", "--device", "trackpad"])), 1);
+    let scratch = Scratch::new();
+
+    assert_eq!(code(&blubat(&["--config", &scratch.path(), "wait"])), 1);
+    assert_eq!(
+        code(&blubat(&[
+            "--config",
+            &scratch.path(),
+            "wait",
+            "--device",
+            "trackpad"
+        ])),
+        1
+    );
 }
 
 #[test]
 fn wait_rejects_a_target_no_device_could_reach() {
-    let output = blubat(&["wait", "--device", "trackpad", "--until", "101"]);
+    let scratch = Scratch::new();
+    let output = blubat(&[
+        "--config",
+        &scratch.path(),
+        "wait",
+        "--device",
+        "trackpad",
+        "--until",
+        "101",
+    ]);
 
     assert_eq!(code(&output), 1);
     assert!(
@@ -146,7 +166,10 @@ fn wait_rejects_a_target_no_device_could_reach() {
 
 #[test]
 fn wait_rejects_an_interval_it_cannot_measure() {
+    let scratch = Scratch::new();
     let output = blubat(&[
+        "--config",
+        &scratch.path(),
         "wait",
         "--device",
         "trackpad",
@@ -160,22 +183,33 @@ fn wait_rejects_an_interval_it_cannot_measure() {
     assert!(stderr(&output).contains("is not a duration"), "{output:?}");
 }
 
+/// The two configs a wait can be run under: none at all, and one naming a
+/// notification sound, which is the only key `wait` reads.
 #[test]
 fn wait_gives_up_when_its_timeout_expires() {
-    let output = blubat(&[
-        "wait",
-        "--device",
-        NO_SUCH_DEVICE,
-        "--until",
-        "100",
-        "--interval",
-        "0s",
-        "--timeout",
-        "0s",
-    ]);
+    let scratch = Scratch::new();
 
-    assert_eq!(code(&output), 1);
-    assert!(stderr(&output).contains("gave up waiting"), "{output:?}");
+    for config in [
+        scratch.file(),
+        scratch.written("[notifications]\nsound = \"Ping\"\n"),
+    ] {
+        let output = blubat(&[
+            "--config",
+            &config.display().to_string(),
+            "wait",
+            "--device",
+            NO_SUCH_DEVICE,
+            "--until",
+            "100",
+            "--interval",
+            "0s",
+            "--timeout",
+            "0s",
+        ]);
+
+        assert_eq!(code(&output), 1, "{output:?}");
+        assert!(stderr(&output).contains("gave up waiting"), "{output:?}");
+    }
 }
 
 /// A config file in a scratch directory that removes itself.

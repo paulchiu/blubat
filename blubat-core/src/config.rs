@@ -10,6 +10,7 @@
 //! name or a duration that does not parse is an error carrying the line it is
 //! on, because a typo that silently does nothing is worse than one that says so.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
@@ -17,6 +18,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::address::Address;
 use crate::device::Device;
 use crate::duration::{Debounce, de_duration, de_optional_duration};
 use crate::error::{Error, Result};
@@ -49,7 +51,7 @@ impl Config {
     /// Reads the config file. `Ok(None)` when there is none, which is not an error.
     pub fn read(path: &Path) -> Result<Option<Self>> {
         match fs::read_to_string(path) {
-            Ok(contents) => toml::from_str(&contents)
+            Ok(contents) => Self::parse(&contents)
                 .map(Some)
                 .map_err(|error| Error::Format(format!("{}: {error}", path.display()))),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
@@ -199,15 +201,10 @@ impl Default for Poll {
 }
 
 impl Poll {
-    /// The two tier intervals for the dashboard and the one-shot commands.
-    pub fn foreground_tiers(&self) -> Tiers {
-        Tiers {
-            fast: self.foreground_interval,
-            slow: self.profiler_interval,
-        }
-    }
-
     /// The two tier intervals for the daemon.
+    ///
+    /// The dashboard builds its own in `tui`, since it polls faster than any
+    /// other caller while nothing in the file has asked otherwise.
     pub fn daemon_tiers(&self) -> Tiers {
         Tiers {
             fast: self.daemon_interval,
@@ -345,6 +342,12 @@ impl Advertised {
     };
 }
 
+/// What every device advertises about itself, keyed by address.
+///
+/// Reading the registry is a separate pass from a poll, so the event engine
+/// takes one of these as an input and a test hands one in without a registry.
+pub type AdvertisedThresholds = BTreeMap<Address, Advertised>;
+
 /// The thresholds in force for one device, with every key answered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Thresholds {
@@ -365,7 +368,10 @@ impl Thresholds {
         rearm_margin: 1,
     };
 
-    /// The orderings a usable set of thresholds has to hold.
+    /// The orderings and the ranges a usable set of thresholds has to hold.
+    ///
+    /// A threshold above 100 parses but can never be crossed, since no battery
+    /// reports more, so it silences its event rather than configuring it.
     fn problems(self) -> Vec<String> {
         [
             (self.low >= self.high)
@@ -379,6 +385,17 @@ impl Thresholds {
         ]
         .into_iter()
         .flatten()
+        .chain(
+            [
+                ("low", self.low),
+                ("critical", self.critical),
+                ("high", self.high),
+                ("rearm_margin", self.rearm_margin),
+            ]
+            .into_iter()
+            .filter(|(_, value)| *value > 100)
+            .map(|(key, value)| format!("{key} ({value}) must be a percentage of 100 or less")),
+        )
         .collect()
     }
 }
@@ -605,12 +622,41 @@ timeout  = "10s"
 
     #[test]
     fn a_missing_file_is_the_built_in_config_and_a_missing_directory_too() {
-        let absent = Path::new("/nonexistent-blubat/config.toml");
+        let absent = std::env::temp_dir()
+            .join(format!("blubat-absent-{}", std::process::id()))
+            .join("config.toml");
 
-        assert_eq!(Config::read(absent).expect("not an error"), None);
+        assert!(!absent.exists(), "{absent:?} was never written");
+        assert_eq!(Config::read(&absent).expect("not an error"), None);
         assert_eq!(
-            Config::load(absent).expect("not an error"),
+            Config::load(&absent).expect("not an error"),
             Config::default()
+        );
+    }
+
+    #[test]
+    fn a_threshold_no_battery_could_reach_is_reported_rather_than_accepted() {
+        let unreachable = Config::parse("[defaults]\nlow = 150\nhigh = 200\nrearm_margin = 120\n")
+            .expect("parses");
+
+        let problems = unreachable.problems();
+
+        assert_eq!(
+            problems,
+            [
+                "[defaults]: low (150) must be a percentage of 100 or less",
+                "[defaults]: high (200) must be a percentage of 100 or less",
+                "[defaults]: rearm_margin (120) must be a percentage of 100 or less",
+            ],
+            "{problems:?}"
+        );
+        assert!(
+            Config::parse("[defaults]\nlow = 100\nhigh = 100\nrearm_margin = 100\n")
+                .expect("parses")
+                .problems()
+                .iter()
+                .all(|problem| !problem.contains("percentage of 100")),
+            "100 is a level a battery reports"
         );
     }
 
@@ -744,23 +790,16 @@ timeout  = "10s"
     }
 
     #[test]
-    fn the_poll_table_hands_each_mode_its_own_tiers() {
+    fn the_poll_table_hands_the_daemon_its_own_tiers() {
         let poll = Config::parse(SAMPLE).expect("parses").poll;
 
-        assert_eq!(
-            poll.foreground_tiers(),
-            Tiers {
-                fast: Duration::from_secs(30),
-                slow: Duration::from_secs(300),
-            }
-        );
         assert_eq!(
             poll.daemon_tiers(),
             Tiers {
                 fast: Duration::from_secs(120),
                 slow: Duration::from_secs(300),
-            }
+            },
+            "the slower tick, since nothing is watching the daemon"
         );
-        assert_eq!(Poll::default().foreground_tiers(), Tiers::default());
     }
 }

@@ -88,10 +88,18 @@ while it is open, so `?` closes it before anything else responds again.
 
 `r` re-reads `~/.config/blubat/config.toml` in place: thresholds, notification
 toggles, hooks, the colour scheme and the charging glyph all take the new
-values without a restart. A file that will not parse is reported on a line of
-its own and changes nothing, so the config that was working a moment ago keeps
-working and the dashboard never exits over a typo. The same line carries a hook
-that went wrong, which is why hook output goes nowhere near stdout.
+values without a restart. `[poll]` is the exception, since the poller is
+already running on the intervals it was started with, so a changed
+`foreground_interval` or `profiler_interval` waits for a restart. A file that
+will not parse is reported on a line of its own and changes nothing, so the
+config that was working a moment ago keeps working and the dashboard never
+exits over a typo. The same line carries a hook that went wrong, which is why
+hook output goes nowhere near stdout.
+
+A row is painted red below the same `critical` threshold the events are raised
+by, so the count on the status line and the banners agree by construction: a
+device configured `critical = 40` is red and counted at 39%, which is also the
+level that raises `critical_battery` for it.
 
 Hiding lasts for the session: nothing is written anywhere. The charging mark is
 ascii by default and becomes the Nerd Font bolt when the environment says a
@@ -268,6 +276,12 @@ oscillating around the boundary raises one event instead of forty. That armed
 and fired state, and each hook's debounce clock, live in
 `~/.local/state/blubat/state.toml` and survive a restart.
 
+`charged` additionally needs a device that is not reporting itself as draining,
+since it says a charge has finished: an earbud put back in its case lifts the
+device's level without being anything to announce. Devices that report no
+charge state at all, which is every one `system_profiler` sees, raise it on the
+level alone.
+
 `[notifications]` switches the banners per event and nothing else: an event a
 toggle silences still runs its hooks, since the two are separate subscribers.
 
@@ -286,7 +300,8 @@ settings for it.
 
 A hook runs under `sh -c`, on its own thread, with its output discarded and
 these variables in its environment. Each is always set, and empty where the
-reading has no answer.
+reading has no answer. A hook still running when blubat exits is not killed:
+the timeout is blubat's to enforce and lasts only as long as blubat does.
 
 | Variable | Value |
 | --- | --- |
@@ -295,7 +310,7 @@ reading has no answer.
 | `BLUBAT_EVENT` | `low_battery`, `critical_battery`, `charged`, `connected`, `disconnected` or `stale` |
 | `BLUBAT_LEVEL` | Level in percent that raised the event |
 | `BLUBAT_PREVIOUS_LEVEL` | Last level seen before it |
-| `BLUBAT_CHARGING` | `true`, `false`, or empty where no source knows |
+| `BLUBAT_CHARGING` | `1`, `0`, or `unknown` where no source knows |
 | `BLUBAT_SOURCE` | `iokit` or `system_profiler` |
 | `BLUBAT_THRESHOLD` | The threshold crossed, empty for the events that watch no level |
 
