@@ -56,8 +56,9 @@ const REDRAW: Duration = Duration::from_millis(250);
 /// that did not get the lock draws everything and announces nothing, so a
 /// second one opened in a second pane does not double every banner.
 pub fn run(paths: &Paths) -> Result<(), Failure> {
-    let (_dashboard, unlocked) = claim(paths);
-    let owned = _dashboard.is_some();
+    // Held for the whole function, since dropping it hands the effects back.
+    let (dashboard, unlocked) = claim(paths);
+    let owned = dashboard.is_some();
     let (config, unreadable) = load(paths);
     let tiers = tiers(&config.poll);
     let (notes, events) = events::events(blubat_core::poll(tiers));
