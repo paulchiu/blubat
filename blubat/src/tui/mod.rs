@@ -98,6 +98,11 @@ pub fn run(paths: &Paths) -> Result<(), Failure> {
         if app.reload {
             app = update(app, Event::Reloaded(effects.reload()));
         }
+        if app.save_hidden {
+            let written = effects.save_hidden(&app.view.hidden);
+
+            app = update(app, Event::Saved(written));
+        }
     }
 
     Ok(())

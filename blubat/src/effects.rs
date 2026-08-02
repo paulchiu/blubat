@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use blubat_core::{AdvertisedThresholds, Config, Engine, Paths, Raised, Snapshot};
 
+use crate::config;
 use crate::hooks::{self, Hooks, Outcome, Runner};
 use crate::notify::{self, Desktop, Notifier};
 
@@ -171,6 +172,15 @@ impl Effects {
     /// would be worse than one running on yesterday's thresholds.
     pub fn reload(&self) -> Result<Config, String> {
         Config::load(&self.config_file).map_err(|error| error.to_string())
+    }
+
+    /// Writes the dashboard's hidden devices back, which `h` asks for.
+    ///
+    /// The only write blubat makes to that file, and the reason the reload above
+    /// and this sit together: they are the two ends of the one file blubat both
+    /// reads and, in this one table, maintains.
+    pub fn save_hidden(&self, hidden: &[String]) -> Result<(), String> {
+        config::save_hidden(&self.config_file, hidden)
     }
 
     /// Writes the state file, and only when the last reading moved anything.

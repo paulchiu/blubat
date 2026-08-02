@@ -92,9 +92,10 @@ pub const DETAIL_KEYS: [Binding; 2] = [
 const DETAIL_ACTIONS: [Action; 3] = [Action::Back, Action::Detail, Action::Quit];
 
 /// What the overlay says beyond the keys themselves.
-pub const NOTES: [&str; 3] = [
+pub const NOTES: [&str; 4] = [
     "the detail chart is this run only; a restart starts it empty.",
-    "h hides for this session only; a lasting hide arrives later.",
+    "h lasts: it is the one write blubat makes to the config file.",
+    "a hidden device is hidden here only, never unpaired from macOS.",
     "r re-reads the config file; one it cannot read changes nothing.",
 ];
 
@@ -247,6 +248,8 @@ pub enum Event {
     Tick(Timestamp),
     /// What the loop made of the reload [`Action::Reload`] asked for.
     Reloaded(Result<Config, String>),
+    /// What came of writing the hidden devices [`Action::ToggleHidden`] changed.
+    Saved(Result<(), String>),
     /// What the event engine raised over the reading that just landed.
     Raised(Vec<Raised>),
     /// Something the loop did that the user needs telling about.
@@ -288,6 +291,9 @@ pub struct App {
     /// a file, so the request travels as state and the answer comes back as an
     /// event.
     pub reload: bool,
+    /// Set by `h` and cleared the same way, for the same reason: the hide is
+    /// already in [`View::hidden`], and the file has yet to be told.
+    pub save_hidden: bool,
 }
 
 impl App {
@@ -301,12 +307,13 @@ impl App {
             running: true,
             now,
             interval,
-            view: View::default(),
+            view: View::hiding(&config.dashboard.hidden),
             look,
             config,
             advertised: AdvertisedThresholds::new(),
             notice: None,
             reload: false,
+            save_hidden: false,
         }
     }
 
@@ -420,6 +427,7 @@ pub fn update(app: App, event: Event) -> App {
         Event::Reading(reading) => receive(app, reading),
         Event::Tick(now) => App { now, ..app },
         Event::Reloaded(read) => reloaded(app, read),
+        Event::Saved(written) => saved(app, written),
         Event::Raised(raised) => recorded(app, raised),
         Event::Note(notice) => App {
             notice: Some(notice),
@@ -435,28 +443,39 @@ pub fn update(app: App, event: Event) -> App {
 /// The dashboard never exits over a config file. A rejected reload moves
 /// nothing but the line reporting it, so the thresholds, theme, glyphs and
 /// hooks that were working a moment ago carry on working.
-fn reloaded(app: App, read: Result<Config, String>) -> App {
-    let app = App {
-        reload: false,
-        ..app
-    };
+///
+/// A reload takes the file's hidden devices too, since `h` writes them there:
+/// the file is where hiding lives, so a hand edit is picked up by the key that
+/// re-reads it rather than needing a restart.
+fn reloaded(mut app: App, read: Result<Config, String>) -> App {
+    app.reload = false;
 
     match read {
         Ok(config) => {
-            let look = app.look.reloaded(&config.theme);
-
-            App {
-                look,
-                config,
-                notice: Some(Notice::said("config reloaded")),
-                ..app
-            }
+            app.look = app.look.reloaded(&config.theme);
+            app.view.hidden = config.dashboard.hidden.clone();
+            app.config = config;
+            app.notice = Some(Notice::said("config reloaded"));
         }
-        Err(problem) => App {
-            notice: Some(Notice::problem(problem)),
-            ..app
-        },
+        Err(problem) => app.notice = Some(Notice::problem(problem)),
     }
+
+    app
+}
+
+/// Takes what came of writing the hidden devices to the config file.
+///
+/// A hide the file would not take is reported and otherwise left alone: the
+/// device stays hidden on screen, so the dashboard says what did not survive
+/// rather than putting the row back without explanation.
+fn saved(mut app: App, written: Result<(), String>) -> App {
+    app.save_hidden = false;
+
+    if let Err(problem) = written {
+        app.notice = Some(Notice::problem(problem));
+    }
+
+    app
 }
 
 /// Keeps what the engine raised, which is the detail view's event log.
@@ -603,15 +622,18 @@ fn moved(app: App, step: isize) -> App {
 /// Hides the selected device, or shows it again if it was already hidden.
 ///
 /// One key both ways, so a device unhidden under `H` goes back with the same
-/// press that hid it.
+/// press that hid it. Either way the config file has something new to say, and
+/// a dashboard with no row selected has nothing to hide and so nothing to write.
 fn hide_selected(app: App) -> App {
-    let selected = app.current().map(|device| device.address.clone());
+    let Some(device) = app.current().cloned() else {
+        return app;
+    };
+    let app = App {
+        save_hidden: true,
+        ..app
+    };
 
-    viewed(app, |view| {
-        if let Some(address) = selected {
-            view.toggle_hidden(&address);
-        }
-    })
+    viewed(app, |view| view.toggle_hidden(&device))
 }
 
 /// Takes a fresh reading, recording the levels the trend column reads.
@@ -1171,6 +1193,60 @@ pub(super) mod tests {
         let empty = press(app(), "h");
 
         assert!(empty.view.hidden.is_empty());
+        assert!(!empty.save_hidden, "and asks for no write either");
+    }
+
+    #[test]
+    fn hiding_and_showing_both_ask_the_loop_to_write_the_config_file() {
+        let hidden = press(loaded(), "h");
+        let written = update(hidden.clone(), Event::Saved(Ok(())));
+
+        assert!(hidden.save_hidden, "the file has yet to be told");
+        assert_eq!(hidden.view.hidden, ["de-df-38-f0-46-9b"]);
+        assert!(!written.save_hidden, "and once told, stops asking");
+        assert_eq!(written.notice, None, "a hide that worked speaks for itself");
+        assert!(
+            press(press(hidden, "H"), "h").save_hidden,
+            "showing a device again is a write too"
+        );
+    }
+
+    #[test]
+    fn a_hide_the_file_would_not_take_is_reported_and_stays_on_screen() {
+        let refused = update(
+            press(loaded(), "h"),
+            Event::Saved(Err("config.toml: line 3".to_string())),
+        );
+
+        assert_eq!(refused.notice, Some(Notice::problem("config.toml: line 3")));
+        assert_eq!(names(&refused).len(), 2, "the row is gone all the same");
+    }
+
+    #[test]
+    fn the_dashboard_opens_without_the_devices_the_config_file_hides() {
+        let opened = App::new(
+            INTERVAL,
+            READ_AT,
+            Look::of(&Theme::default(), Glyphs::ASCII),
+            config("[dashboard]\nhidden = [\"MX Keys\"]\n"),
+        );
+        let hiding = update(opened, Event::Reading(three_devices()));
+
+        assert_eq!(names(&hiding), ["Magic Trackpad", "Soundcore Liberty"]);
+    }
+
+    #[test]
+    fn reloading_takes_the_hidden_devices_the_file_now_holds() {
+        let reloaded = update(
+            press(loaded(), "h"),
+            Event::Reloaded(Ok(config("[dashboard]\nhidden = [\"Soundcore\"]\n"))),
+        );
+
+        assert_eq!(
+            names(&reloaded),
+            ["MX Keys M Mac", "Magic Trackpad"],
+            "the file is where hiding lives, so `r` is what settles it"
+        );
     }
 
     #[test]

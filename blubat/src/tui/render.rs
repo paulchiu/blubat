@@ -952,12 +952,11 @@ mod tests {
      Device                   Type         Battery         % State       Trend  Last seen
  ▎ ▲ Soundcore Liberty        audio        █░░░░░░░░░░░   8% on battery  █▇▅▄▂▁ now
      Magic Trackpad           trackpad     ███░░░░░░░░░  23% + charging  █▇▅▄▂▁ now
-     MX Keys M Mac            keyboard     ████████░░░░  67% on battery  █▇▅▄▂▁ now
-                ┌ keys ────────────────────────────────────────────────────────────┐
-   inactive (2) │         q  quit                                                  │
-     AirPods Pro│       j/k  move                                                  │go
-     MX Master 3│     enter  detail                                                │go
-                │         s  sort                                                  │
+     MX Keys M M┌ keys ────────────────────────────────────────────────────────────┐
+                │         q  quit                                                  │
+   inactive (2) │       j/k  move                                                  │
+     AirPods Pro│     enter  detail                                                │go
+     MX Master 3│         s  sort                                                  │go
                 │         /  filter                                                │
                 │         h  hide                                                  │
                 │         H  show hidden                                           │
@@ -969,7 +968,8 @@ mod tests {
                 │         q  quit                                                  │
                 │                                                                  │
                 │ the detail chart is this run only; a restart starts it empty.    │
-                │ h hides for this session only; a lasting hide arrives later.     │
+                │ h lasts: it is the one write blubat makes to the config file.    │
+                │ a hidden device is hidden here only, never unpaired from macOS.  │
                 │ r re-reads the config file; one it cannot read changes nothing.  │
                 └──────────────────────────────────────────────────────────────────┘
 

@@ -4,9 +4,7 @@
 //! hidden devices, the order and the split into connected and disconnected all
 //! live here, so every one of them can be exercised without a frame.
 
-use std::collections::BTreeSet;
-
-use blubat_core::{Address, Device};
+use blubat_core::Device;
 
 /// The order the table lists devices in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -64,22 +62,42 @@ impl Filter {
 pub struct View {
     pub sort: Sort,
     pub filter: Filter,
-    /// Hidden for this session only. Hiding that survives a restart arrives
-    /// with the config file, which is the only file blubat writes to.
-    pub hidden: BTreeSet<Address>,
+    /// `[dashboard] hidden` as the config file holds it, in file order: the
+    /// same substring matches `--device` takes, and what `h` writes back.
+    pub hidden: Vec<String>,
     pub show_hidden: bool,
 }
 
 impl View {
-    /// Whether a device is on screen at all, before it is placed in a section.
-    fn shows(&self, device: &Device) -> bool {
-        self.filter.keeps(device) && (self.show_hidden || !self.hidden.contains(&device.address))
+    /// The view a config file's `[dashboard] hidden` opens the dashboard on.
+    pub fn hiding(hidden: &[String]) -> Self {
+        Self {
+            hidden: hidden.to_vec(),
+            ..Self::default()
+        }
     }
 
-    /// Hides `address`, or shows it again if it was already hidden.
-    pub fn toggle_hidden(&mut self, address: &Address) {
-        if !self.hidden.remove(address) {
-            self.hidden.insert(address.clone());
+    /// Whether a device is on screen at all, before it is placed in a section.
+    fn shows(&self, device: &Device) -> bool {
+        self.filter.keeps(device) && (self.show_hidden || !self.hides(device))
+    }
+
+    fn hides(&self, device: &Device) -> bool {
+        self.hidden.iter().any(|pattern| device.matches(pattern))
+    }
+
+    /// Hides `device`, or shows it again if some match already hid it.
+    ///
+    /// A new hide is written as the address, the one name for a device that
+    /// cannot be renamed out from under it. Showing one again drops every match
+    /// that covered it, so a device hidden by a hand written `"MX Master"` goes
+    /// back with the same press as one hidden by its address.
+    pub fn toggle_hidden(&mut self, device: &Device) {
+        let hidden = self.hides(device);
+        self.hidden.retain(|pattern| !device.matches(pattern));
+
+        if !hidden {
+            self.hidden.push(device.address.to_string());
         }
     }
 }
@@ -148,7 +166,7 @@ fn sorted(mut devices: Vec<&Device>, sort: Sort) -> Vec<&Device> {
 
 #[cfg(test)]
 mod tests {
-    use blubat_core::{ChargeState, Levels, Source, Timestamp};
+    use blubat_core::{Address, ChargeState, Levels, Source, Timestamp};
 
     use super::*;
 
@@ -325,7 +343,7 @@ mod tests {
     fn a_hidden_device_is_gone_until_hidden_devices_are_shown() {
         let devices = devices();
         let mut view = View::default();
-        view.toggle_hidden(&devices[0].address);
+        view.toggle_hidden(&devices[0]);
 
         assert_eq!(shown(&devices, &view).len(), 3);
         assert!(!shown(&devices, &view).contains(&"Magic Trackpad".to_string()));
@@ -333,9 +351,49 @@ mod tests {
         view.show_hidden = true;
         assert_eq!(shown(&devices, &view).len(), 4);
 
-        view.toggle_hidden(&devices[0].address);
+        view.toggle_hidden(&devices[0]);
         view.show_hidden = false;
         assert_eq!(shown(&devices, &view).len(), 4, "and hiding is reversible");
+    }
+
+    #[test]
+    fn a_new_hide_is_written_as_the_address_that_cannot_be_renamed() {
+        let devices = devices();
+        let mut view = View::default();
+        view.toggle_hidden(&devices[0]);
+
+        assert_eq!(view.hidden, ["30-82-16-f2-24-90"]);
+    }
+
+    #[test]
+    fn the_config_files_matches_are_the_devices_the_dashboard_opens_without() {
+        let devices = devices();
+        let view = View::hiding(&["MX Keys".to_string()]);
+
+        assert_eq!(
+            shown(&devices, &view),
+            ["Magic Trackpad", "Soundcore Liberty", "AirPods Pro"],
+            "a name a person wrote hides as readily as an address"
+        );
+    }
+
+    #[test]
+    fn showing_a_device_again_drops_every_match_that_was_hiding_it() {
+        let devices = devices();
+        let mut view = View::hiding(&["MX Keys".to_string(), "de-df-38".to_string()]);
+        view.toggle_hidden(&devices[1]);
+
+        assert!(view.hidden.is_empty(), "one press, however it was hidden");
+        assert_eq!(shown(&devices, &view).len(), 4);
+    }
+
+    #[test]
+    fn hiding_appends_rather_than_reordering_what_the_file_already_held() {
+        let devices = devices();
+        let mut view = View::hiding(&["MX Keys".to_string()]);
+        view.toggle_hidden(&devices[0]);
+
+        assert_eq!(view.hidden, ["MX Keys", "30-82-16-f2-24-90"]);
     }
 
     #[test]

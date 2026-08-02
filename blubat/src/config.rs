@@ -1,15 +1,20 @@
-//! `blubat config`: where the file is, opening it, and checking it.
+//! `blubat config`: where the file is, opening it, checking it, and the one
+//! line blubat writes into it.
 //!
-//! blubat never writes the config file. `edit` hands it to the editor and
-//! waits, and whether a file exists afterwards is the editor's decision, not
-//! blubat's, so a machine that has never been configured stays that way.
+//! `edit` hands the file to the editor and waits, and whether a file exists
+//! afterwards is the editor's decision, not blubat's, so a machine that has
+//! never been configured stays that way. [`save_hidden`] is the single
+//! exception: `h` on the dashboard writes `[dashboard] hidden` and nothing else,
+//! ever.
 
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command as Process;
 
 use blubat_core::{Config, Device, Paths};
+use toml_edit::{Array, DocumentMut, Item, Table, value};
 
 use crate::{Failure, reading};
 
@@ -37,6 +42,61 @@ pub fn run(command: &Command, paths: &Paths) -> Result<(), Failure> {
         Command::Edit => edit(path, &editor(|name| std::env::var(name).ok())?),
         Command::Validate => validate(path, &mut io::stdout(), || reading().devices),
     }
+}
+
+/// Writes `[dashboard] hidden` and leaves the rest of the file exactly as it was.
+///
+/// The one write blubat ever makes to a config file, which is why it is a
+/// surgical edit rather than a re-serialisation: the comments, the blank lines
+/// and the order of everything else in the file are the user's, and hiding a
+/// device is no reason to reformat them. A file that is not there yet is
+/// created holding that one table.
+pub fn save_hidden(path: &Path, hidden: &[String]) -> Result<(), String> {
+    document(path)
+        .and_then(|mut document| {
+            set_hidden(&mut document, hidden)?;
+
+            write_atomically(path, &document.to_string())
+        })
+        .map_err(|problem| format!("{}: {problem}", path.display()))
+}
+
+/// The file as it stands, or an empty document where there is no file yet.
+fn document(path: &Path) -> Result<DocumentMut, String> {
+    match fs::read_to_string(path) {
+        Ok(written) => written
+            .parse()
+            .map_err(|error: toml_edit::TomlError| format!("{error}, so the hide was not written")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(DocumentMut::new()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn set_hidden(document: &mut DocumentMut, hidden: &[String]) -> Result<(), String> {
+    document
+        .entry("dashboard")
+        .or_insert(Item::Table(Table::new()))
+        .as_table_like_mut()
+        .ok_or_else(|| String::from("[dashboard] is not a table"))
+        .map(|dashboard| {
+            dashboard.insert(
+                "hidden",
+                value(hidden.iter().map(String::as_str).collect::<Array>()),
+            );
+        })
+}
+
+/// Writes through a partial file and a rename, so nothing reads half a config.
+fn write_atomically(path: &Path, contents: &str) -> Result<(), String> {
+    let mut partial = OsString::from(path);
+    partial.push(".partial");
+    let partial = PathBuf::from(partial);
+
+    path.parent()
+        .map_or(Ok(()), fs::create_dir_all)
+        .and_then(|()| fs::write(&partial, contents))
+        .and_then(|()| fs::rename(&partial, path))
+        .map_err(|error| error.to_string())
 }
 
 /// The editor to open the file in, `$EDITOR` or failing that `$VISUAL`.
@@ -280,6 +340,76 @@ mod tests {
         assert_eq!(unmatched, Ok(()), "a device may simply be switched off");
         assert!(warned.contains("warning"), "{warned}");
         assert!(warned.contains("trackpad"), "{warned}");
+    }
+
+    #[test]
+    fn hiding_a_device_writes_the_table_and_nothing_else_in_the_file() {
+        let scratch = Scratch::new();
+        let path = scratch.write(
+            "# my thresholds\n[defaults]\nlow = 25\n\n\
+             [dashboard]\nhidden = [\"MX Master\"]\nsort = \"name\"\n",
+        );
+
+        assert_eq!(
+            save_hidden(&path, &["MX Master".to_string(), "30-82-16".to_string()]),
+            Ok(())
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("a written config"),
+            "# my thresholds\n[defaults]\nlow = 25\n\n\
+             [dashboard]\nhidden = [\"MX Master\", \"30-82-16\"]\nsort = \"name\"\n",
+            "the comment, the order and every other table survive the hide"
+        );
+    }
+
+    #[test]
+    fn hiding_the_first_device_creates_a_file_holding_that_table_alone() {
+        let scratch = Scratch::new();
+        let path = scratch.config_file();
+
+        assert_eq!(save_hidden(&path, &["30-82-16".to_string()]), Ok(()));
+        assert_eq!(
+            fs::read_to_string(&path).expect("a written config"),
+            "[dashboard]\nhidden = [\"30-82-16\"]\n"
+        );
+        assert_eq!(
+            Config::load(&path).expect("blubat reads back what it wrote"),
+            Config {
+                dashboard: blubat_core::Dashboard {
+                    hidden: vec!["30-82-16".to_string()],
+                    ..blubat_core::Dashboard::default()
+                },
+                ..Config::default()
+            }
+        );
+    }
+
+    #[test]
+    fn showing_the_last_device_again_leaves_the_list_empty_rather_than_absent() {
+        let scratch = Scratch::new();
+        let path = scratch.write("[dashboard]\nhidden = [\"30-82-16\"]\n");
+
+        assert_eq!(save_hidden(&path, &[]), Ok(()));
+        assert_eq!(
+            fs::read_to_string(&path).expect("a written config"),
+            "[dashboard]\nhidden = []\n"
+        );
+    }
+
+    #[test]
+    fn a_file_that_will_not_parse_is_reported_rather_than_overwritten() {
+        let scratch = Scratch::new();
+        let path = scratch.write("[defaults\nlow = 25\n");
+
+        let problem = save_hidden(&path, &["30-82-16".to_string()])
+            .expect_err("an unclosed table header is not TOML");
+
+        assert!(problem.contains(&path.display().to_string()), "{problem}");
+        assert_eq!(
+            fs::read_to_string(&path).expect("still there"),
+            "[defaults\nlow = 25\n",
+            "a file blubat cannot read is a file it will not rewrite"
+        );
     }
 
     #[test]
