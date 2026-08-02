@@ -22,6 +22,13 @@ use super::theme::{self, Palette};
 /// Seconds in the hour the chart's axis and the rates are both stated in.
 const SECONDS_PER_HOUR: f64 = 3_600.0;
 
+/// The slowest rate, in points an hour, that still counts as going somewhere.
+///
+/// A level that moved one point across a long window fits a slope near zero
+/// without being zero, and the countdown that comes out of dividing by it runs
+/// to thousands of days. Below this the level is treated as flat.
+const CREEPING: f64 = 0.1;
+
 /// Cells the stats panel takes, which is what its longest row needs.
 const STATS_WIDTH: u16 = 33;
 
@@ -209,9 +216,11 @@ impl Estimate {
     ///
     /// A flat level is going nowhere, so it has no estimate rather than an
     /// endless one, and a device with no trend behind it has nothing to
-    /// extrapolate from at all.
+    /// extrapolate from at all. A level barely moving is the same answer: the
+    /// figure dividing by that rate produces is arithmetic rather than news.
     fn of(level: Option<u8>, trend: Option<Trend>, thresholds: Thresholds) -> Option<Self> {
-        let (level, trend) = (f64::from(level?), trend?);
+        let level = f64::from(level?);
+        let trend = trend.filter(|trend| trend.rate.abs() >= CREEPING)?;
         let seconds = |points: f64| (points.max(0.0) / trend.rate.abs() * SECONDS_PER_HOUR) as i64;
 
         match trend.direction {
@@ -550,6 +559,19 @@ mod tests {
             "and one reading, which is no trend at all"
         );
         assert_eq!(estimate(None, -4.0), None, "as is nothing to count from");
+    }
+
+    /// The boundary between flat and technically moving, which is where a
+    /// countdown in thousands of days would otherwise come from.
+    #[test]
+    fn a_level_that_is_barely_moving_is_going_nowhere_too() {
+        assert_eq!(estimate(Some(100), -0.001), None);
+        assert_eq!(estimate(Some(100), 0.001), None);
+        assert_eq!(
+            estimate(Some(100), -CREEPING),
+            Some(Estimate::ToEmpty(3_600_000)),
+            "and the slowest rate that is still worth a figure keeps one"
+        );
     }
 
     #[test]
