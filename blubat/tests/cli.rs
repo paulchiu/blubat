@@ -3,8 +3,14 @@
 //! Everything here runs without Bluetooth hardware: argument errors, the help
 //! surface, and the no-matching-device path, which is the honest outcome on a
 //! CI runner with nothing paired.
+//!
+//! Anything that reads or writes a file is pointed at a scratch directory with
+//! both `--config` and `--state-dir`, so a machine with a daemon installed and
+//! a machine with none run these the same way, and nothing here can drop a
+//! watch file into the state directory of whoever is running them.
 
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::process::Output;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -20,6 +26,18 @@ fn blubat(args: &[&str]) -> Output {
         .args(args)
         .output()
         .expect("the binary runs")
+}
+
+/// The same, with every file blubat touches inside `scratch`.
+fn blubat_in(scratch: &Scratch, args: &[&str]) -> Output {
+    let rooted = [
+        "--config",
+        &scratch.path(),
+        "--state-dir",
+        &scratch.state_path(),
+    ];
+
+    blubat(&[&rooted[..], args].concat())
 }
 
 fn code(output: &Output) -> i32 {
@@ -156,15 +174,9 @@ fn an_unknown_subcommand_is_an_error_exit() {
 fn wait_requires_a_device_and_a_target() {
     let scratch = Scratch::new();
 
-    assert_eq!(code(&blubat(&["--config", &scratch.path(), "wait"])), 1);
+    assert_eq!(code(&blubat_in(&scratch, &["wait"])), 1);
     assert_eq!(
-        code(&blubat(&[
-            "--config",
-            &scratch.path(),
-            "wait",
-            "--device",
-            "trackpad"
-        ])),
+        code(&blubat_in(&scratch, &["wait", "--device", "trackpad"])),
         1
     );
 }
@@ -172,15 +184,10 @@ fn wait_requires_a_device_and_a_target() {
 #[test]
 fn wait_rejects_a_target_no_device_could_reach() {
     let scratch = Scratch::new();
-    let output = blubat(&[
-        "--config",
-        &scratch.path(),
-        "wait",
-        "--device",
-        "trackpad",
-        "--until",
-        "101",
-    ]);
+    let output = blubat_in(
+        &scratch,
+        &["wait", "--device", "trackpad", "--until", "101"],
+    );
 
     assert_eq!(code(&output), 1);
     assert!(
@@ -192,49 +199,73 @@ fn wait_rejects_a_target_no_device_could_reach() {
 #[test]
 fn wait_rejects_an_interval_it_cannot_measure() {
     let scratch = Scratch::new();
-    let output = blubat(&[
-        "--config",
-        &scratch.path(),
-        "wait",
-        "--device",
-        "trackpad",
-        "--until",
-        "100",
-        "--interval",
-        "soon",
-    ]);
+    let output = blubat_in(
+        &scratch,
+        &[
+            "wait",
+            "--device",
+            "trackpad",
+            "--until",
+            "100",
+            "--interval",
+            "soon",
+        ],
+    );
 
     assert_eq!(code(&output), 1);
     assert!(stderr(&output).contains("is not a duration"), "{output:?}");
 }
 
+/// The arguments of a wait that runs here rather than being handed over.
+const IMPATIENT: [&str; 8] = [
+    "wait",
+    "--device",
+    NO_SUCH_DEVICE,
+    "--until",
+    "100",
+    "--interval",
+    "0s",
+    "--timeout",
+];
+
 /// The two configs a wait can be run under: none at all, and one naming a
 /// notification sound, which is the only key `wait` reads.
 #[test]
 fn wait_gives_up_when_its_timeout_expires() {
-    let scratch = Scratch::new();
+    for contents in ["", "[notifications]\nsound = \"Ping\"\n"] {
+        let scratch = Scratch::new();
+        if !contents.is_empty() {
+            scratch.written(contents);
+        }
 
-    for config in [
-        scratch.file(),
-        scratch.written("[notifications]\nsound = \"Ping\"\n"),
-    ] {
-        let output = blubat(&[
-            "--config",
-            &config.display().to_string(),
-            "wait",
-            "--device",
-            NO_SUCH_DEVICE,
-            "--until",
-            "100",
-            "--interval",
-            "0s",
-            "--timeout",
-            "0s",
-        ]);
+        let output = blubat_in(&scratch, &[&IMPATIENT[..], &["0s"]].concat());
 
         assert_eq!(code(&output), 1, "{output:?}");
         assert!(stderr(&output).contains("gave up waiting"), "{output:?}");
     }
+}
+
+/// The handoff, both ways round. Which one a wait takes turns on one lock file,
+/// and getting that wrong either parks the wait or ignores a running daemon.
+#[test]
+fn a_wait_is_handed_to_a_daemon_that_is_running_and_kept_here_when_none_is() {
+    let scratch = Scratch::new();
+    let watches = scratch.state().join("watches");
+
+    let alone = blubat_in(&scratch, &[&IMPATIENT[..], &["0s"]].concat());
+    assert_eq!(code(&alone), 1, "{alone:?}");
+    assert!(!watches.exists(), "nothing was registered for nobody");
+
+    let _daemon = scratch.daemon_lock();
+    let handed = blubat_in(&scratch, &[&IMPATIENT[..], &["10m"]].concat());
+
+    assert_eq!(code(&handed), 0, "{handed:?}");
+    assert!(stdout(&handed).contains("registered as"), "{handed:?}");
+    assert_eq!(
+        fs::read_dir(&watches).expect("a watch directory").count(),
+        1,
+        "one watch, waiting for the daemon to pick it up"
+    );
 }
 
 /// A config file in a scratch directory that removes itself.
@@ -270,6 +301,38 @@ impl Scratch {
 
     fn path(&self) -> String {
         self.file().display().to_string()
+    }
+
+    /// Where blubat keeps its own files under this directory.
+    fn state(&self) -> PathBuf {
+        self.0.join("state")
+    }
+
+    fn state_path(&self) -> String {
+        self.state().display().to_string()
+    }
+
+    /// A daemon lock this scratch's blubat sees as a running daemon, held for
+    /// as long as the returned file is open.
+    fn daemon_lock(&self) -> File {
+        fs::create_dir_all(self.state()).expect("a state directory");
+
+        let lock = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(self.state().join("daemon.lock"))
+            .expect("a lock file");
+
+        // SAFETY: `flock` is given a descriptor this test owns and reads no
+        // memory it owns.
+        assert_eq!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0,
+            "nothing else is holding a lock in a fresh scratch directory"
+        );
+
+        lock
     }
 }
 

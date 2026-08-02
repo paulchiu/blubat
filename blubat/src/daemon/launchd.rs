@@ -14,6 +14,8 @@ use std::fs;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
 
 use blubat_core::Paths;
 
@@ -27,6 +29,12 @@ const LABEL: &str = "com.paulchiu.blubat";
 /// The agent restarts only when the daemon exits badly, and this is what stops
 /// one that fails on startup from being restarted as fast as it can fail.
 const THROTTLE: u32 = 30;
+
+/// How many times an install asks launchd to bootstrap the agent.
+const ATTEMPTS: u32 = 3;
+
+/// How long it leaves launchd between those attempts.
+const SETTLE: Duration = Duration::from_millis(250);
 
 /// The PATH the daemon runs with.
 ///
@@ -82,16 +90,25 @@ struct Agent {
     /// The binary launchd runs, absolute: launchd resolves nothing, having
     /// neither a PATH nor a working directory to resolve a name against.
     program: PathBuf,
+    /// The files the daemon reads and writes, named rather than left to be
+    /// worked out again. launchd starts the agent with almost no environment,
+    /// so a daemon resolving its own paths would land somewhere else than the
+    /// blubat that installed it whenever the XDG variables are set, and the two
+    /// would then hold different locks and write different state.
+    config: PathBuf,
+    state: PathBuf,
     home: PathBuf,
     out: PathBuf,
     error: PathBuf,
 }
 
 impl Agent {
-    /// The agent for the blubat that is running and this user's state directory.
+    /// The agent for the blubat that is running and the files it is using.
     fn resolve(paths: &Paths) -> Result<Self, Failure> {
         Ok(Self {
             program: executable()?,
+            config: paths.config_file().to_path_buf(),
+            state: paths.state_dir().to_path_buf(),
             home: home()?,
             out: paths.log_file(),
             error: paths.error_log_file(),
@@ -111,6 +128,10 @@ impl Agent {
              \t<key>ProgramArguments</key>\n\
              \t<array>\n\
              \t\t<string>{program}</string>\n\
+             \t\t<string>--config</string>\n\
+             \t\t<string>{config}</string>\n\
+             \t\t<string>--state-dir</string>\n\
+             \t\t<string>{state}</string>\n\
              \t\t<string>daemon</string>\n\
              \t\t<string>run</string>\n\
              \t</array>\n\
@@ -137,6 +158,8 @@ impl Agent {
              </dict>\n\
              </plist>\n",
             program = escaped(&self.program),
+            config = escaped(&self.config),
+            state = escaped(&self.state),
             home = escaped(&self.home),
             out = escaped(&self.out),
             error = escaped(&self.error),
@@ -164,21 +187,47 @@ pub fn install(
     out: &mut impl Write,
 ) -> Result<(), Failure> {
     let agent = Agent::resolve(paths)?;
-    let target = plist.to_string_lossy().into_owned();
 
     write_plist(plist, &agent.plist())?;
     let _ = launchctl.run(&["bootout", &service()]);
-    launchctl
-        .run(&["bootstrap", &domain(), &target])
-        .map_err(Failure::Error)
-        .and_then(|ran| succeeded(&ran, "bootstrap"))?;
+    bootstrap(launchctl, plist, SETTLE)?;
 
     writeln!(out, "installed {LABEL}")?;
     writeln!(out, "  plist   {}", plist.display())?;
     writeln!(out, "  running {} daemon run", agent.program.display())?;
+    writeln!(out, "  config  {}", agent.config.display())?;
+    writeln!(out, "  state   {}", agent.state.display())?;
     writeln!(out, "  logging {}", agent.out.display())?;
 
     Ok(())
+}
+
+/// Bootstraps the agent, giving launchd time to finish with the last one.
+///
+/// `bootout` returns before launchd has torn the old job down, so a bootstrap
+/// issued straight after it is refused for a service that is on its way out
+/// rather than for anything wrong with the plist. Retrying is what makes
+/// installing over a running blubat one command rather than a race.
+fn bootstrap(launchctl: &dyn Launchctl, plist: &Path, settle: Duration) -> Result<(), Failure> {
+    let target = plist.to_string_lossy().into_owned();
+    let mut refused = None;
+
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            thread::sleep(settle);
+        }
+
+        let ran = launchctl
+            .run(&["bootstrap", &domain(), &target])
+            .map_err(Failure::Error)?;
+
+        match succeeded(&ran, "bootstrap") {
+            Ok(()) => return Ok(()),
+            Err(failure) => refused = Some(failure),
+        }
+    }
+
+    Err(refused.unwrap_or_else(|| Failure::Error("launchctl bootstrap was never run".to_string())))
 }
 
 /// `blubat daemon uninstall`: stop the agent and remove its plist.
@@ -323,11 +372,10 @@ fn escaped(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use crate::scratch::Scratch;
 
     use super::*;
-
-    static NEXT: AtomicU32 = AtomicU32::new(0);
 
     /// Records every call instead of making it, so no test loads an agent.
     #[derive(Debug, Default)]
@@ -380,34 +428,9 @@ mod tests {
         }
     }
 
-    /// A directory that removes itself, so no test writes to `~/Library`.
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "blubat-launchd-tests-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::SeqCst)
-            ));
-            let _ = fs::remove_dir_all(&path);
-
-            Self(path)
-        }
-
-        fn plist(&self) -> PathBuf {
-            self.0.join("LaunchAgents").join(format!("{LABEL}.plist"))
-        }
-
-        fn paths(&self) -> Paths {
-            Paths::rooted(&self.0)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
+    /// Where the plist goes, under a directory that is not `~/Library`.
+    fn plist_in(scratch: &Scratch) -> PathBuf {
+        scratch.join("LaunchAgents").join(format!("{LABEL}.plist"))
     }
 
     fn worked(output: &str) -> Ran {
@@ -427,6 +450,8 @@ mod tests {
     fn agent() -> Agent {
         Agent {
             program: PathBuf::from("/opt/homebrew/bin/blubat"),
+            config: PathBuf::from("/Users/blubat/.config/blubat/config.toml"),
+            state: PathBuf::from("/Users/blubat/.local/state/blubat"),
             home: PathBuf::from("/Users/blubat"),
             out: PathBuf::from("/Users/blubat/.local/state/blubat/daemon.log"),
             error: PathBuf::from("/Users/blubat/.local/state/blubat/daemon.error.log"),
@@ -444,6 +469,10 @@ mod tests {
 	<key>ProgramArguments</key>
 	<array>
 		<string>/opt/homebrew/bin/blubat</string>
+		<string>--config</string>
+		<string>/Users/blubat/.config/blubat/config.toml</string>
+		<string>--state-dir</string>
+		<string>/Users/blubat/.local/state/blubat</string>
 		<string>daemon</string>
 		<string>run</string>
 	</array>
@@ -509,13 +538,14 @@ mod tests {
     #[test]
     fn installing_writes_the_plist_and_replaces_whatever_was_loaded_before_it() {
         let scratch = Scratch::new();
+        let plist = plist_in(&scratch);
         let launchctl = Recorder::new();
         let mut out = Vec::new();
 
-        install(&launchctl, &scratch.paths(), &scratch.plist(), &mut out).expect("installs");
+        install(&launchctl, &scratch.paths(), &plist, &mut out).expect("installs");
 
         assert!(
-            fs::read_to_string(scratch.plist())
+            fs::read_to_string(&plist)
                 .expect("a written plist")
                 .contains(LABEL)
         );
@@ -525,29 +555,62 @@ mod tests {
             [
                 "bootstrap".to_string(),
                 domain(),
-                scratch.plist().to_string_lossy().into_owned()
+                plist.to_string_lossy().into_owned()
             ]
         );
         assert!(String::from_utf8_lossy(&out).contains(LABEL));
     }
 
+    /// The daemon has to read the config and write the state the blubat that
+    /// installed it is using, and launchd hands it nothing to work that out from.
     #[test]
-    fn an_install_launchd_refused_is_an_error_naming_what_it_said() {
+    fn the_agent_names_the_very_files_the_install_was_run_against() {
+        let scratch = Scratch::new();
+        let paths = scratch.paths();
+        let plist = plist_in(&scratch);
+
+        install(&Recorder::new(), &paths, &plist, &mut Vec::new()).expect("installs");
+
+        let written = fs::read_to_string(&plist).expect("a written plist");
+        for named in [
+            paths.config_file().to_path_buf(),
+            paths.state_dir().to_path_buf(),
+            paths.log_file(),
+            paths.error_log_file(),
+        ] {
+            assert!(
+                written.contains(&format!("<string>{}</string>", named.display())),
+                "{} is not in {written}",
+                named.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_bootstrap_launchd_was_not_ready_for_is_asked_again() {
+        let scratch = Scratch::new();
+        let launchctl = Recorder::answering(vec![failed("Bootstrap failed: 5: I/O error")]);
+
+        bootstrap(&launchctl, &plist_in(&scratch), Duration::ZERO)
+            .expect("the second attempt found launchd done tearing the old job down");
+
+        assert_eq!(launchctl.verbs(), ["bootstrap", "bootstrap"]);
+    }
+
+    #[test]
+    fn a_bootstrap_launchd_keeps_refusing_is_an_error_naming_what_it_said() {
         let scratch = Scratch::new();
         let launchctl = Recorder::answering(vec![
-            worked(""),
+            failed("Bootstrap failed: 5: Input/output error"),
+            failed("Bootstrap failed: 5: Input/output error"),
             failed("Bootstrap failed: 5: Input/output error"),
         ]);
 
-        let failure = install(
-            &launchctl,
-            &scratch.paths(),
-            &scratch.plist(),
-            &mut Vec::new(),
-        )
-        .expect_err("the bootstrap failed");
+        let failure = bootstrap(&launchctl, &plist_in(&scratch), Duration::ZERO)
+            .expect_err("it was refused every time");
 
         assert_eq!(failure.code(), 1);
+        assert_eq!(launchctl.verbs().len(), ATTEMPTS as usize);
         assert!(
             failure.to_string().contains("Bootstrap failed"),
             "{failure}"
@@ -557,20 +620,15 @@ mod tests {
     #[test]
     fn uninstalling_boots_the_agent_out_and_removes_the_plist() {
         let scratch = Scratch::new();
+        let plist = plist_in(&scratch);
         let launchctl = Recorder::new();
-        install(
-            &launchctl,
-            &scratch.paths(),
-            &scratch.plist(),
-            &mut Vec::new(),
-        )
-        .expect("installs");
+        install(&launchctl, &scratch.paths(), &plist, &mut Vec::new()).expect("installs");
         let mut out = Vec::new();
 
-        uninstall(&launchctl, &scratch.plist(), &mut out).expect("uninstalls");
+        uninstall(&launchctl, &plist, &mut out).expect("uninstalls");
 
         assert_eq!(launchctl.verbs(), ["bootout", "bootstrap", "bootout"]);
-        assert!(!scratch.plist().exists());
+        assert!(!plist.exists());
         assert!(!String::from_utf8_lossy(&out).contains("not loaded"));
     }
 
@@ -580,7 +638,7 @@ mod tests {
         let launchctl = Recorder::answering(vec![failed("Could not find service")]);
         let mut out = Vec::new();
 
-        uninstall(&launchctl, &scratch.plist(), &mut out).expect("nothing is left either way");
+        uninstall(&launchctl, &plist_in(&scratch), &mut out).expect("nothing is left either way");
 
         assert!(String::from_utf8_lossy(&out).contains("it was not loaded"));
     }
@@ -615,7 +673,7 @@ mod tests {
         let launchctl = Recorder::answering(vec![failed("Could not find service in domain")]);
         let mut out = Vec::new();
 
-        status(&launchctl, &scratch.plist(), &mut out).expect("a report either way");
+        status(&launchctl, &plist_in(&scratch), &mut out).expect("a report either way");
 
         let report = String::from_utf8_lossy(&out);
         assert!(report.contains("not installed"), "{report}");
@@ -643,6 +701,6 @@ mod tests {
     fn a_plist_that_is_not_there_is_already_removed() {
         let scratch = Scratch::new();
 
-        assert!(removed(&scratch.plist()).is_ok());
+        assert!(removed(&plist_in(&scratch)).is_ok());
     }
 }
