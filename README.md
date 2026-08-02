@@ -26,23 +26,43 @@ and are still picked up on the ordinary tick.
 
 ## Status
 
-Pre-release. Milestone M0 is complete: both data sources, the merge, and the
-one-shot CLI (`list`, `status`, `wait`) that reaches parity with the
-`trackpad-battery` shell script blubat takes its inspiration from. M1 is
-complete: bare `blubat` opens a live dashboard listing every device with its
-level, charge state, trend and freshness, sorted, filtered and narrowed from
-the keyboard. M2 is underway: the config file, the threshold event engine, the
-desktop notifications and the hooks that run alongside them, all live in the
-dashboard and reloadable with `r`. M3 is underway: the background daemon and
-the device detail view `enter` opens over the selected device.
+Milestone M0 is complete: both data sources, the merge, and the one-shot CLI
+(`list`, `status`, `wait`) that reaches parity with the `trackpad-battery`
+shell script blubat takes its inspiration from. M1 is complete: bare `blubat`
+opens a live dashboard listing every device with its level, charge state, trend
+and freshness, sorted, filtered and narrowed from the keyboard. M2 is complete:
+the config file, the threshold event engine, the desktop notifications and the
+hooks that run alongside them, all live in the dashboard and reloadable with
+`r`. M3 is complete: the background daemon under launchd, the device detail
+view `enter` opens over the selected device, hiding that survives a restart,
+and a Homebrew tap built by the release pipeline.
 
-blubat reads an optional configuration file and never writes one. The only
-files it creates are its own state, under `~/.local/state/blubat/`: the event
-engine's `state.toml`, the `watches/` directory `blubat wait` may drop into,
-the `tui.lock` and `daemon.lock` files its resident modes hold while they run,
-and the two logs the daemon writes under launchd. The one exception is the
-LaunchAgent plist, written to `~/Library/LaunchAgents/` by `daemon install`
-and by nothing else.
+blubat writes one thing into a configuration file and nothing else: `h` on the
+dashboard maintains `[dashboard] hidden`, leaving the rest of the file, its
+comments included, exactly as it was. Everything else it creates is its own
+state, under `~/.local/state/blubat/`: the event engine's `state.toml`, the
+`watches/` directory `blubat wait` may drop into, the `tui.lock` and
+`daemon.lock` files its resident modes hold while they run, and the two logs
+the daemon writes under launchd. The one file outside both is the LaunchAgent
+plist, written to `~/Library/LaunchAgents/` by `daemon install` and by nothing
+else.
+
+## Installing
+
+```sh
+brew install paulchiu/tap/blubat
+```
+
+Which is the tap and the formula in one line; `brew tap paulchiu/tap` followed
+by `brew install blubat` does the same in two. Releases carry one archive per
+architecture, Apple silicon and Intel, rather than a universal binary, so the
+download is the machine's own.
+
+From a checkout instead:
+
+```sh
+cargo install --path blubat
+```
 
 ## Usage
 
@@ -107,15 +127,21 @@ r      reload the config     ?  the full keymap
 `q` and ctrl+c both leave the dashboard; the keymap overlay takes the keyboard
 while it is open, so `?` closes it before anything else responds again.
 
-`enter` opens the detail view over the selected device, and `esc` or `enter`
-closes it again. It answers the questions one table row has no room for, all of
-which are about time: a chart of the levels read this run against the threshold
-that would raise an event, the charge or drain rate behind it, an estimate to
-full or to empty where the level is actually moving, the thresholds the device
-is judged by, and the events blubat has raised for it. A multi-battery device
-lists each of its batteries under the one level every threshold is applied to.
-The history is in memory and per run, so the chart starts empty after a restart
-and fills as blubat polls.
+`enter` opens the detail view over the selected device. It answers the
+questions one table row has no room for, all of which are about time: a chart of
+the levels read this run against the threshold that would raise an event, the
+charge or drain rate behind it, an estimate to full or to empty where the level
+is actually moving, the thresholds the device is judged by, and the events
+blubat has raised for it. A multi-battery device lists each of its batteries
+under the one level every threshold is applied to. The history is in memory and
+per run, so the chart starts empty after a restart and fills as blubat polls.
+
+It binds two keys and leaves nothing else live, so there is no way to act on a
+device from a view of another one:
+
+```
+esc/enter  back to the dashboard      q  quit
+```
 
 `r` re-reads `~/.config/blubat/config.toml` in place: thresholds, notification
 toggles, hooks, the colour scheme and the charging glyph all take the new
@@ -132,10 +158,18 @@ by, so the count on the status line and the banners agree by construction: a
 device configured `critical = 40` is red and counted at 39%, which is also the
 level that raises `critical_battery` for it.
 
-Hiding lasts for the session: nothing is written anywhere. The charging mark is
-ascii by default and becomes the Nerd Font bolt when the environment says a
-Nerd Font is in use, which is a guess: set `BLUBAT_NERD_FONT=1` or `=0` to
-settle it either way, or `charging_glyph` in `[theme]` to settle it for good.
+`h` hides for good. It writes the device's address into `[dashboard] hidden` in
+the config file, which is the one write blubat ever makes there, so the next
+dashboard and the next machine reading that dotfile open without it. `H` shows
+hidden devices again and a second `h` brings one back, dropping every match that
+was hiding it, whether blubat wrote it or a person did. Hiding is blubat's own
+view of a device and nothing more: the device stays paired, macOS still knows
+it, and blubat never unpairs anything.
+
+The charging mark is ascii by default and becomes the Nerd Font bolt when the
+environment says a Nerd Font is in use, which is a guess: set
+`BLUBAT_NERD_FONT=1` or `=0` to settle it either way, or `charging_glyph` in
+`[theme]` to settle it for good.
 
 A disconnected device keeps the level macOS last saw, which carries no
 timestamp and can be arbitrarily old. It is labelled `last seen` wherever it is
@@ -226,9 +260,10 @@ blubat list --json | jq -r '.[] | select(.connected) | "\(.name) \(.level)"'
 ## Configuration
 
 TOML at `~/.config/blubat/config.toml`, resolved with the XDG strategy. The
-file is optional: blubat runs on built-in defaults, and it never writes one for
-you. Machine state (the event engine's armed and fired flags, the one-shot
-watches) lives apart from it under `~/.local/state/blubat/`.
+file is optional: blubat runs on built-in defaults, and `[dashboard] hidden` is
+the only thing it ever writes into one. Machine state (the event engine's armed
+and fired flags, the one-shot watches) lives apart from it under
+`~/.local/state/blubat/`.
 
 Parsing is strict. An unknown key, an unknown event name or a duration that
 does not parse is an error naming the line it is on, because a typo that
@@ -265,7 +300,7 @@ ok       = "#57ab5a"
 charging_glyph = "+"          # overrides the Nerd Font guess either way
 
 [dashboard]
-hidden = ["MX Master"]        # read but not yet acted on, see below
+hidden = ["MX Master"]        # matches, as --device takes them; `h` writes here
 sort   = "level"              # level, name or last_seen
 
 # Per device overrides. `match` is the same case insensitive substring
@@ -298,8 +333,12 @@ advertises, then the built-in 20, 10, 100 and 1.
 dashboard reads every 5s instead: it is on screen and being read as it changes,
 and the fast tier is a single digit millisecond IOKit call.
 
-`[dashboard]` parses and validates but nothing acts on it yet. It lands with the
-persistent hide, which is the one write blubat will ever make to the file.
+`[dashboard] hidden` is maintained from the dashboard as well as by hand: `h`
+appends the selected device's address and `h` over a shown-again device removes
+whatever was hiding it. The edit is surgical, so a hand written file keeps its
+comments, its blank lines and the order of everything in it. `r` re-reads the
+list along with the rest of the file, which is what settles a hand edit made
+while the dashboard is open.
 
 `blubat config validate` exits 0 when the file is usable or absent and 1 when
 it is not, so it fits a dotfiles check. A `[[device]]` block matching nothing
@@ -393,7 +432,18 @@ label     com.paulchiu.blubat
 plist     /Users/paul/Library/LaunchAgents/com.paulchiu.blubat.plist
 loaded    yes
 running   yes, pid 4242
+
+$ blubat daemon uninstall
+removed com.paulchiu.blubat
 ```
+
+`daemon status` answers the three separate questions in order, since a daemon
+can be installed without being loaded and loaded without currently running:
+uninstalling one that was never loaded says so and removes the plist anyway.
+`daemon run` is the resident loop itself, which launchd starts and which is
+worth running by hand only to watch what the daemon is doing on a terminal.
+Both logs are plain text and appended to, so `tail -f
+~/.local/state/blubat/daemon.log` follows a daemon already under launchd.
 
 Open the dashboard while the daemon is running and the dashboard takes over: it
 holds `~/.local/state/blubat/tui.lock` for as long as it is up, and the daemon
@@ -436,6 +486,34 @@ just lint
 just fmt
 just ci
 ```
+
+`just ci` is what the CI workflow runs, so a green run here is a green
+pipeline. It includes a core isolation check: `blubat-core`'s direct
+dependencies are an allowlist, and a terminal, notification or process spawning
+crate cannot reach it by being one nobody thought to ban.
+
+## Releasing
+
+Two workflows, one after the other. `version-tag.yml` reads the semver label on
+a merged pull request, bumps `[workspace.package] version`, and pushes the
+commit and a `vX.Y.Z` tag. `release.yml` is generated by
+[cargo-dist](https://opensource.axo.dev/cargo-dist/) from `dist-workspace.toml`,
+triggers on that tag, builds the two macOS archives, creates the GitHub release
+and pushes a formula to `paulchiu/homebrew-tap`. Regenerate it with `dist
+generate` after editing the config rather than editing the workflow, which is
+overwritten.
+
+Two repository secrets, both personal access tokens, and neither one optional
+if the pipeline is to run end to end:
+
+| Secret | Why |
+| --- | --- |
+| `RELEASE_TOKEN` | A tag pushed with the default `GITHUB_TOKEN` starts no further workflows, so `release.yml` would never see it. Needs `contents: write` on this repository. |
+| `HOMEBREW_TAP_TOKEN` | The name cargo-dist expects for the token its publish job checks the tap out with. Needs `contents: write` on `paulchiu/homebrew-tap`. |
+
+Without `RELEASE_TOKEN` the bump and the tag still land and the release has to
+be started by hand; without `HOMEBREW_TAP_TOKEN` the GitHub release is still
+built and only the formula push fails.
 
 ## Requirements
 
