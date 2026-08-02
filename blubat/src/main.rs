@@ -13,6 +13,8 @@ mod hooks;
 mod lock;
 mod notify;
 mod report;
+#[cfg(test)]
+mod scratch;
 mod tui;
 mod wait;
 
@@ -35,6 +37,13 @@ struct Cli {
     /// Read configuration from this file instead of the resolved one.
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
+    /// Keep blubat's own state in this directory instead of the resolved one.
+    ///
+    /// The installed agent is pinned to the directory that installed it named,
+    /// since launchd hands the daemon almost none of the environment the
+    /// resolved one is worked out from.
+    #[arg(long, global = true, value_name = "PATH")]
+    state_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -141,6 +150,8 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<(), Failure> {
+    let files = || paths(cli.config.clone(), cli.state_dir.clone());
+
     match cli.command {
         Some(Command::List { json, all }) => report::list(&reading(), json, all),
         Some(Command::Status {
@@ -148,23 +159,27 @@ fn run(cli: Cli) -> Result<(), Failure> {
             json,
             number,
         }) => report::status(&reading(), device.as_deref(), Format::of(json, number)),
-        Some(Command::Wait(args)) => wait::run(&args, &paths(cli.config)?),
-        Some(Command::Config { command }) => config::run(&command, &paths(cli.config)?),
-        Some(Command::Daemon { command }) => daemon::run(&command, &paths(cli.config)?),
-        Some(Command::NotifyTest) => notify::run(&paths(cli.config)?),
-        None if io::stdout().is_terminal() => tui::run(&paths(cli.config)?),
+        Some(Command::Wait(args)) => wait::run(&args, &files()?),
+        Some(Command::Config { command }) => config::run(&command, &files()?),
+        Some(Command::Daemon { command }) => daemon::run(&command, &files()?),
+        Some(Command::NotifyTest) => notify::run(&files()?),
+        None if io::stdout().is_terminal() => tui::run(&files()?),
         None => offer_the_commands(),
     }
 }
 
-/// Where blubat's files are, with `--config` replacing the resolved config file.
-fn paths(config: Option<PathBuf>) -> Result<Paths, Failure> {
-    let paths = Paths::resolve()?;
+/// Where blubat's files are, with each flag replacing the resolved location.
+fn paths(config: Option<PathBuf>, state_dir: Option<PathBuf>) -> Result<Paths, Failure> {
+    let mut paths = Paths::resolve()?;
 
-    Ok(match config {
-        Some(path) => paths.with_config_file(path),
-        None => paths,
-    })
+    if let Some(path) = config {
+        paths = paths.with_config_file(path);
+    }
+    if let Some(dir) = state_dir {
+        paths = paths.with_state_dir(dir);
+    }
+
+    Ok(paths)
 }
 
 /// What a bare `blubat` says when there is no screen to draw a dashboard on.

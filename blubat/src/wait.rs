@@ -34,6 +34,12 @@ pub struct Args {
 /// caller has already answered. The banner that ends one is the config's, since
 /// nothing else decides what a blubat notification sounds like.
 pub fn run(args: &Args, paths: &Paths) -> Result<(), Failure> {
+    handled(args, paths, reading)
+}
+
+/// The same over whichever reader, which is the half a test drives without a
+/// Bluetooth device.
+fn handled(args: &Args, paths: &Paths, read: impl Fn() -> Snapshot) -> Result<(), Failure> {
     if daemon_is_running(paths) {
         register(args, &paths.watch_dir()).map(|path| {
             println!(
@@ -46,7 +52,7 @@ pub fn run(args: &Args, paths: &Paths) -> Result<(), Failure> {
     } else {
         let sound = Config::load(paths.config_file())?.notifications.sound;
 
-        wait_for_level(args, reading).map(|(device, level)| {
+        wait_for_level(args, read).map(|(device, level)| {
             notify(&Desktop, &completed(&device, level), &sound);
             println!("{device} reached {level}%");
         })
@@ -175,6 +181,8 @@ mod tests {
 
     use blubat_core::{Address, ChargeState, Levels, Source, Timestamp};
 
+    use crate::scratch::Scratch;
+
     use super::*;
 
     const TRACKPAD: &str = "Paul\u{2019}s Magic Trackpad";
@@ -230,25 +238,6 @@ mod tests {
             },
             connected,
         )
-    }
-
-    /// A directory that removes itself, so a failing test leaves nothing behind.
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new(name: &str) -> Self {
-            let path =
-                std::env::temp_dir().join(format!("blubat-cli-{}-{name}", std::process::id()));
-            let _ = fs::remove_dir_all(&path);
-
-            Self(path)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
     }
 
     #[test]
@@ -370,12 +359,12 @@ mod tests {
 
     #[test]
     fn a_registered_watch_reads_back_as_the_wait_that_was_asked_for() {
-        let scratch = Scratch::new("register");
+        let scratch = Scratch::new();
 
-        let path = register(&args("trackpad", 100, None), &scratch.0).expect("writes a watch");
+        let path = register(&args("trackpad", 100, None), scratch.dir()).expect("writes a watch");
         let watch = Watch::read(&path).expect("reads back");
 
-        assert!(path.starts_with(&scratch.0));
+        assert!(path.starts_with(scratch.dir()));
         assert_eq!(watch.device, "trackpad");
         assert_eq!(watch.target, 100);
         assert_eq!(watch.deadline, None);
@@ -383,12 +372,12 @@ mod tests {
 
     #[test]
     fn a_timeout_becomes_the_watch_deadline() {
-        let scratch = Scratch::new("deadline");
+        let scratch = Scratch::new();
         let before = Timestamp::now().unix();
 
         let path = register(
             &args("trackpad", 100, Some(Duration::from_secs(600))),
-            &scratch.0,
+            scratch.dir(),
         )
         .expect("writes a watch");
 
@@ -399,12 +388,62 @@ mod tests {
         );
     }
 
+    /// Which branch a wait takes is decided by one file, and getting that file
+    /// wrong turns every wait into a no-op that prints success.
+    #[test]
+    fn a_running_daemon_is_handed_the_wait_and_the_terminal_comes_straight_back() {
+        let scratch = Scratch::new();
+        let paths = scratch.paths();
+        let _daemon = lock::take(&paths.daemon_lock())
+            .expect("a lock")
+            .expect("nobody else holding it");
+
+        handled(&args("trackpad", 100, None), &paths, || {
+            panic!("a handed-over wait reads nothing here")
+        })
+        .expect("it registered and returned");
+
+        let registered: Vec<_> = fs::read_dir(paths.watch_dir())
+            .expect("a watch directory")
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(registered.len(), 1);
+        assert_eq!(
+            Watch::read(&registered[0].path())
+                .expect("reads back")
+                .target,
+            100
+        );
+    }
+
+    #[test]
+    fn a_wait_with_no_daemon_behind_it_polls_here_instead() {
+        let scratch = Scratch::new();
+        let paths = scratch.paths();
+        fs::create_dir_all(paths.watch_dir()).expect("a state directory");
+        fs::write(paths.daemon_lock(), "2147483646\n").expect("a lock file left behind");
+
+        let failure = handled(&args("trackpad", 100, Some(Duration::ZERO)), &paths, || {
+            snapshot(Some(85), true)
+        })
+        .expect_err("it timed out here rather than being handed over");
+
+        assert!(failure.to_string().contains("gave up waiting"), "{failure}");
+        assert_eq!(
+            fs::read_dir(paths.watch_dir())
+                .expect("a watch directory")
+                .count(),
+            0,
+            "nothing was registered for a daemon that is not there"
+        );
+    }
+
     #[test]
     fn two_targets_for_one_device_register_as_two_watches() {
-        let scratch = Scratch::new("targets");
+        let scratch = Scratch::new();
 
-        let eighty = register(&args("trackpad", 80, None), &scratch.0).expect("writes a watch");
-        let full = register(&args("trackpad", 100, None), &scratch.0).expect("writes a watch");
+        let eighty = register(&args("trackpad", 80, None), scratch.dir()).expect("writes a watch");
+        let full = register(&args("trackpad", 100, None), scratch.dir()).expect("writes a watch");
 
         assert_ne!(eighty, full, "the second must not overwrite the first");
         assert_eq!(Watch::read(&eighty).expect("reads back").target, 80);

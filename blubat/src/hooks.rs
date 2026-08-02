@@ -306,45 +306,17 @@ pub mod fake {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::mpsc;
 
     use blubat_core::{Address, Device, Levels, Source};
+
+    use crate::scratch::Scratch;
 
     use super::fake::{Recorder, Started};
     use super::*;
 
     const TRACKPAD: &str = "30-82-16-f2-24-90";
     const KEYS: &str = "de-df-38-f0-46-9b";
-
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-
-    /// A directory that removes itself, so a failing test leaves nothing behind.
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "blubat-hook-tests-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::SeqCst)
-            ));
-            fs::create_dir_all(&path).expect("a scratch directory");
-
-            Self(path)
-        }
-
-        fn file(&self, name: &str) -> PathBuf {
-            self.0.join(name)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     fn address(raw: &str) -> Address {
         Address::parse(raw).expect("valid address")
@@ -507,7 +479,7 @@ mod tests {
     #[test]
     fn a_hook_sees_the_event_that_started_it_in_its_environment() {
         let scratch = Scratch::new();
-        let path = scratch.file("environment");
+        let path = scratch.join("environment");
         let command = format!(
             "printf '%s\\n' \"$BLUBAT_DEVICE\" \"$BLUBAT_DEVICE_ADDRESS\" \"$BLUBAT_EVENT\" \
              \"$BLUBAT_LEVEL\" \"$BLUBAT_PREVIOUS_LEVEL\" \"$BLUBAT_CHARGING\" \

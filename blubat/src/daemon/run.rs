@@ -7,9 +7,11 @@
 //! nothing resident draws a chart, so a run measured in weeks holds one engine,
 //! whatever watches are outstanding, and nothing that grows with time.
 //!
-//! While a dashboard is open it owns the notifications and the hooks, so this
-//! loop keeps polling and keeps writing the state file but fires nothing, and
-//! resumes the moment the dashboard's lock goes away.
+//! While a dashboard is open it owns the notifications, the hooks and the state
+//! file, so this loop keeps polling and fires nothing, and resumes the moment
+//! the dashboard's lock goes away. The one-shot watches are this loop's either
+//! way: nothing else drains them, so a wait handed over is settled whether or
+//! not a dashboard happens to be up.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -33,9 +35,6 @@ struct Resident {
     notifier: Box<dyn Notifier>,
     /// Where `blubat wait` leaves the watches it hands over.
     directory: PathBuf,
-    /// The dashboard's lock: while a live process holds it, this loop records
-    /// what it sees and acts on none of it.
-    dashboard: PathBuf,
 }
 
 /// `blubat daemon run`: poll and act until the process is stopped.
@@ -43,26 +42,14 @@ struct Resident {
 /// Refuses to start beside another daemon: two of them would evaluate the same
 /// readings against the same state file and announce everything twice.
 pub fn serve(paths: &Paths) -> Result<(), Failure> {
-    let lock = paths.daemon_lock();
-
-    if lock::held(&lock) {
+    let Some(_running) = lock::take(&paths.daemon_lock()).map_err(Failure::Error)? else {
         return Err(Failure::Error(
             "a blubat daemon is already running".to_string(),
         ));
-    }
-
-    let _running = lock::take(lock).map_err(Failure::Error)?;
+    };
     let (config, unreadable) = load(paths);
     let (effects, stale_state) = Effects::live(paths, report);
-    let dashboard = paths.tui_lock();
-    let deferring = dashboard.clone();
-    let mut resident = Resident {
-        effects: effects.deferring_to(move || lock::held(&deferring)),
-        watches: Watches::default(),
-        notifier: Box::new(Desktop),
-        directory: paths.watch_dir(),
-        dashboard,
-    };
+    let mut resident = resident(paths, effects, Box::new(Desktop));
     let mut out = io::stdout();
 
     for problem in [unreadable, stale_state].into_iter().flatten() {
@@ -83,27 +70,48 @@ pub fn serve(paths: &Paths) -> Result<(), Failure> {
         }
     }
 
-    Ok(())
+    // Reaching here means every poll tier has stopped delivering, so this
+    // process is loaded and monitoring nothing. Failing says so to launchd,
+    // which restarts the agent only on an unsuccessful exit.
+    let stopped = "the poller stopped delivering readings";
+    log(&mut out, stopped);
+
+    Err(Failure::Error(stopped.to_string()))
+}
+
+/// The loop's state, wired to the files and sinks it acts through.
+///
+/// The one place that decides the daemon defers to `tui.lock` and drains the
+/// watch directory, so `serve` and the tests exercise the same wiring rather
+/// than each naming these paths for themselves.
+fn resident(paths: &Paths, effects: Effects, notifier: Box<dyn Notifier>) -> Resident {
+    let dashboard = paths.tui_lock();
+
+    Resident {
+        effects: effects.deferring_to(move || lock::held(&dashboard)),
+        watches: Watches::default(),
+        notifier,
+        directory: paths.watch_dir(),
+    }
 }
 
 impl Resident {
     /// One reading: the engine first, then the watches, and whatever both left
     /// worth writing down.
+    ///
+    /// The watches are settled whichever blubat owns the events. A dashboard
+    /// announces nothing about them, so deferring these to one would park every
+    /// handed-over wait for as long as it stays open.
     fn tick(&mut self, reading: &Snapshot, config: &Config) -> Vec<String> {
         let mut lines = self.effects.observe(reading, config).problems;
 
-        // Watches wait for the dashboard to close rather than being consumed
-        // while it owns the banners, which is what keeps each one exactly one
-        // notification whichever blubat is up when its level arrives.
-        if !lock::held(&self.dashboard) {
-            lines.extend(self.watches.adopt(&self.directory));
-            lines.extend(self.watches.settle(
-                reading,
-                &config.notifications.sound,
-                reading.read_at,
-                self.notifier.as_ref(),
-            ));
-        }
+        lines.extend(self.watches.adopt(&self.directory));
+        lines.extend(self.watches.settle(
+            reading,
+            &config.notifications.sound,
+            reading.read_at,
+            self.notifier.as_ref(),
+        ));
 
         lines
     }
@@ -128,26 +136,25 @@ fn load(paths: &Paths) -> (Config, Option<String>) {
 /// the ordinary one.
 fn report(outcome: Outcome) {
     if outcome.went_wrong() {
-        eprintln!("{}", stamped(&outcome.to_string()));
+        eprintln!("{}", stamped(Timestamp::now(), &outcome.to_string()));
     } else {
-        println!("{}", stamped(&outcome.to_string()));
+        println!("{}", stamped(Timestamp::now(), &outcome.to_string()));
     }
 }
 
 /// One log line, stamped so a log read weeks later says when.
-fn stamped(message: &str) -> String {
-    format!("{} {message}", Timestamp::now())
+fn stamped(now: Timestamp, message: &str) -> String {
+    format!("{now} {message}")
 }
 
 fn log(out: &mut impl Write, message: &str) {
-    let _ = writeln!(out, "{}", stamped(message));
+    let _ = writeln!(out, "{}", stamped(Timestamp::now(), message));
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, Ordering};
 
     use blubat_core::{
         Address, AdvertisedThresholds, ChargeState, Device, Engine, Levels, Source, Watch,
@@ -155,39 +162,12 @@ mod tests {
 
     use crate::hooks::fake::Recorder as StartedHooks;
     use crate::notify::fake::Recorder as PostedBanners;
+    use crate::scratch::Scratch;
 
     use super::*;
 
     const TRACKPAD: &str = "Paul\u{2019}s Magic Trackpad";
     const READ_AT: i64 = 1_785_643_199;
-
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-
-    /// A directory that removes itself, so no test reaches a real state file.
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "blubat-daemon-tests-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::SeqCst)
-            ));
-            let _ = fs::remove_dir_all(&path);
-
-            Self(path)
-        }
-
-        fn paths(&self) -> Paths {
-            Paths::rooted(&self.0)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     fn reading(level: Option<u8>, second: i64) -> Snapshot {
         let read_at = Timestamp::from_unix(READ_AT + second);
@@ -213,30 +193,24 @@ mod tests {
         }
     }
 
-    /// The loop's state with both sinks recording, over a scratch state file.
+    /// The loop `serve` runs, with both sinks recording rather than acting.
+    ///
+    /// Built by the same factory the daemon uses, so a test exercises the
+    /// wiring instead of restating it.
     fn resident(scratch: &Scratch) -> (Resident, Arc<PostedBanners>, Arc<StartedHooks>) {
         let paths = scratch.paths();
         let banners = Arc::new(PostedBanners::new());
         let hooks = Arc::new(StartedHooks::new());
-        let dashboard = paths.tui_lock();
-        let deferring = dashboard.clone();
         let effects = Effects::new(
             &paths,
             Engine::default(),
             AdvertisedThresholds::new(),
             Box::new(Arc::clone(&banners)),
             Box::new(Arc::clone(&hooks)),
-        )
-        .deferring_to(move || lock::held(&deferring));
+        );
 
         (
-            Resident {
-                effects,
-                watches: Watches::default(),
-                notifier: Box::new(Arc::clone(&banners)),
-                directory: paths.watch_dir(),
-                dashboard,
-            },
+            super::resident(&paths, effects, Box::new(Arc::clone(&banners))),
             banners,
             hooks,
         )
@@ -246,9 +220,23 @@ mod tests {
         Config::parse("[[hook]]\nevent = \"low_battery\"\ncommand = \"nag\"\n").expect("parses")
     }
 
+    /// A stand-in for the open dashboard: the same chain over the same state
+    /// file, deferring to nobody, which is what the blubat holding the lock is.
+    fn owner(scratch: &Scratch) -> Effects {
+        Effects::new(
+            &scratch.paths(),
+            Engine::default(),
+            AdvertisedThresholds::new(),
+            Box::new(Arc::new(PostedBanners::new())),
+            Box::new(Arc::new(StartedHooks::new())),
+        )
+    }
+
     /// A dashboard holding the lock, for as long as the returned value lives.
     fn dashboard(scratch: &Scratch) -> lock::Held {
-        lock::take(scratch.paths().tui_lock()).expect("a lock")
+        lock::take(&scratch.paths().tui_lock())
+            .expect("a lock")
+            .expect("nobody else holding it")
     }
 
     #[test]
@@ -278,8 +266,8 @@ mod tests {
         assert!(banners.posted().is_empty(), "{:?}", banners.posted());
         assert!(hooks.commands().is_empty(), "{:?}", hooks.commands());
         assert!(
-            scratch.paths().state_file().exists(),
-            "polling and the state file carry on regardless"
+            !scratch.paths().state_file().exists(),
+            "the dashboard owns the state file while it owns the events"
         );
 
         drop(open);
@@ -292,7 +280,7 @@ mod tests {
         let config = config();
         let lock = scratch.paths().tui_lock();
         fs::create_dir_all(lock.parent().expect("a parent")).expect("a state directory");
-        fs::write(&lock, "2147483646\n").expect("a lock left by a process that has gone");
+        fs::write(&lock, "2147483646\n").expect("a lock file left behind");
 
         resident.tick(&reading(Some(50), 0), &config);
         resident.tick(&reading(Some(19), 1), &config);
@@ -300,7 +288,7 @@ mod tests {
         assert_eq!(
             banners.posted().len(),
             1,
-            "the pid in the lock names no process"
+            "nothing is holding the lock the file was written for"
         );
     }
 
@@ -309,8 +297,10 @@ mod tests {
         let scratch = Scratch::new();
         let (mut resident, banners, _) = resident(&scratch);
         let config = config();
+        let mut open_elsewhere = owner(&scratch);
 
         let open = dashboard(&scratch);
+        open_elsewhere.observe(&reading(Some(50), 0), &config);
         resident.tick(&reading(Some(50), 0), &config);
         drop(open);
         resident.tick(&reading(Some(19), 1), &config);
@@ -340,8 +330,10 @@ mod tests {
         );
     }
 
+    /// Nothing else drains the watch directory, so a wait handed over while a
+    /// dashboard happens to be open would otherwise be parked until it closes.
     #[test]
-    fn a_watch_is_left_on_disk_while_a_dashboard_owns_the_banners() {
+    fn a_watch_is_settled_whether_or_not_a_dashboard_owns_the_banners() {
         let scratch = Scratch::new();
         let (mut resident, banners, _) = resident(&scratch);
         let config = Config::default();
@@ -351,27 +343,30 @@ mod tests {
             .expect("a registered watch");
         let open = dashboard(&scratch);
 
-        resident.tick(&reading(Some(95), 0), &config);
+        let settled = resident.tick(&reading(Some(95), 0), &config);
 
-        assert!(banners.posted().is_empty());
+        assert_eq!(
+            settled,
+            [
+                "watching `trackpad` for 90%".to_string(),
+                format!("{TRACKPAD} reached 95%")
+            ]
+        );
+        assert_eq!(banners.posted().len(), 1);
         assert_eq!(
             fs::read_dir(&directory).expect("a watch directory").count(),
-            1,
-            "the file waits for the dashboard to close"
+            0,
+            "and the file is consumed rather than left behind"
         );
 
         drop(open);
-        let met = resident.tick(&reading(Some(95), 1), &config);
-
-        assert_eq!(met.len(), 2, "taken over and met on the poll after it");
-        assert_eq!(banners.posted().len(), 1);
     }
 
     #[test]
     fn a_stamped_line_carries_the_moment_it_was_written() {
-        let stamped = stamped("watching every 120s");
-
-        assert!(stamped.starts_with("20"), "{stamped}");
-        assert!(stamped.ends_with(" watching every 120s"), "{stamped}");
+        assert_eq!(
+            stamped(Timestamp::from_unix(READ_AT), "watching every 120s"),
+            "2026-08-02T03:59:59Z watching every 120s"
+        );
     }
 }

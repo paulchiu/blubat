@@ -50,6 +50,9 @@ pub struct Effects {
     notifier: Box<dyn Notifier>,
     hooks: Box<dyn Hooks>,
     deferring: Deferring,
+    /// Whether the last reading belonged to another blubat, so this engine has
+    /// been standing still while the state file moved on without it.
+    deferred: bool,
 }
 
 impl Effects {
@@ -94,6 +97,7 @@ impl Effects {
             notifier,
             hooks,
             deferring: Box::new(|| false),
+            deferred: false,
         }
     }
 
@@ -121,41 +125,43 @@ impl Effects {
     /// The reading's own moment is the clock, so what the engine makes of a
     /// reading does not depend on how long it took to arrive.
     ///
-    /// While the side effects belong to another blubat the engine still steps
-    /// and the state file is still written, so what was raised while deferring
-    /// is not raised again once the owner goes away.
+    /// Ownership is asked once and honoured for the whole reading, so one
+    /// reading is either announced and dispatched or neither. While the side
+    /// effects belong to another blubat the engine still steps, so what it
+    /// raised still travels back to a frontend, but the state file is left to
+    /// the owner: it is the one recording what it announced and when its hooks
+    /// last ran, and two writers would each erase the other's.
     pub fn observe(&mut self, reading: &Snapshot, config: &Config) -> Observed {
         let now = reading.read_at;
+        let mine = self.mine();
+        let mut problems: Vec<String> = self.resumed(mine).into_iter().collect();
+
         // `step` consumes the engine and hands the next one back, which is what
         // keeps it a pure function of the state it was given.
         let (engine, raised) =
             std::mem::take(&mut self.engine).step(reading, config, &self.advertised, now);
         self.engine = engine;
 
-        let mut problems: Vec<String> = raised
-            .iter()
-            .filter(|_| self.mine())
-            .filter_map(|raised| {
-                notify::announce(raised, &config.notifications, self.notifier.as_ref())
-                    .and_then(Result::err)
-            })
-            .collect();
+        problems.extend(raised.iter().filter(|_| mine).filter_map(|raised| {
+            notify::announce(raised, &config.notifications, self.notifier.as_ref())
+                .and_then(Result::err)
+        }));
 
-        for raised in &raised {
-            if self.mine() {
-                hooks::dispatch(
-                    raised,
-                    reading,
-                    config,
-                    &mut self.engine,
-                    self.hooks.as_ref(),
-                    now,
-                );
-            }
+        for raised in raised.iter().filter(|_| mine) {
+            hooks::dispatch(
+                raised,
+                reading,
+                config,
+                &mut self.engine,
+                self.hooks.as_ref(),
+                now,
+            );
         }
 
         // After dispatch, since allowing a hook to run is what records it.
-        problems.extend(self.persist());
+        if mine {
+            problems.extend(self.persist());
+        }
 
         Observed { raised, problems }
     }
@@ -163,6 +169,27 @@ impl Effects {
     /// Whether this blubat is the one that acts on what a reading raised.
     fn mine(&self) -> bool {
         !(self.deferring)()
+    }
+
+    /// Picks the state file back up on the first reading after the owner goes.
+    ///
+    /// What the owner announced and ran is in that file rather than in this
+    /// engine, which stopped where it last acted. Reading it back is what stops
+    /// an event the owner already announced being announced again, and a hook
+    /// it already ran being run inside its debounce window.
+    fn resumed(&mut self, mine: bool) -> Option<String> {
+        let returned = mine && self.deferred;
+        self.deferred = !mine;
+
+        if !returned {
+            return None;
+        }
+
+        let (engine, problem) = Engine::load(&self.state_file);
+        self.saved = engine.clone();
+        self.engine = engine;
+
+        problem
     }
 
     /// Reads the config file again, which is what `r` asks for.
@@ -217,45 +244,12 @@ mod tests {
 
     use crate::hooks::fake::Recorder as StartedHooks;
     use crate::notify::fake::Recorder as PostedBanners;
+    use crate::scratch::Scratch;
 
     use super::*;
 
     const TRACKPAD: &str = "30-82-16-f2-24-90";
     const READ_AT: i64 = 1_785_643_199;
-
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-
-    /// A directory that removes itself, so a failing test leaves nothing behind
-    /// and no test ever reaches a real config or state file.
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "blubat-effects-tests-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::SeqCst)
-            ));
-            let _ = fs::remove_dir_all(&path);
-
-            Self(path)
-        }
-
-        fn paths(&self) -> Paths {
-            Paths::rooted(&self.0)
-        }
-
-        fn write_config(&self, contents: &str) {
-            fs::create_dir_all(&self.0).expect("a scratch directory");
-            fs::write(self.paths().config_file(), contents).expect("a written config");
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     fn device(level: Option<u8>, second: i64) -> Device {
         Device {
@@ -548,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_announced_or_run_while_another_blubat_owns_the_effects() {
+    fn nothing_is_announced_run_or_written_while_another_blubat_owns_the_effects() {
         let scratch = Scratch::new();
         let config = Config::parse("[[hook]]\nevent = \"low_battery\"\ncommand = \"nag\"\n")
             .expect("parses");
@@ -560,29 +554,33 @@ mod tests {
         assert!(banners.posted().is_empty(), "{:?}", banners.posted());
         assert!(hooks.commands().is_empty(), "{:?}", hooks.commands());
         assert!(
-            fs::read_to_string(scratch.paths().state_file())
-                .expect("a written state file")
-                .contains("low_battery"),
-            "the crossing was still recorded"
+            !scratch.paths().state_file().exists(),
+            "the state file belongs to whichever blubat is acting"
         );
     }
 
     #[test]
-    fn a_crossing_recorded_while_deferring_is_not_announced_when_the_owner_goes() {
+    fn a_crossing_the_owner_announced_is_not_announced_again_when_it_goes() {
         let scratch = Scratch::new();
         let config = Config::default();
+        let (mut owner, announced, _) = effects(&scratch);
         let owned = Arc::new(AtomicBool::new(true));
-        let (effects, banners, _) = effects(&scratch);
+        let (deferring, banners, _) = effects(&scratch);
         let elsewhere = Arc::clone(&owned);
-        let mut effects = effects.deferring_to(move || elsewhere.load(Ordering::SeqCst));
+        let mut deferring = deferring.deferring_to(move || elsewhere.load(Ordering::SeqCst));
 
-        observe(&mut effects, &config, &[50, 19]);
+        for (tick, level) in [50, 19].into_iter().enumerate() {
+            let reading = reading(Some(level), tick as i64);
+            owner.observe(&reading, &config);
+            deferring.observe(&reading, &config);
+        }
         owned.store(false, Ordering::SeqCst);
-        effects.observe(&reading(Some(19), 2), &config);
+        deferring.observe(&reading(Some(19), 2), &config);
 
+        assert_eq!(announced.posted().len(), 1, "the owner announced it");
         assert!(
             banners.posted().is_empty(),
-            "the dashboard announced it, so this one stays quiet: {:?}",
+            "so this one reads its state back and stays quiet: {:?}",
             banners.posted()
         );
     }
@@ -591,17 +589,71 @@ mod tests {
     fn the_owner_going_away_restores_the_side_effects() {
         let scratch = Scratch::new();
         let config = Config::default();
+        let (mut owner, _, _) = effects(&scratch);
         let owned = Arc::new(AtomicBool::new(true));
-        let (effects, banners, _) = effects(&scratch);
+        let (deferring, banners, _) = effects(&scratch);
         let elsewhere = Arc::clone(&owned);
-        let mut effects = effects.deferring_to(move || elsewhere.load(Ordering::SeqCst));
+        let mut deferring = deferring.deferring_to(move || elsewhere.load(Ordering::SeqCst));
 
-        effects.observe(&reading(Some(50), 0), &config);
+        owner.observe(&reading(Some(50), 0), &config);
+        deferring.observe(&reading(Some(50), 0), &config);
         owned.store(false, Ordering::SeqCst);
-        effects.observe(&reading(Some(19), 1), &config);
+        deferring.observe(&reading(Some(19), 1), &config);
 
         assert_eq!(banners.posted().len(), 1);
         assert_eq!(banners.posted()[0].body, "Battery low at 19%");
+    }
+
+    /// The owner records a hook run and its debounce clock in the state file.
+    /// A deferring blubat that wrote its own copy over the top would erase that
+    /// clock and let the hook run again well inside its window.
+    #[test]
+    fn a_debounce_clock_the_owner_recorded_survives_the_handover() {
+        let scratch = Scratch::new();
+        let config = Config::parse(
+            "[[hook]]\nevent = \"low_battery\"\ncommand = \"nag\"\ndebounce = \"30m\"\n",
+        )
+        .expect("parses");
+        let (mut owner, _, ran) = effects(&scratch);
+        let (deferring, _, never_ran) = effects(&scratch);
+        let mut deferring = deferring.deferring_to(|| true);
+
+        for (tick, level) in [50, 19].into_iter().enumerate() {
+            let reading = reading(Some(level), tick as i64);
+            owner.observe(&reading, &config);
+            deferring.observe(&reading, &config);
+        }
+
+        assert_eq!(ran.commands(), ["nag"]);
+        assert!(never_ran.commands().is_empty());
+        assert!(
+            fs::read_to_string(scratch.paths().state_file())
+                .expect("a written state file")
+                .contains("hook.nag"),
+            "the owner's clock is the one on disk"
+        );
+    }
+
+    #[test]
+    fn one_reading_is_wholly_acted_on_or_wholly_deferred() {
+        let scratch = Scratch::new();
+        let config = Config::parse("[[hook]]\nevent = \"low_battery\"\ncommand = \"nag\"\n")
+            .expect("parses");
+        let (effects, banners, hooks) = effects(&scratch);
+        let asks = Arc::new(AtomicU32::new(0));
+        let counted = Arc::clone(&asks);
+        // Taken from the second answer on, so a chain asking once per event
+        // would announce this crossing and then skip the hook that goes with it.
+        let mut effects = effects.deferring_to(move || counted.fetch_add(1, Ordering::SeqCst) >= 1);
+
+        observe(&mut effects, &config, &[50, 19]);
+
+        assert_eq!(
+            banners.posted().len(),
+            hooks.commands().len(),
+            "a banner without its hook means the answer moved mid reading"
+        );
+        assert_eq!(asks.load(Ordering::SeqCst), 2, "one answer per reading");
     }
 
     #[test]

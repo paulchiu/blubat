@@ -131,7 +131,7 @@ fn files(directory: &Path) -> Vec<PathBuf> {
 /// the same reading its time runs out completes rather than expiring. A device
 /// that is merely disconnected is waited on rather than dropped, because that
 /// is the usual reason to be waiting on one; only a substring nothing paired
-/// matches is hopeless.
+/// matches is hopeless, and only when the reading is in a position to say so.
 fn verdict(watch: &Watch, reading: &Snapshot, now: Timestamp) -> Verdict {
     let reached = reading
         .matching(&watch.device)
@@ -140,9 +140,21 @@ fn verdict(watch: &Watch, reading: &Snapshot, now: Timestamp) -> Verdict {
     match reached {
         Some((device, level)) => Verdict::Met { device, level },
         None if watch.deadline.is_some_and(|deadline| now >= deadline) => Verdict::Expired,
-        None if reading.matching(&watch.device).next().is_none() => Verdict::Unknown,
+        None if unknown(watch, reading) => Verdict::Unknown,
         None => Verdict::Waiting,
     }
+}
+
+/// Whether this reading is entitled to say nothing paired matches the watch.
+///
+/// A reading that lost a source, or that arrived before the slow one had
+/// answered for the first time, is missing devices rather than reporting that
+/// they are not there. Dropping a live watch on one of those would discard it
+/// for good over a source that is about to come back.
+fn unknown(watch: &Watch, reading: &Snapshot) -> bool {
+    !reading.degraded
+        && !reading.devices.is_empty()
+        && reading.matching(&watch.device).next().is_none()
 }
 
 /// The device's name and live level, once that level has reached `target`.
@@ -171,40 +183,16 @@ fn announce(device: &str, level: u8, sound: &str, notifier: &dyn Notifier) -> St
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, Ordering};
 
     use blubat_core::{Address, ChargeState, Levels, Source};
 
     use crate::notify::fake::Recorder as PostedBanners;
+    use crate::scratch::Scratch;
 
     use super::*;
 
     const TRACKPAD: &str = "Paul\u{2019}s Magic Trackpad";
     const READ_AT: i64 = 1_785_643_199;
-
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-
-    /// A directory that removes itself, so no test reaches a real watch file.
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "blubat-watches-tests-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::SeqCst)
-            ));
-            let _ = fs::remove_dir_all(&path);
-
-            Self(path)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     fn at(second: i64) -> Timestamp {
         Timestamp::from_unix(READ_AT + second)
@@ -243,11 +231,13 @@ mod tests {
 
     /// A watch directory holding the watches given, as `blubat wait` left them.
     fn registered(scratch: &Scratch, watches: &[Watch]) -> PathBuf {
+        let directory = scratch.paths().watch_dir();
+
         for watch in watches {
-            watch.write(&scratch.0).expect("a written watch");
+            watch.write(&directory).expect("a written watch");
         }
 
-        scratch.0.clone()
+        directory
     }
 
     fn holding(watches: &[Watch]) -> Watches {
@@ -274,7 +264,7 @@ mod tests {
         let scratch = Scratch::new();
         let mut watches = Watches::default();
 
-        assert!(watches.adopt(&scratch.0).is_empty());
+        assert!(watches.adopt(&scratch.paths().watch_dir()).is_empty());
     }
 
     #[test]
@@ -363,6 +353,39 @@ mod tests {
         assert!(lines[0].contains("zzz-no-such-device"), "{lines:?}");
         assert!(banners.posted().is_empty());
         assert!(watches.pending.is_empty());
+    }
+
+    /// A device only `system_profiler` knows about is missing from a reading
+    /// taken before it answered, and from one taken after it timed out. Neither
+    /// is the reading saying nothing paired matches.
+    #[test]
+    fn a_reading_that_is_missing_a_source_does_not_drop_a_watch() {
+        let banners = Arc::new(PostedBanners::new());
+        let airpods = Watch {
+            device: "airpods".to_string(),
+            ..watch(100, None)
+        };
+
+        for incomplete in [
+            Snapshot {
+                degraded: true,
+                ..reading(Some(85), true)
+            },
+            Snapshot {
+                devices: Vec::new(),
+                ..reading(Some(85), true)
+            },
+        ] {
+            let mut watches = holding(std::slice::from_ref(&airpods));
+
+            assert!(
+                watches
+                    .settle(&incomplete, "Glass", at(0), &banners)
+                    .is_empty(),
+                "{incomplete:?}"
+            );
+            assert_eq!(watches.pending.len(), 1, "the watch is still held");
+        }
     }
 
     #[test]

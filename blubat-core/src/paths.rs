@@ -66,6 +66,16 @@ impl Paths {
         }
     }
 
+    /// Replaces the state directory, which is what `--state-dir` does.
+    pub fn with_state_dir(self, state_dir: PathBuf) -> Self {
+        Self { state_dir, ..self }
+    }
+
+    /// The directory blubat keeps its own files in.
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
+    }
+
     /// The TOML file holding user intent, which may not exist.
     pub fn config_file(&self) -> &Path {
         &self.config_file
@@ -213,5 +223,27 @@ mod tests {
 
         assert_eq!(overridden.config_file(), Path::new("/elsewhere/mine.toml"));
         assert_eq!(overridden.state_file(), state);
+    }
+
+    #[test]
+    fn an_explicit_state_directory_moves_every_file_blubat_writes() {
+        let paths = xdg().with_state_dir(PathBuf::from("/elsewhere/state"));
+
+        assert_eq!(paths.state_dir(), Path::new("/elsewhere/state"));
+        assert_eq!(
+            paths.config_file(),
+            Path::new("/home/blubat/.config/blubat/config.toml"),
+            "which says nothing about the file the user owns"
+        );
+        for path in [
+            paths.state_file(),
+            paths.watch_dir(),
+            paths.tui_lock(),
+            paths.daemon_lock(),
+            paths.log_file(),
+            paths.error_log_file(),
+        ] {
+            assert!(path.starts_with("/elsewhere/state"), "{path:?}");
+        }
     }
 }

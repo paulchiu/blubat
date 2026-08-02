@@ -196,50 +196,11 @@ fn validate(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
     use blubat_core::{Address, ChargeState, Levels, Source, Timestamp};
 
+    use crate::scratch::Scratch;
+
     use super::*;
-
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-
-    /// A directory that removes itself, so a failing test leaves nothing behind.
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "blubat-config-tests-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::SeqCst)
-            ));
-            let _ = fs::remove_dir_all(&path);
-
-            Self(path)
-        }
-
-        /// The config file this test would resolve to, written or not.
-        fn config_file(&self) -> PathBuf {
-            Paths::rooted(&self.0).config_file().to_path_buf()
-        }
-
-        fn write(&self, contents: &str) -> PathBuf {
-            let path = self.config_file();
-
-            fs::create_dir_all(&self.0).expect("a scratch directory");
-            fs::write(&path, contents).expect("a written config");
-
-            path
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     fn trackpad() -> Device {
         Device {
@@ -280,7 +241,8 @@ mod tests {
     #[test]
     fn a_usable_file_passes() {
         let scratch = Scratch::new();
-        let path = scratch.write("[defaults]\nlow = 25\n\n[notifications]\nsound = \"Ping\"\n");
+        let path =
+            scratch.write_config("[defaults]\nlow = 25\n\n[notifications]\nsound = \"Ping\"\n");
 
         let (outcome, printed) = check(&path, Vec::new());
 
@@ -291,7 +253,7 @@ mod tests {
     #[test]
     fn a_malformed_file_fails_with_the_line_it_is_on() {
         let scratch = Scratch::new();
-        let path = scratch.write("[defaults]\nlow = 20\ncritical = \"ten\"\n");
+        let path = scratch.write_config("[defaults]\nlow = 20\ncritical = \"ten\"\n");
 
         let (outcome, printed) = check(&path, Vec::new());
 
@@ -306,7 +268,7 @@ mod tests {
     #[test]
     fn an_unknown_key_fails_rather_than_being_ignored() {
         let scratch = Scratch::new();
-        let path = scratch.write("[defaults]\nlwo = 20\n");
+        let path = scratch.write_config("[defaults]\nlwo = 20\n");
 
         assert!(check(&path, Vec::new()).0.is_err());
     }
@@ -314,7 +276,7 @@ mod tests {
     #[test]
     fn thresholds_that_cannot_hold_fail_with_every_problem_listed() {
         let scratch = Scratch::new();
-        let path = scratch.write("[defaults]\nlow = 20\nhigh = 15\n");
+        let path = scratch.write_config("[defaults]\nlow = 20\nhigh = 15\n");
 
         let message = check(&path, Vec::new())
             .0
@@ -330,7 +292,7 @@ mod tests {
     #[test]
     fn a_block_matching_nothing_warns_without_failing() {
         let scratch = Scratch::new();
-        let path = scratch.write("[[device]]\nmatch = \"trackpad\"\nlow = 25\n");
+        let path = scratch.write_config("[[device]]\nmatch = \"trackpad\"\nlow = 25\n");
 
         let (matched, quiet) = check(&path, vec![trackpad()]);
         let (unmatched, warned) = check(&path, Vec::new());
@@ -345,7 +307,7 @@ mod tests {
     #[test]
     fn hiding_a_device_writes_the_table_and_nothing_else_in_the_file() {
         let scratch = Scratch::new();
-        let path = scratch.write(
+        let path = scratch.write_config(
             "# my thresholds\n[defaults]\nlow = 25\n\n\
              [dashboard]\nhidden = [\"MX Master\"]\nsort = \"name\"\n",
         );
@@ -387,7 +349,7 @@ mod tests {
     #[test]
     fn showing_the_last_device_again_leaves_the_list_empty_rather_than_absent() {
         let scratch = Scratch::new();
-        let path = scratch.write("[dashboard]\nhidden = [\"30-82-16\"]\n");
+        let path = scratch.write_config("[dashboard]\nhidden = [\"30-82-16\"]\n");
 
         assert_eq!(save_hidden(&path, &[]), Ok(()));
         assert_eq!(
@@ -399,7 +361,7 @@ mod tests {
     #[test]
     fn a_file_that_will_not_parse_is_reported_rather_than_overwritten() {
         let scratch = Scratch::new();
-        let path = scratch.write("[defaults\nlow = 25\n");
+        let path = scratch.write_config("[defaults\nlow = 25\n");
 
         let problem = save_hidden(&path, &["30-82-16".to_string()])
             .expect_err("an unclosed table header is not TOML");
