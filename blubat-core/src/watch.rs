@@ -4,10 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use etcetera::base_strategy::{BaseStrategy, Xdg};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::paths::Paths;
 use crate::timestamp::Timestamp;
 
 /// A request to notify once, when one device reaches one level.
@@ -89,13 +89,7 @@ impl Watch {
 
 /// The directory `blubat wait` drops watches into and a daemon drains.
 pub fn watch_dir() -> Result<PathBuf> {
-    let home = Xdg::new().map_err(|error| Error::Path(error.to_string()))?;
-
-    Ok(home
-        .state_dir()
-        .unwrap_or_else(|| home.data_dir())
-        .join("blubat")
-        .join("watches"))
+    Paths::resolve().map(|paths| paths.watch_dir())
 }
 
 fn slug(device: &str) -> String {

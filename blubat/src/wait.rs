@@ -6,7 +6,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use blubat_core::{Device, Snapshot, Watch, watch_dir};
+use blubat_core::{Device, Snapshot, Watch, parse_duration, watch_dir};
 
 use crate::{Failure, reading};
 
@@ -20,10 +20,10 @@ pub struct Args {
     #[arg(long, short, value_parser = level)]
     until: u8,
     /// How long to leave between readings, such as `90s`, `5m` or `2h`.
-    #[arg(long, short, default_value = "60s", value_parser = duration)]
+    #[arg(long, short, default_value = "60s", value_parser = parse_duration)]
     interval: Duration,
     /// Give up after this long instead of waiting indefinitely.
-    #[arg(long, short, value_parser = duration)]
+    #[arg(long, short, value_parser = parse_duration)]
     timeout: Option<Duration>,
 }
 
@@ -166,24 +166,6 @@ fn level(text: &str) -> Result<u8, String> {
         .ok_or_else(|| format!("`{text}` is not a percentage between 0 and 100"))
 }
 
-/// Parses a duration written as bare seconds or with an `s`, `m` or `h` suffix.
-fn duration(text: &str) -> Result<Duration, String> {
-    let text = text.trim();
-    let (digits, per_unit) = match text.chars().last() {
-        Some('s') => (&text[..text.len() - 1], 1),
-        Some('m') => (&text[..text.len() - 1], 60),
-        Some('h') => (&text[..text.len() - 1], 3_600),
-        _ => (text, 1),
-    };
-
-    digits
-        .parse::<u64>()
-        .ok()
-        .and_then(|count| count.checked_mul(per_unit))
-        .map(Duration::from_secs)
-        .ok_or_else(|| format!("`{text}` is not a duration such as `90s`, `5m` or `2h`"))
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -274,31 +256,6 @@ mod tests {
         assert!(level("-1").is_err());
         assert!(level("full").is_err());
         assert!(level("").is_err());
-    }
-
-    #[test]
-    fn a_duration_is_seconds_unless_it_names_its_unit() {
-        assert_eq!(duration("90"), Ok(Duration::from_secs(90)));
-        assert_eq!(duration("90s"), Ok(Duration::from_secs(90)));
-        assert_eq!(duration("5m"), Ok(Duration::from_secs(300)));
-        assert_eq!(duration("2h"), Ok(Duration::from_secs(7_200)));
-        assert_eq!(duration(" 0s "), Ok(Duration::ZERO));
-    }
-
-    #[test]
-    fn a_duration_rejects_what_it_cannot_measure() {
-        for text in [
-            "",
-            "s",
-            "m",
-            "-5s",
-            "5 m",
-            "5d",
-            "1.5h",
-            "99999999999999999999h",
-        ] {
-            assert!(duration(text).is_err(), "{text} should be rejected");
-        }
     }
 
     #[test]
