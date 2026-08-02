@@ -111,8 +111,12 @@ fn status_line(app: &App, width: u16) -> Line<'static> {
     const NAME: &str = "blubat";
 
     let palette = app.look.palette;
+    let degraded = degraded(app.degraded(), palette);
     let warnings = warnings(app.warnings().len(), palette);
-    let spent = NAME.len() + GAP.len() + warnings.content.chars().count();
+    let spent = NAME.len()
+        + GAP.len()
+        + degraded.content.chars().count()
+        + warnings.content.chars().count();
     let room = usize::from(width).saturating_sub(spent);
 
     Line::from(vec![
@@ -121,6 +125,7 @@ fn status_line(app: &App, width: u16) -> Line<'static> {
             Style::new().fg(palette.accent).add_modifier(Modifier::BOLD),
         ),
         Span::styled(format!("{GAP}{}", summary(app, room)), palette.dim),
+        degraded,
         warnings,
     ])
 }
@@ -158,8 +163,21 @@ fn summary(app: &App, room: usize) -> String {
     })
 }
 
+/// Says the reading is standing in for one a source could not give.
+///
+/// Its own marker rather than a warning count, because it is a different claim:
+/// a warning is one device blubat could not read, and this is every device the
+/// slow source knows about being as old as its last good answer.
+fn degraded(degraded: bool, palette: Palette) -> Span<'static> {
+    if degraded {
+        Span::styled(format!("{GAP}degraded"), palette.low)
+    } else {
+        Span::raw("")
+    }
+}
+
 /// Warnings are counted rather than printed: the reading is still usable, and
-/// the count is the cue that the merge behind it is degraded.
+/// the count is the cue that something in it could not be read.
 fn warnings(count: usize, palette: Palette) -> Span<'static> {
     match count {
         0 => Span::raw(""),
@@ -1021,18 +1039,24 @@ mod tests {
         assert!(screen(&all_hidden).contains("every device is hidden"));
     }
 
+    /// The two claims are separate: one device blubat could not parse is a
+    /// warning, and a source standing in for its last good answer is degraded.
     #[test]
-    fn a_degraded_reading_is_counted_on_the_status_line() {
-        let degraded = update(
+    fn a_degraded_reading_says_so_beside_the_warnings_it_counts() {
+        let both = update(
             app(),
             Event::Reading(Snapshot {
-                degraded: false,
+                degraded: true,
                 warnings: vec!["system_profiler exited with 1".to_string()],
                 ..three_devices()
             }),
         );
+        let neither = update(app(), Event::Reading(three_devices()));
 
-        assert!(line_containing(&degraded, "blubat").contains("1 warning"));
+        assert!(line_containing(&both, "blubat").contains("degraded"));
+        assert!(line_containing(&both, "blubat").contains("1 warning"));
+        assert!(!line_containing(&neither, "blubat").contains("degraded"));
+        assert!(!line_containing(&neither, "blubat").contains("warning"));
     }
 
     #[test]

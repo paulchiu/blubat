@@ -198,9 +198,14 @@ fn offer_the_commands() -> Result<(), Failure> {
 ///
 /// The core hands its warnings back rather than printing them, so a frontend
 /// that owns the screen can place them. This one only owes stdout a clean value.
+/// A degraded reading is said there too rather than in `--json`, which is a
+/// compatibility surface carrying devices rather than anything about the read.
 fn reading() -> Snapshot {
     let snapshot = blubat_core::snapshot();
 
+    if snapshot.degraded {
+        eprintln!("blubat: warning: a source could not be read, so this is its last good answer");
+    }
     for warning in &snapshot.warnings {
         eprintln!("blubat: warning: {warning}");
     }

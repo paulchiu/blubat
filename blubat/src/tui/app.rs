@@ -373,6 +373,14 @@ impl App {
         self.rows().get(self.selected)
     }
 
+    /// Whether the last reading is carrying a source's last good answer rather
+    /// than a fresh one, which the status line says out loud.
+    pub fn degraded(&self) -> bool {
+        self.reading
+            .as_ref()
+            .is_some_and(|reading| reading.degraded)
+    }
+
     /// What the sources could not use, for the status line to place.
     pub fn warnings(&self) -> &[String] {
         self.reading
