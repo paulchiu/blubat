@@ -10,7 +10,6 @@
 
 mod app;
 mod columns;
-mod effects;
 mod events;
 mod glyph;
 mod render;
@@ -18,16 +17,15 @@ mod terminal;
 mod theme;
 mod view;
 
-use std::io;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
 
 use blubat_core::{Config, Paths, Poll, Tiers, Timestamp};
 
-use crate::Failure;
+use crate::effects::Effects;
 use crate::hooks::Outcome;
+use crate::{Failure, lock};
 use app::{App, Event, Notice, update};
-use effects::Effects;
 use glyph::Glyphs;
 use theme::Look;
 
@@ -49,14 +47,21 @@ const REDRAW: Duration = Duration::from_millis(250);
 /// The caller decides there is a terminal to take: `blubat` piped into
 /// something has a reading to offer instead, and that choice belongs where the
 /// bare invocation is handled rather than here.
+///
+/// The lock is taken beside the terminal and released with it: for as long as
+/// the dashboard is up it owns the notifications and the hooks, and a daemon
+/// running behind it records what it sees and fires none of it.
 pub fn run(paths: &Paths) -> Result<(), Failure> {
+    let taken = lock::take(paths.tui_lock());
+    let unlocked = taken.as_ref().err().cloned();
+    let _dashboard = taken.ok();
     let (config, unreadable) = load(paths);
     let tiers = tiers(&config.poll);
     let (notes, events) = events::events(blubat_core::poll(tiers));
     let (mut effects, stale_state) = Effects::live(paths, reporter(notes));
     let mut session = terminal::Session::open()?;
     let mut app = App {
-        notice: notice([unreadable, stale_state]),
+        notice: notice([unreadable, stale_state, unlocked]),
         advertised: effects.advertised().clone(),
         ..App::new(
             tiers.fast,
@@ -121,7 +126,7 @@ fn tiers(poll: &Poll) -> Tiers {
 }
 
 /// The one line the dashboard opens with, out of everything that was wrong.
-fn notice(problems: [Option<String>; 2]) -> Option<Notice> {
+fn notice(problems: [Option<String>; 3]) -> Option<Notice> {
     let problems: Vec<String> = problems.into_iter().flatten().collect();
 
     (!problems.is_empty()).then(|| Notice::problem(problems.join("; ")))
@@ -145,12 +150,6 @@ fn next(events: &Receiver<Event>) -> Option<Event> {
         Ok(event) => Some(event),
         Err(RecvTimeoutError::Timeout) => Some(Event::Tick(Timestamp::now())),
         Err(RecvTimeoutError::Disconnected) => None,
-    }
-}
-
-impl From<io::Error> for Failure {
-    fn from(error: io::Error) -> Self {
-        Failure::Error(error.to_string())
     }
 }
 
@@ -198,18 +197,19 @@ mod tests {
 
     #[test]
     fn a_startup_problem_becomes_one_line_and_a_clean_start_becomes_none() {
-        assert_eq!(notice([None, None]), None);
+        assert_eq!(notice([None, None, None]), None);
         assert_eq!(
-            notice([Some("config.toml: line 3".to_string()), None]),
+            notice([Some("config.toml: line 3".to_string()), None, None]),
             Some(Notice::problem("config.toml: line 3"))
         );
         assert_eq!(
             notice([
                 Some("bad config".to_string()),
-                Some("bad state".to_string())
+                Some("bad state".to_string()),
+                Some("no lock".to_string())
             ])
             .map(|notice| notice.text),
-            Some("bad config; bad state".to_string())
+            Some("bad config; bad state; no lock".to_string())
         );
     }
 

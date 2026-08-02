@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use blubat_core::{Config, Device, Paths, Snapshot, Watch, parse_duration};
 
 use crate::notify::{Banner, Desktop, Notifier};
-use crate::{Failure, reading};
+use crate::{Failure, lock, reading};
 
 /// Arguments of `blubat wait`.
 #[derive(Debug, clap::Args)]
@@ -34,7 +34,7 @@ pub struct Args {
 /// caller has already answered. The banner that ends one is the config's, since
 /// nothing else decides what a blubat notification sounds like.
 pub fn run(args: &Args, paths: &Paths) -> Result<(), Failure> {
-    if daemon_is_running() {
+    if daemon_is_running(paths) {
         register(args, &paths.watch_dir()).map(|path| {
             println!(
                 "watching {} for {}%, registered as {}",
@@ -55,10 +55,11 @@ pub fn run(args: &Args, paths: &Paths) -> Result<(), Failure> {
 
 /// Whether a blubat daemon is running and will drain the watch directory.
 ///
-/// The daemon ships in a later release, so nothing drains watches yet and a
-/// wait always polls in process.
-fn daemon_is_running() -> bool {
-    false
+/// The daemon holds a lock naming its process for as long as it runs, so this
+/// is one file read rather than a `launchctl` call: an agent that is loaded but
+/// between restarts is not one that will pick a watch up.
+fn daemon_is_running(paths: &Paths) -> bool {
+    lock::held(&paths.daemon_lock())
 }
 
 /// Drops a one-shot watch file for a running daemon to pick up.
@@ -143,8 +144,11 @@ fn wait_for_level(args: &Args, read: impl Fn() -> Snapshot) -> Result<(String, u
     }
 }
 
-/// What the banner ending a wait says.
-fn completed(device: &str, level: u8) -> String {
+/// What the banner ending a wait says, whichever blubat ends it.
+///
+/// The daemon posts this too, so a wait it took over reads the same as one that
+/// held the terminal.
+pub fn completed(device: &str, level: u8) -> String {
     format!("{device} is at {level}%, safe to unplug.")
 }
 

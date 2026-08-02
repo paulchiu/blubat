@@ -171,6 +171,7 @@ dependencies = [
  "blubat-core",
  "clap",
  "crossterm",
+ "libc",
  "mac-notification-sys",
  "ratatui",
  "serde",

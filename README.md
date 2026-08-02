@@ -38,7 +38,11 @@ daemon come after it.
 
 blubat reads an optional configuration file and never writes one. The only
 files it creates are its own state, under `~/.local/state/blubat/`: the event
-engine's `state.toml`, and the `watches/` directory `blubat wait` may drop into.
+engine's `state.toml`, the `watches/` directory `blubat wait` may drop into,
+the `tui.lock` and `daemon.lock` files its resident modes hold while they run,
+and the two logs the daemon writes under launchd. The one exception is the
+LaunchAgent plist, written to `~/Library/LaunchAgents/` by `daemon install`
+and by nothing else.
 
 ## Usage
 
@@ -47,12 +51,16 @@ blubat                              # the live dashboard: ? lists every key
 blubat list [--json] [--all]        # every device that reports a battery
 blubat status [--device <match>]    # one device, human readable
               [--json | --number]   # machine readable variants
-blubat wait --device <match>        # poll until the level is reached, then
-            --until <level>         # post a desktop notification
-            [--interval 60s] [--timeout <duration>]
+blubat wait --device <match>        # hand a one-shot watch to a running daemon
+            --until <level>         # and return, or poll here if none is
+            [--interval 60s] [--timeout <duration>]  # running, then notify
 blubat config path                  # print the resolved config path
 blubat config edit                  # open it in $EDITOR
 blubat config validate              # parse it and report what is wrong
+blubat daemon install               # write the LaunchAgent and start it
+blubat daemon uninstall             # stop it and remove the plist
+blubat daemon status                # installed? loaded? running?
+blubat daemon run                   # the resident loop itself
 blubat notify-test                  # post a test banner, name the identity it
                                     # was delivered under
 
@@ -348,18 +356,64 @@ or exits non-zero is reported rather than retried: on the dashboard's own line,
 since anything printed underneath would land on top of the frame it just drew.
 Nothing a hook does can hold up a poll, a keystroke or another hook.
 
+## Background daemon
+
+Notifications and hooks only fire while blubat is running. `blubat daemon
+install` writes a LaunchAgent at `~/Library/LaunchAgents/com.paulchiu.blubat.plist`
+pointing at the binary that installed it, and bootstraps it into the user's GUI
+domain, so the same engine keeps evaluating events with nothing on screen. It
+polls on `daemon_interval` rather than the dashboard's faster tick, restarts
+only when it exits badly, waits 30 seconds between restarts so a daemon that
+cannot start cannot spin, and writes its stdout and stderr to `daemon.log` and
+`daemon.error.log` under `~/.local/state/blubat/`.
+
+Nothing installs it for you. blubat never writes that plist on a first run or
+an upgrade, and `daemon uninstall` boots the agent out and removes the file
+again.
+
+```
+$ blubat daemon install
+installed com.paulchiu.blubat
+  plist   /Users/paul/Library/LaunchAgents/com.paulchiu.blubat.plist
+  running /opt/homebrew/bin/blubat daemon run
+  logging /Users/paul/.local/state/blubat/daemon.log
+
+$ blubat daemon status
+label     com.paulchiu.blubat
+plist     /Users/paul/Library/LaunchAgents/com.paulchiu.blubat.plist
+loaded    yes
+running   yes, pid 4242
+```
+
+Open the dashboard while the daemon is running and the dashboard takes over: it
+holds `~/.local/state/blubat/tui.lock` for as long as it is up, and the daemon
+checks that file before every banner and every hook, so an event fires once
+rather than twice. The daemon keeps polling and keeps writing the event state
+throughout, so quitting the dashboard does not set off everything it saw while
+it was open. The lock names the process holding it, and a lock left behind by a
+dashboard that was killed is ignored rather than silencing the daemon.
+
+`blubat wait` hands over the same way. With a daemon running it writes a
+one-shot watch into `~/.local/state/blubat/watches/` and returns at once; the
+daemon takes the file over on its next poll, posts the same banner when the
+level arrives, and drops a watch whose deadline passes or whose device nothing
+paired matches. With no daemon running, `wait` polls in the terminal as before.
+
 ## Layout
 
 - `blubat-core`: the device model, both data sources, the poller, the event
   engine and the config types. Depends on no terminal library, so a frontend
   other than the TUI stays buildable.
-- `blubat`: the binary, holding the CLI, the TUI, the notifier and the hook
-  runner over that core. It owns argument parsing, rendering and exit codes,
-  and nothing else. The dashboard is one loop over one channel: keypresses,
-  readings and finished hooks arrive as events, a pure `update` folds each into
-  the next state, and a pure `render` draws it. Everything a reading sets off
-  beyond a redraw (stepping the engine, saving its state, posting a banner,
-  starting a hook) sits in one effects layer the loop calls, never in `update`.
+- `blubat`: the binary, holding the CLI, the TUI, the daemon, the notifier, the
+  hook runner and the launchd plumbing over that core. It owns argument
+  parsing, rendering and exit codes, and nothing else. The dashboard is one
+  loop over one channel: keypresses, readings and finished hooks arrive as
+  events, a pure `update` folds each into the next state, and a pure `render`
+  draws it. Everything a reading sets off beyond a redraw (stepping the engine,
+  saving its state, posting a banner, starting a hook) sits in one effects
+  layer the loop calls, never in `update`. The daemon drives that same layer
+  with no view attached, which is what makes resident mode the dashboard minus
+  one component rather than a second implementation of it.
 
 ## Development
 

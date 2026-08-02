@@ -16,6 +16,10 @@ const APP: &str = "blubat";
 const CONFIG_FILE: &str = "config.toml";
 const STATE_FILE: &str = "state.toml";
 const WATCHES: &str = "watches";
+const TUI_LOCK: &str = "tui.lock";
+const DAEMON_LOCK: &str = "daemon.lock";
+const LOG_FILE: &str = "daemon.log";
+const ERROR_LOG_FILE: &str = "daemon.error.log";
 
 /// The config file blubat reads and the state directory it writes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,6 +80,31 @@ impl Paths {
     pub fn watch_dir(&self) -> PathBuf {
         self.state_dir.join(WATCHES)
     }
+
+    /// The lock a dashboard holds while it owns notifications and hooks.
+    ///
+    /// Both resident modes evaluate the same events, so exactly one of them may
+    /// act on them. The file names the process holding it, which is what lets a
+    /// daemon tell a dashboard that is still up from one that was killed.
+    pub fn tui_lock(&self) -> PathBuf {
+        self.state_dir.join(TUI_LOCK)
+    }
+
+    /// The lock a daemon holds, which is how `blubat wait` finds one to hand to.
+    pub fn daemon_lock(&self) -> PathBuf {
+        self.state_dir.join(DAEMON_LOCK)
+    }
+
+    /// Where the daemon's stdout goes under launchd.
+    pub fn log_file(&self) -> PathBuf {
+        self.state_dir.join(LOG_FILE)
+    }
+
+    /// Where the daemon's stderr goes under launchd, kept apart so a problem is
+    /// not buried in a log of ordinary readings.
+    pub fn error_log_file(&self) -> PathBuf {
+        self.state_dir.join(ERROR_LOG_FILE)
+    }
 }
 
 #[cfg(test)]
@@ -107,6 +136,43 @@ mod tests {
             paths.watch_dir(),
             PathBuf::from("/home/blubat/.local/state/blubat/watches")
         );
+        assert_eq!(
+            paths.tui_lock(),
+            PathBuf::from("/home/blubat/.local/state/blubat/tui.lock")
+        );
+    }
+
+    #[test]
+    fn everything_blubat_writes_about_itself_is_machine_state() {
+        let paths = xdg();
+        let state = PathBuf::from("/home/blubat/.local/state/blubat");
+
+        for path in [
+            paths.state_file(),
+            paths.watch_dir(),
+            paths.tui_lock(),
+            paths.daemon_lock(),
+            paths.log_file(),
+            paths.error_log_file(),
+        ] {
+            assert_eq!(path.parent(), Some(state.as_path()), "{path:?}");
+        }
+    }
+
+    #[test]
+    fn the_two_locks_and_the_two_logs_are_four_distinct_files() {
+        let paths = xdg();
+        let mut named = vec![
+            paths.tui_lock(),
+            paths.daemon_lock(),
+            paths.log_file(),
+            paths.error_log_file(),
+        ];
+        let written = named.len();
+        named.sort();
+        named.dedup();
+
+        assert_eq!(named.len(), written);
     }
 
     #[test]
@@ -129,6 +195,10 @@ mod tests {
             paths.config_file().to_path_buf(),
             paths.state_file(),
             paths.watch_dir(),
+            paths.tui_lock(),
+            paths.daemon_lock(),
+            paths.log_file(),
+            paths.error_log_file(),
         ] {
             assert!(path.starts_with(root), "{path:?} escaped the root");
         }

@@ -7,7 +7,10 @@
 //! has a battery, 1 for anything else.
 
 mod config;
+mod daemon;
+mod effects;
 mod hooks;
+mod lock;
 mod notify;
 mod report;
 mod tui;
@@ -58,11 +61,21 @@ enum Command {
         number: bool,
     },
     /// Wait until a device reaches a level, then notify.
+    ///
+    /// With a daemon running the wait is handed to it: blubat registers a
+    /// one-shot watch, prints where it registered it and returns at once, and
+    /// the daemon posts the banner when the level arrives. With no daemon the
+    /// wait polls here until then and holds the terminal while it does.
     Wait(wait::Args),
     /// Show, open or check the configuration file.
     Config {
         #[command(subcommand)]
         command: config::Command,
+    },
+    /// Run blubat in the background, or install the agent that does.
+    Daemon {
+        #[command(subcommand)]
+        command: daemon::Command,
     },
     /// Send a test banner and report the identity it was delivered under.
     ///
@@ -137,6 +150,7 @@ fn run(cli: Cli) -> Result<(), Failure> {
         }) => report::status(&reading(), device.as_deref(), Format::of(json, number)),
         Some(Command::Wait(args)) => wait::run(&args, &paths(cli.config)?),
         Some(Command::Config { command }) => config::run(&command, &paths(cli.config)?),
+        Some(Command::Daemon { command }) => daemon::run(&command, &paths(cli.config)?),
         Some(Command::NotifyTest) => notify::run(&paths(cli.config)?),
         None if io::stdout().is_terminal() => tui::run(&paths(cli.config)?),
         None => offer_the_commands(),
@@ -177,6 +191,12 @@ fn reading() -> Snapshot {
     }
 
     snapshot
+}
+
+impl From<io::Error> for Failure {
+    fn from(error: io::Error) -> Self {
+        Failure::Error(error.to_string())
+    }
 }
 
 fn fail(failure: Failure) -> ExitCode {

@@ -1,11 +1,13 @@
-//! The dashboard's impure half: the event engine, the state file, the banners
-//! and the hooks.
+//! blubat's impure half: the event engine, the state file, the banners and the
+//! hooks.
 //!
-//! `update` folds an event into the next state and touches nothing else, so
-//! everything a reading sets off beyond a redraw happens here, driven by the
-//! loop between the two. Both sinks are traits and both paths are handed in, so
-//! a test drives the whole chain from a reading to a started hook with no
-//! notification centre and no shell.
+//! Everything a reading sets off beyond drawing it happens here, which is what
+//! makes the daemon the dashboard minus its view rather than a second
+//! implementation: both drive this chain over the same engine and the same
+//! state file, and only the poll interval and the presence of a terminal
+//! differ. Both sinks are traits and both paths are handed in, so a test drives
+//! the whole chain from a reading to a started hook with no notification centre
+//! and no shell.
 
 use std::path::PathBuf;
 
@@ -13,6 +15,9 @@ use blubat_core::{AdvertisedThresholds, Config, Engine, Paths, Snapshot};
 
 use crate::hooks::{self, Hooks, Outcome, Runner};
 use crate::notify::{self, Desktop, Notifier};
+
+/// Whether another blubat owns the side effects at this moment.
+type Deferring = Box<dyn Fn() -> bool + Send + Sync>;
 
 /// Everything one reading sets off outside the reducer.
 pub struct Effects {
@@ -30,6 +35,7 @@ pub struct Effects {
     advertised: AdvertisedThresholds,
     notifier: Box<dyn Notifier>,
     hooks: Box<dyn Hooks>,
+    deferring: Deferring,
 }
 
 impl Effects {
@@ -73,6 +79,20 @@ impl Effects {
             advertised,
             notifier,
             hooks,
+            deferring: Box::new(|| false),
+        }
+    }
+
+    /// Hands the side effects to whoever `owner` says is holding them.
+    ///
+    /// The daemon defers to a dashboard, which owns notifications and hooks for
+    /// as long as it is open. Asked again before each one rather than once at
+    /// startup, so a dashboard opened or quit mid run is honoured on the next
+    /// event rather than the next restart.
+    pub fn deferring_to(self, owner: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        Self {
+            deferring: Box::new(owner),
+            ..self
         }
     }
 
@@ -88,6 +108,10 @@ impl Effects {
     /// reading does not depend on how long it took to arrive. Problems come
     /// back to be placed rather than printed: stderr would land on top of
     /// whatever the dashboard is drawing.
+    ///
+    /// While the side effects belong to another blubat the engine still steps
+    /// and the state file is still written, so what was raised while deferring
+    /// is not raised again once the owner goes away.
     pub fn observe(&mut self, reading: &Snapshot, config: &Config) -> Vec<String> {
         let now = reading.read_at;
         // `step` consumes the engine and hands the next one back, which is what
@@ -98,6 +122,7 @@ impl Effects {
 
         let mut problems: Vec<String> = raised
             .iter()
+            .filter(|_| self.mine())
             .filter_map(|raised| {
                 notify::announce(raised, &config.notifications, self.notifier.as_ref())
                     .and_then(Result::err)
@@ -105,20 +130,27 @@ impl Effects {
             .collect();
 
         for raised in &raised {
-            hooks::dispatch(
-                raised,
-                reading,
-                config,
-                &mut self.engine,
-                self.hooks.as_ref(),
-                now,
-            );
+            if self.mine() {
+                hooks::dispatch(
+                    raised,
+                    reading,
+                    config,
+                    &mut self.engine,
+                    self.hooks.as_ref(),
+                    now,
+                );
+            }
         }
 
         // After dispatch, since allowing a hook to run is what records it.
         problems.extend(self.persist());
 
         problems
+    }
+
+    /// Whether this blubat is the one that acts on what a reading raised.
+    fn mine(&self) -> bool {
+        !(self.deferring)()
     }
 
     /// Reads the config file again, which is what `r` asks for.
@@ -156,7 +188,7 @@ impl Effects {
 mod tests {
     use std::fs;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     use blubat_core::{
         Address, ChargeState, Device, Event, Levels, Notifications, Source, Timestamp,
@@ -454,6 +486,63 @@ mod tests {
             written.contains("hook.nag"),
             "the state was saved after dispatch, so the clock is in it: {written}"
         );
+    }
+
+    #[test]
+    fn nothing_is_announced_or_run_while_another_blubat_owns_the_effects() {
+        let scratch = Scratch::new();
+        let config = Config::parse("[[hook]]\nevent = \"low_battery\"\ncommand = \"nag\"\n")
+            .expect("parses");
+        let (effects, banners, hooks) = effects(&scratch);
+        let mut effects = effects.deferring_to(|| true);
+
+        observe(&mut effects, &config, &[50, 19]);
+
+        assert!(banners.posted().is_empty(), "{:?}", banners.posted());
+        assert!(hooks.commands().is_empty(), "{:?}", hooks.commands());
+        assert!(
+            fs::read_to_string(scratch.paths().state_file())
+                .expect("a written state file")
+                .contains("low_battery"),
+            "the crossing was still recorded"
+        );
+    }
+
+    #[test]
+    fn a_crossing_recorded_while_deferring_is_not_announced_when_the_owner_goes() {
+        let scratch = Scratch::new();
+        let config = Config::default();
+        let owned = Arc::new(AtomicBool::new(true));
+        let (effects, banners, _) = effects(&scratch);
+        let elsewhere = Arc::clone(&owned);
+        let mut effects = effects.deferring_to(move || elsewhere.load(Ordering::SeqCst));
+
+        observe(&mut effects, &config, &[50, 19]);
+        owned.store(false, Ordering::SeqCst);
+        effects.observe(&reading(Some(19), 2), &config);
+
+        assert!(
+            banners.posted().is_empty(),
+            "the dashboard announced it, so this one stays quiet: {:?}",
+            banners.posted()
+        );
+    }
+
+    #[test]
+    fn the_owner_going_away_restores_the_side_effects() {
+        let scratch = Scratch::new();
+        let config = Config::default();
+        let owned = Arc::new(AtomicBool::new(true));
+        let (effects, banners, _) = effects(&scratch);
+        let elsewhere = Arc::clone(&owned);
+        let mut effects = effects.deferring_to(move || elsewhere.load(Ordering::SeqCst));
+
+        effects.observe(&reading(Some(50), 0), &config);
+        owned.store(false, Ordering::SeqCst);
+        effects.observe(&reading(Some(19), 1), &config);
+
+        assert_eq!(banners.posted().len(), 1);
+        assert_eq!(banners.posted()[0].body, "Battery low at 19%");
     }
 
     #[test]

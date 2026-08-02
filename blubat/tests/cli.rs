@@ -53,7 +53,7 @@ fn help_still_lists_every_subcommand() {
     let printed = stdout(&blubat(&["--help"]));
 
     assert!(printed.contains("Usage: blubat"), "{printed}");
-    for subcommand in ["list", "status", "wait", "config", "notify-test"] {
+    for subcommand in ["list", "status", "wait", "config", "daemon", "notify-test"] {
         assert!(printed.contains(subcommand), "{subcommand} is missing");
     }
 }
@@ -120,6 +120,31 @@ fn incompatible_output_flags_are_an_error_exit() {
         stderr(&output).contains("cannot be used with"),
         "{output:?}"
     );
+}
+
+/// The daemon is never started by a test: these run its argument surface only,
+/// because everything past it either holds the terminal forever or asks
+/// launchd to load an agent on the machine running them.
+#[test]
+fn daemon_lists_the_four_things_it_can_be_asked_to_do() {
+    let printed = stdout(&blubat(&["daemon", "--help"]));
+
+    for subcommand in ["run", "install", "uninstall", "status"] {
+        assert!(printed.contains(subcommand), "{subcommand} is missing");
+    }
+}
+
+#[test]
+fn wait_says_it_may_hand_the_wait_to_a_daemon() {
+    let printed = stdout(&blubat(&["wait", "--help"]));
+
+    assert!(printed.contains("daemon"), "{printed}");
+    assert!(printed.contains("one-shot watch"), "{printed}");
+}
+
+#[test]
+fn an_unknown_daemon_subcommand_is_an_error_exit() {
+    assert_eq!(code(&blubat(&["daemon", "start"])), 1);
 }
 
 #[test]
