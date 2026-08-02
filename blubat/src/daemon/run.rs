@@ -47,6 +47,9 @@ pub fn serve(paths: &Paths) -> Result<(), Failure> {
             "a blubat daemon is already running".to_string(),
         ));
     };
+    // Best effort: a file that predates the guide is introduced to it here,
+    // and the load right after reports a real problem on its own either way.
+    let _ = crate::config::annotate(paths.config_file());
     let (config, unreadable) = load(paths);
     let (effects, stale_state) = Effects::live(paths, report);
     let mut resident = resident(paths, effects, Box::new(Desktop));

@@ -109,6 +109,23 @@ simply be switched off.
 The dashboard's own `c` opens the same editor `blubat config edit` does: the
 same `$EDITOR`/`$VISUAL` resolution, and the same message when neither is set.
 
+## The self-documenting file
+
+`blubat config edit` and the dashboard's `c` seed the full commented template
+above the first time either opens a file that does not exist yet, so a
+machine that has never been configured opens the whole schema instead of a
+blank page: every key behind a `#` with its built-in default, which parses to
+exactly the same config as no file at all. A file that predates the template
+is introduced to it once instead, whether it is opened by `edit`, opened by
+`c`, or just loaded at startup: a marker line and a short pointer go in
+front, and a guide section for whichever tables the file does not already
+have goes on the end, leaving the user's own text exactly as it was. The
+marker line, `## blubat configuration, guide v1`, is what a later run looks
+for to skip a file already introduced; keeping that line after deleting the
+sections under it by hand opts a file out for good. Like every other write
+blubat makes to this file, a file `Config::parse` rejects is never touched:
+it is left for `blubat config validate` and the load path to report on.
+
 ## Global flags
 
 Every command accepts `--config <path>` and `--state-dir <path>` to read

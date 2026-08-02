@@ -61,6 +61,9 @@ pub fn run(paths: &Paths) -> Result<(), Failure> {
     // Held for the whole function, since dropping it hands the effects back.
     let (dashboard, unlocked) = claim(paths);
     let owned = dashboard.is_some();
+    // Best effort: a file that predates the guide is introduced to it here,
+    // and the load right after reports a real problem on its own either way.
+    let _ = crate::config::annotate(paths.config_file());
     let (config, unreadable) = load(paths);
     let tiers = tiers(&config.poll);
     let (notes, events, admission) = events::events(blubat_core::poll(tiers));

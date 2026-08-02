@@ -60,7 +60,10 @@ esc/enter  back to the dashboard      j/k  next/previous device      q  quit
 `c` suspends the dashboard, opens `~/.config/blubat/config.toml` in `$EDITOR`
 (or failing that `$VISUAL`), and reloads the file the same way `r` does once
 the editor closes: the reload's own rules apply, so a file the editor leaves
-unparsable is reported and changes nothing. Nothing set in either variable is a
+unparsable is reported and changes nothing. A file that does not exist yet
+opens as the full commented template rather than a blank page; see
+[docs/configuration.md](configuration.md#the-self-documenting-file) for what
+that means for a file that already exists. Nothing set in either variable is a
 notice on the dashboard rather than a crash, the same message `blubat config
 edit` gives on the command line.
 
