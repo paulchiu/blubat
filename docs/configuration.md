@@ -1,0 +1,107 @@
+# configuration
+
+This covers the config file: its full schema, how thresholds resolve, the
+`config` subcommands, and the global flags that override where blubat reads
+and writes. See the [README](../README.md) for installing and a quick start.
+
+TOML at `~/.config/blubat/config.toml`, resolved with the XDG strategy. The
+file is optional: blubat runs on built-in defaults, and `[dashboard] hidden`
+is the only thing it ever writes into one. Machine state (the event engine's
+armed and fired flags, the one-shot watches) lives apart from it under
+`~/.local/state/blubat/`; see [docs/architecture.md](architecture.md) for what
+lives there.
+
+Parsing is strict. An unknown key, an unknown event name or a duration that
+does not parse is an error naming the line it is on, because a typo that
+silently does nothing is worse than one that says so.
+
+```toml
+[poll]
+foreground_interval = "30s"   # tick while the dashboard or a command runs
+daemon_interval     = "120s"  # tick under launchd
+profiler_interval   = "5m"    # slow tier, cached in between
+profiler_timeout    = "10s"   # ceiling on one system_profiler call
+stale_after         = "10m"   # no reading for this long raises `stale`
+
+[notifications]
+low      = true
+critical = true
+charged  = true               # "safe to unplug"
+connect  = false              # connect and disconnect are noisy by default
+stale    = true
+sound    = "Glass"
+
+[defaults]
+low          = 20
+critical     = 10
+high         = 100            # the level that raises `charged`
+rearm_margin = 1              # recovery required before an event re-arms
+
+[theme]
+scheme   = "dark"             # dark, light or mono
+accent   = "#39c5cf"          # per colour overrides on top of the scheme
+critical = "#f47067"
+low      = "#c69026"
+ok       = "#57ab5a"
+charging_glyph = "+"          # overrides the Nerd Font guess either way
+
+[dashboard]
+hidden = ["MX Master"]        # matches, as --device takes them; `h` writes here
+sort   = "level"              # level, name or last_seen
+
+# Per device overrides. `match` is the same case insensitive substring
+# `--device` takes, tested against the name and the address. The first
+# block a device matches is the one that applies.
+[[device]]
+match        = "Soundcore"
+low          = 25             # dies fast below 25, warn earlier
+high         = 90             # optimised charging never reports 100
+rearm_margin = 5              # reports in coarse steps, needs more slack
+
+# Hooks run a shell command with BLUBAT_* set in the environment.
+[[hook]]
+event    = "low_battery"      # low_battery, critical_battery, charged,
+command  = "~/bin/nag"        # connected, disconnected or stale
+debounce = "30m"              # a window, or "once" per re-arm cycle
+
+[[hook]]
+event   = "disconnected"
+match   = "AirPods"           # optional per hook device filter
+command = "~/bin/pause-music"
+timeout = "10s"
+```
+
+Thresholds resolve most specific first: the first `[[device]]` block the
+device matches, then `[defaults]`, then what the device's own IOKit node
+advertises, then the built-in 20, 10, 100 and 1.
+
+`[poll] foreground_interval` sets the dashboard's tick. Left unwritten, the
+dashboard reads every 5s instead: it is on screen and being read as it
+changes, and the fast tier is a single digit millisecond IOKit call.
+
+`[dashboard] hidden` is maintained from the dashboard as well as by hand: `h`
+appends the selected device's address and `h` over a shown-again device
+removes whatever was hiding it. The edit is surgical, so a hand written file
+keeps its comments, its blank lines and the order of everything in it. `r` on
+the [dashboard](dashboard.md) re-reads the list along with the rest of the
+file, which is what settles a hand edit made while the dashboard is open.
+
+## The `config` subcommand
+
+```
+blubat config path      # print the resolved config path
+blubat config edit      # open it in $EDITOR
+blubat config validate  # parse it and report what is wrong
+```
+
+`blubat config validate` exits 0 when the file is usable or absent and 1 when
+it is not, so it fits a dotfiles check. A `[[device]]` block matching nothing
+currently visible is a warning rather than a failure, since the device may
+simply be switched off.
+
+## Global flags
+
+Every command accepts `--config <path>` and `--state-dir <path>` to read
+configuration and keep blubat's own files somewhere other than the resolved
+locations for that one invocation. The installed daemon does not resolve
+these itself; see [docs/daemon.md](daemon.md) for why.
