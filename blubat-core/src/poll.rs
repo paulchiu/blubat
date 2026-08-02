@@ -58,7 +58,9 @@ pub fn snapshot() -> Snapshot {
 /// `system_profiler` call that hangs holds up nothing but its own tier.
 ///
 /// A device arriving or going away cuts the wait short on both tiers, since
-/// that is the moment a held reading is most misleading.
+/// that is the moment a held reading is most misleading. The fast tier reads
+/// on every nudge; the slow one reads once and then sits out [`EARLY_FLOOR`],
+/// since a flapping link must not turn into a stream of expensive calls.
 pub fn poll(tiers: Tiers) -> Receiver<Snapshot> {
     poll_with(
         tiers,
@@ -150,6 +152,12 @@ fn read_fast(
     }
 }
 
+/// The soonest a second early read may follow one a nudge already brought on.
+///
+/// A Bluetooth link can flap several times a second and this source costs about
+/// 150ms a call, so a nudge buys one extra read rather than one per flap.
+const EARLY_FLOOR: Duration = Duration::from_secs(5);
+
 /// Reads the slow source on its own thread, publishing each result to the fast tier.
 ///
 /// Waiting on `wanted` is how this tier sleeps, how the fast tier asks it for
@@ -163,6 +171,7 @@ fn slow_tier(
     wanted: &Receiver<()>,
 ) {
     let mut held = Cached::default();
+    let mut early = false;
 
     loop {
         held = read_slow(&held, clock(), &read);
@@ -170,11 +179,15 @@ fn slow_tier(
         if refreshed.send(held.clone()).is_err() {
             break;
         }
-        if matches!(
-            wanted.recv_timeout(interval),
-            Err(RecvTimeoutError::Disconnected)
-        ) {
-            break;
+        if early {
+            thread::sleep(EARLY_FLOOR);
+            wanted.try_iter().for_each(drop);
+        }
+
+        match wanted.recv_timeout(interval) {
+            Ok(()) => early = true,
+            Err(RecvTimeoutError::Timeout) => early = false,
+            Err(RecvTimeoutError::Disconnected) => break,
         }
     }
 }
@@ -485,6 +498,36 @@ mod tests {
                 slow_reads.load(Ordering::SeqCst) > 1
             }),
             "and the slow tier was asked to read again too"
+        );
+    }
+
+    #[test]
+    fn a_flapping_link_does_not_turn_into_a_stream_of_slow_reads() {
+        let slow_reads = Arc::new(AtomicI64::new(0));
+        let (nudge, nudges) = mpsc::channel();
+        let receiver = poll_with(
+            Tiers {
+                fast: Duration::from_secs(3_600),
+                slow: Duration::from_secs(3_600),
+                ..Tiers::default()
+            },
+            |_, _| vec![trackpad()],
+            counting_slow(Arc::clone(&slow_reads)),
+            frozen(),
+            nudges,
+        );
+
+        receiver.recv().expect("the first reading");
+        for _ in 0..4 {
+            nudge.send(()).expect("the poller is listening");
+            thread::sleep(Duration::from_millis(50));
+        }
+        thread::sleep(Duration::from_millis(500));
+
+        assert_eq!(
+            slow_reads.load(Ordering::SeqCst),
+            2,
+            "one read on the first nudge, and the rest inside the floor"
         );
     }
 
