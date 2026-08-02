@@ -7,17 +7,22 @@ use std::borrow::Cow;
 pub struct Glyphs {
     /// Prefixes the charging state in the table.
     pub charging: Cow<'static, str>,
+    /// Marks a row `H` is showing that would otherwise be hidden.
+    pub hidden: Cow<'static, str>,
 }
 
 impl Glyphs {
     /// What every terminal can draw, and what blubat falls back to.
     pub const ASCII: Self = Self {
         charging: Cow::Borrowed("+"),
+        hidden: Cow::Borrowed("[h]"),
     };
 
-    /// The Nerd Fonts bolt, single width so it cannot shift a column.
+    /// The Nerd Fonts bolt and eye-slash, both single width so a switch
+    /// between the two glyph sets cannot shift a column on its own.
     pub const NERD_FONT: Self = Self {
         charging: Cow::Borrowed("\u{f0e7}"),
+        hidden: Cow::Borrowed("\u{f070}"),
     };
 
     /// The glyphs to draw with, guessed from the environment.
@@ -31,12 +36,13 @@ impl Glyphs {
     /// Blank is nothing written: a mark of no characters would leave the state
     /// column reading as a stray space.
     pub fn overridden(self, charging: Option<&str>) -> Self {
-        charging
-            .map(str::trim)
-            .filter(|glyph| !glyph.is_empty())
-            .map_or(self, |glyph| Self {
+        match charging.map(str::trim).filter(|glyph| !glyph.is_empty()) {
+            Some(glyph) => Self {
                 charging: Cow::Owned(glyph.to_string()),
-            })
+                ..self
+            },
+            None => self,
+        }
     }
 
     /// Guesses whether the terminal can draw the Nerd Fonts private use area.
@@ -150,6 +156,11 @@ mod tests {
     fn the_bolt_is_one_cell_so_it_cannot_shift_a_column() {
         assert_eq!(Glyphs::NERD_FONT.charging.chars().count(), 1);
         assert_eq!(Glyphs::ASCII.charging.chars().count(), 1);
+    }
+
+    #[test]
+    fn the_eye_slash_is_one_cell_the_same_way() {
+        assert_eq!(Glyphs::NERD_FONT.hidden.chars().count(), 1);
     }
 
     #[test]

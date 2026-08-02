@@ -18,11 +18,18 @@ table.
 q      quit                  s  cycle the order: level, name, last seen
 j/k    move the selection    /  filter on name or address, esc clears it
 enter  the detail view       h  hide the selected device, H show hidden again
-r      reload the config     ?  the full keymap
+i      hide the inactive section, i again shows it     r  reload the config
+                                                         ?  the full keymap
 ```
 
 `q` and ctrl+c both leave the dashboard; the keymap overlay takes the keyboard
 while it is open, so `?` closes it before anything else responds again.
+
+`i` drops the disconnected section off the table for the rest of the run and
+brings it back with the same key; the footer reads `hide inactive` or `show
+inactive` depending on which it would do next. Unlike `h`, it never touches the
+config file: `[dashboard] hide_inactive` only decides what the dashboard opens
+showing.
 
 ## Detail view
 
@@ -69,6 +76,10 @@ shows hidden devices again and a second `h` brings one back, dropping every
 match that was hiding it, whether blubat wrote it or a person did. Hiding is
 blubat's own view of a device and nothing more: the device stays paired, macOS
 still knows it, and blubat never unpairs anything.
+
+Once `H` has brought hidden devices onto the table, each one carries a dim
+marker beside its name (an eye-off glyph on a Nerd Font terminal, `[h]`
+otherwise) so a hidden row is never mistaken for a shown one.
 
 ## Theme and glyph
 

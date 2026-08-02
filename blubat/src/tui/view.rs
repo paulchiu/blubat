@@ -66,13 +66,17 @@ pub struct View {
     /// same substring matches `--device` takes, and what `h` writes back.
     pub hidden: Vec<String>,
     pub show_hidden: bool,
+    /// Whether the disconnected section is left off the table, which `i`
+    /// toggles for the run and never writes back.
+    pub hide_inactive: bool,
 }
 
 impl View {
-    /// The view a config file's `[dashboard] hidden` opens the dashboard on.
-    pub fn hiding(hidden: &[String]) -> Self {
+    /// The view a config file's `[dashboard]` table opens the dashboard on.
+    pub fn hiding(hidden: &[String], hide_inactive: bool) -> Self {
         Self {
             hidden: hidden.to_vec(),
+            hide_inactive,
             ..Self::default()
         }
     }
@@ -82,7 +86,8 @@ impl View {
         self.filter.keeps(device) && (self.show_hidden || !self.hides(device))
     }
 
-    fn hides(&self, device: &Device) -> bool {
+    /// Whether `device` is one `h` has hidden, regardless of `show_hidden`.
+    pub fn hides(&self, device: &Device) -> bool {
         self.hidden.iter().any(|pattern| device.matches(pattern))
     }
 
@@ -114,6 +119,10 @@ pub struct Rows<'a> {
 
 impl<'a> Rows<'a> {
     /// The devices `view` shows out of `devices`, in its order.
+    ///
+    /// `hide_inactive` drops the whole section rather than filtering it out
+    /// device by device, so a device hidden this way is still connected as
+    /// far as the status line and the alert count are concerned.
     pub fn of(devices: &'a [Device], view: &View) -> Self {
         let (active, inactive) = devices
             .iter()
@@ -122,7 +131,11 @@ impl<'a> Rows<'a> {
 
         Self {
             active: sorted(active, view.sort),
-            inactive: sorted(inactive, view.sort),
+            inactive: if view.hide_inactive {
+                Vec::new()
+            } else {
+                sorted(inactive, view.sort)
+            },
         }
     }
 
@@ -368,7 +381,7 @@ mod tests {
     #[test]
     fn the_config_files_matches_are_the_devices_the_dashboard_opens_without() {
         let devices = devices();
-        let view = View::hiding(&["MX Keys".to_string()]);
+        let view = View::hiding(&["MX Keys".to_string()], false);
 
         assert_eq!(
             shown(&devices, &view),
@@ -380,7 +393,7 @@ mod tests {
     #[test]
     fn showing_a_device_again_drops_every_match_that_was_hiding_it() {
         let devices = devices();
-        let mut view = View::hiding(&["MX Keys".to_string(), "de-df-38".to_string()]);
+        let mut view = View::hiding(&["MX Keys".to_string(), "de-df-38".to_string()], false);
         view.toggle_hidden(&devices[1]);
 
         assert!(view.hidden.is_empty(), "one press, however it was hidden");
@@ -390,10 +403,43 @@ mod tests {
     #[test]
     fn hiding_appends_rather_than_reordering_what_the_file_already_held() {
         let devices = devices();
-        let mut view = View::hiding(&["MX Keys".to_string()]);
+        let mut view = View::hiding(&["MX Keys".to_string()], false);
         view.toggle_hidden(&devices[0]);
 
         assert_eq!(view.hidden, ["MX Keys", "30-82-16-f2-24-90"]);
+    }
+
+    #[test]
+    fn the_dashboard_can_open_with_the_inactive_section_already_hidden() {
+        let devices = devices();
+        let view = View::hiding(&[], true);
+
+        assert_eq!(
+            shown(&devices, &view),
+            ["MX Keys M Mac", "Magic Trackpad", "Soundcore Liberty"],
+            "the disconnected device is left off from the first frame"
+        );
+    }
+
+    #[test]
+    fn hiding_the_inactive_section_drops_it_without_touching_the_active_one() {
+        let devices = devices();
+        let mut view = View::default();
+
+        assert_eq!(Rows::of(&devices, &view).inactive.len(), 1);
+
+        view.hide_inactive = true;
+        let rows = Rows::of(&devices, &view);
+        assert_eq!(rows.active.len(), 3, "the active section is untouched");
+        assert!(rows.inactive.is_empty());
+        assert_eq!(rows.len(), 3);
+
+        view.hide_inactive = false;
+        assert_eq!(
+            Rows::of(&devices, &view).inactive.len(),
+            1,
+            "and the same key brings it back"
+        );
     }
 
     #[test]

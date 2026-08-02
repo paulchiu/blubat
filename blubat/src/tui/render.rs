@@ -11,11 +11,12 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Padding, Paragraph, Row, Table, TableState};
 
-use super::app::{App, Binding, DETAIL_KEYS, KEYMAP, Mode, NOTES, Notice};
+use super::app::{App, Binding, DETAIL_KEYS, Mode, NOTES, Notice, dashboard_keys};
 use super::columns::{self, Column};
 use super::detail;
+use super::glyph::Glyphs;
 use super::theme::{self, Palette};
-use super::view::Rows;
+use super::view::{Rows, View};
 
 /// Kept in front of every name so rows stay aligned whatever the gutter holds.
 const GUTTER: &str = "  ";
@@ -77,7 +78,7 @@ pub fn render(frame: &mut Frame, app: &App, table: &mut TableState) {
     frame.render_widget(keys_footer(app), footer);
 
     if app.mode == Mode::Keymap {
-        render_keymap(frame, screen, palette);
+        render_keymap(frame, screen, palette, &app.view);
     }
 }
 
@@ -346,7 +347,14 @@ fn cell<'a>(
     let thresholds = app.thresholds(device);
 
     match column {
-        Column::Name => Cell::from(name(device, section, critical, palette)),
+        Column::Name => Cell::from(name(
+            device,
+            section,
+            critical,
+            app.view.hides(device),
+            palette,
+            &app.look.glyphs,
+        )),
         Column::Kind => Cell::from(Span::styled(
             device.kind.as_deref().unwrap_or(theme::UNKNOWN),
             section.tint(palette.dim, palette),
@@ -401,8 +409,17 @@ fn recent_levels(app: &App, device: &Device) -> Vec<u8> {
     levels
 }
 
-/// The name, behind the gutter that a critical device puts its mark in.
-fn name(device: &Device, section: Section, critical: bool, palette: Palette) -> Line<'_> {
+/// The name, behind the gutter that a critical device puts its mark in and
+/// followed by a dim glyph for a device `H` is showing that would otherwise
+/// be hidden.
+fn name<'a>(
+    device: &'a Device,
+    section: Section,
+    critical: bool,
+    hidden: bool,
+    palette: Palette,
+    glyphs: &Glyphs,
+) -> Line<'a> {
     let marker = if critical {
         Span::styled(ALERT, palette.critical)
     } else {
@@ -413,8 +430,13 @@ fn name(device: &Device, section: Section, critical: bool, palette: Palette) -> 
     } else {
         section.tint(palette.strong, palette)
     };
+    let mut spans = vec![marker, Span::styled(device.name.as_str(), colour)];
 
-    Line::from(vec![marker, Span::styled(device.name.as_str(), colour)])
+    if hidden {
+        spans.push(Span::styled(format!(" {}", glyphs.hidden), palette.dim));
+    }
+
+    Line::from(spans)
 }
 
 /// The filled run in the level colour, the trough behind it dim.
@@ -509,28 +531,35 @@ pub(super) fn keys_footer(app: &App) -> Line<'static> {
 /// It lists the detail view's keys as well as the dashboard's, since the
 /// overlay is the one place both sets can be read at once: inside the detail
 /// view only its own footer is on screen.
-fn render_keymap(frame: &mut Frame, screen: Rect, palette: Palette) {
-    let height = KEYMAP.len() + DETAIL_KEYS.len() + NOTES.len() + 5;
+fn render_keymap(frame: &mut Frame, screen: Rect, palette: Palette, view: &View) {
+    let dashboard = dashboard_keys(view);
+    let height = dashboard.len() + DETAIL_KEYS.len() + NOTES.len() + 5;
     let area = centred(screen, 68, u16::try_from(height).unwrap_or(u16::MAX));
 
     frame.render_widget(Clear, area);
-    frame.render_widget(keymap(palette), area);
+    frame.render_widget(keymap(palette, &dashboard), area);
 }
 
-fn keymap(palette: Palette) -> Paragraph<'static> {
-    let bound = |bindings: &'static [Binding]| {
-        bindings.iter().map(move |binding| {
-            Line::from(vec![
-                Span::styled(format!("{:>9}  ", binding.keys), palette.accent),
-                Span::raw(binding.label),
-            ])
-        })
+/// The dashboard's keys as `view` reads them right now, followed by the
+/// detail view's and the notes: the one place both sets can be read at once.
+fn keymap(palette: Palette, dashboard: &[Binding]) -> Paragraph<'static> {
+    let bound = |bindings: &[Binding]| {
+        bindings
+            .iter()
+            .map(|binding| {
+                Line::from(vec![
+                    Span::styled(format!("{:>9}  ", binding.keys), palette.accent),
+                    Span::raw(binding.label),
+                ])
+            })
+            .collect::<Vec<_>>()
     };
     let heading = Line::from(Span::styled("  in the detail view", palette.dim));
     let notes = NOTES
         .iter()
         .map(|note| Line::from(Span::styled(*note, palette.dim)));
-    let lines = bound(&KEYMAP)
+    let lines = bound(dashboard)
+        .into_iter()
         .chain([Line::default(), heading])
         .chain(bound(&DETAIL_KEYS))
         .chain([Line::default()])
@@ -838,7 +867,7 @@ mod tests {
 
     #[test]
     fn the_dashboard_draws_the_frame_it_is_specified_to_draw() {
-        let expected = " blubat   3 active   sort level   poll 5s   next 5s                                    ▲ 1 critical
+        let expected = " blubat   3 active   sort level   poll 5s   next 5s                                                        ▲ 1 critical
 
      Device                   Type         Battery         % State       Trend  Last seen
  ▎ ▲ Soundcore Liberty        audio        █░░░░░░░░░░░   8% on battery  █▇▅▄▂▁ now
@@ -867,8 +896,8 @@ mod tests {
 
 
 
- q quit  j/k move  enter detail  s sort  / filter  h hide  H show hidden  r reload  ? help";
-        assert_frame(&dashboard(), 100, 30, expected);
+ q quit  j/k move  enter detail  s sort  / filter  h hide  H show hidden  i hide inactive  r reload  ? help";
+        assert_frame(&dashboard(), 120, 30, expected);
     }
 
     #[test]
@@ -941,7 +970,7 @@ mod tests {
 
     #[test]
     fn the_footer_carries_the_keys_of_the_view_on_screen() {
-        let dashboard = drawn(&loaded(), 100, 30);
+        let dashboard = drawn(&loaded(), 120, 30);
         let footer = dashboard.last().expect("a footer row").clone();
 
         for key in [
@@ -952,6 +981,7 @@ mod tests {
             "/ filter",
             "h hide",
             "H show hidden",
+            "i hide inactive",
             "r reload",
             "? help",
         ] {
@@ -978,6 +1008,7 @@ mod tests {
                 │         /  filter                                                │
                 │         h  hide                                                  │
                 │         H  show hidden                                           │
+                │         i  hide inactive                                         │
                 │         r  reload                                                │
                 │         ?  help                                                  │
                 │                                                                  │
@@ -990,7 +1021,6 @@ mod tests {
                 │ a hidden device is hidden here only, never unpaired from macOS.  │
                 │ r re-reads the config file; one it cannot read changes nothing.  │
                 └──────────────────────────────────────────────────────────────────┘
-
 
 
 
@@ -1023,6 +1053,40 @@ mod tests {
 
         assert!(line_containing(&app, "AirPods Pro").contains(MARKER));
         assert!(!line_containing(&app, "inactive (2)").contains(MARKER));
+    }
+
+    #[test]
+    fn a_shown_hidden_device_carries_a_dim_marker_the_others_do_not() {
+        let hidden_and_shown = press(loaded(), "hH");
+
+        let hidden_line = line_containing(&hidden_and_shown, "MX Keys M Mac");
+        assert!(hidden_line.contains("[h]"), "{hidden_line}");
+        assert!(
+            !line_containing(&hidden_and_shown, "Magic Trackpad").contains("[h]"),
+            "only the hidden device carries the marker"
+        );
+
+        let buffer = buffer_of(&[&hidden_and_shown], 100, 30);
+        assert_eq!(
+            cell_of(&buffer, "[h]").fg,
+            Palette::DARK.dim,
+            "styled the same as the rest of a dim row"
+        );
+    }
+
+    #[test]
+    fn the_marker_is_gone_once_the_device_is_hidden_again_or_no_longer_shown() {
+        let hidden = press(loaded(), "h");
+        let hidden_and_shown_then_hidden_again = press(hidden.clone(), "Hh");
+
+        assert!(
+            !screen(&hidden).contains("[h]"),
+            "a hidden row not being shown carries no marker at all"
+        );
+        assert!(
+            !screen(&hidden_and_shown_then_hidden_again).contains("[h]"),
+            "unhiding it drops the marker along with the hide"
+        );
     }
 
     #[test]
