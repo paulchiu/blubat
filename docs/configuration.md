@@ -6,10 +6,10 @@ and writes. See the [README](../README.md) for installing and a quick start.
 
 TOML at `~/.config/blubat/config.toml`, resolved with the XDG strategy. The
 file is optional: blubat runs on built-in defaults, and `[dashboard] hidden`
-is the only thing it ever writes into one. Machine state (the event engine's
-armed and fired flags, the one-shot watches) lives apart from it under
-`~/.local/state/blubat/`; see [docs/architecture.md](architecture.md) for what
-lives there.
+and `[dashboard] hide_inactive` are the only things it ever writes into one.
+Machine state (the event engine's armed and fired flags, the one-shot
+watches) lives apart from it under `~/.local/state/blubat/`; see
+[docs/architecture.md](architecture.md) for what lives there.
 
 Parsing is strict. An unknown key, an unknown event name or a duration that
 does not parse is an error naming the line it is on, because a typo that
@@ -48,7 +48,7 @@ charging_glyph = "+"          # overrides the Nerd Font guess either way
 [dashboard]
 hidden        = ["MX Master"] # matches, as --device takes them; `h` writes here
 sort          = "level"       # level, name or last_seen
-hide_inactive = false         # whether the disconnected section opens shown
+hide_inactive = false         # whether the disconnected section opens shown; `i` writes here
 
 # Per device overrides. `match` is the same case insensitive substring
 # `--device` takes, tested against the name and the address. The first
@@ -80,16 +80,17 @@ advertises, then the built-in 20, 10, 100 and 1.
 dashboard reads every 5s instead: it is on screen and being read as it
 changes, and the fast tier is a single digit millisecond IOKit call.
 
-`[dashboard] hidden` is maintained from the dashboard as well as by hand: `h`
-appends the selected device's address and `h` over a shown-again device
-removes whatever was hiding it. The edit is surgical, so a hand written file
-keeps its comments, its blank lines and the order of everything in it. `r` on
-the [dashboard](dashboard.md) re-reads the list along with the rest of the
-file, which is what settles a hand edit made while the dashboard is open.
-
-`[dashboard] hide_inactive` only sets what the dashboard opens showing: the
-`i` key toggles it for the run and, unlike `hidden`, blubat never writes it
-back.
+`[dashboard] hidden` and `[dashboard] hide_inactive` are maintained from the
+dashboard as well as by hand, and both live in the one write: `h` appends the
+selected device's address and `h` over a shown-again device removes whatever
+was hiding it, and `i` flips whether the dashboard opens with the disconnected
+section shown. Either key writes both fields back, so the file always carries
+the whole of what the dashboard was last showing rather than whichever half
+last changed. The edit is surgical, so a hand written file keeps its comments,
+its blank lines and the order of everything in it. `r` on the
+[dashboard](dashboard.md), and `c`'s reload once its editor closes, re-read
+both along with the rest of the file, which is what settles a hand edit made
+while the dashboard is open.
 
 ## The `config` subcommand
 
@@ -103,6 +104,9 @@ blubat config validate  # parse it and report what is wrong
 it is not, so it fits a dotfiles check. A `[[device]]` block matching nothing
 currently visible is a warning rather than a failure, since the device may
 simply be switched off.
+
+The dashboard's own `c` opens the same editor `blubat config edit` does: the
+same `$EDITOR`/`$VISUAL` resolution, and the same message when neither is set.
 
 ## Global flags
 

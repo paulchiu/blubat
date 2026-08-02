@@ -19,7 +19,8 @@ q      quit                  s  cycle the order: level, name, last seen
 j/k    move the selection    /  filter on name or address, esc clears it
 enter  the detail view       h  hide the selected device, H show hidden again
 i      hide the inactive section, i again shows it
-r      reload the config     ?  the full keymap
+r      reload the config     c  edit the config file, reloading it on return
+?      the full keymap
 ```
 
 `q` and ctrl+c both leave the dashboard; the keymap overlay takes the keyboard
@@ -27,9 +28,9 @@ while it is open, so `?` closes it before anything else responds again.
 
 `i` drops the disconnected section off the table for the rest of the run and
 brings it back with the same key; the footer reads `hide inactive` or `show
-inactive` depending on which it would do next. Unlike `h`, it never touches the
-config file: `[dashboard] hide_inactive` only decides what the dashboard opens
-showing.
+inactive` depending on which it would do next. Like `h`, it writes back to the
+config file: `[dashboard] hide_inactive` is what the dashboard opens showing,
+so the choice survives a restart the same way a hide does.
 
 ## Detail view
 
@@ -43,12 +44,25 @@ batteries under the one level every threshold is applied to. The history is in
 memory and per run, so the chart starts empty after a restart and fills as
 blubat polls.
 
-It binds two keys and leaves nothing else live, so there is no way to act on a
+`j` and `k` move to the next and previous device without leaving the view, over
+the same row list the dashboard shows: hidden rows only where `H` is showing
+them, and the inactive section absent where `i` has hidden it. `esc` and
+`enter` both back out to the dashboard with the selection on whichever device
+that left it on. It leaves nothing else live, so there is no way to act on a
 device from a view of another one:
 
 ```
-esc/enter  back to the dashboard      q  quit
+esc/enter  back to the dashboard      j/k  next/previous device      q  quit
 ```
+
+## Editing the config file
+
+`c` suspends the dashboard, opens `~/.config/blubat/config.toml` in `$EDITOR`
+(or failing that `$VISUAL`), and reloads the file the same way `r` does once
+the editor closes: the reload's own rules apply, so a file the editor leaves
+unparsable is reported and changes nothing. Nothing set in either variable is a
+notice on the dashboard rather than a crash, the same message `blubat config
+edit` gives on the command line.
 
 ## Reloading
 
@@ -70,12 +84,12 @@ level that raises `critical_battery` for it.
 ## Hiding
 
 `h` hides for good. It writes the device's address into `[dashboard] hidden`
-in the config file, which is the one write blubat ever makes there, so the
-next dashboard and the next machine reading that dotfile open without it. `H`
-shows hidden devices again and a second `h` brings one back, dropping every
-match that was hiding it, whether blubat wrote it or a person did. Hiding is
-blubat's own view of a device and nothing more: the device stays paired, macOS
-still knows it, and blubat never unpairs anything.
+in the config file, alongside `hide_inactive` in the one table blubat ever
+writes there, so the next dashboard and the next machine reading that dotfile
+open without it. `H` shows hidden devices again and a second `h` brings one
+back, dropping every match that was hiding it, whether blubat wrote it or a
+person did. Hiding is blubat's own view of a device and nothing more: the
+device stays paired, macOS still knows it, and blubat never unpairs anything.
 
 Once `H` has brought hidden devices onto the table, each one carries a dim
 marker beside its name (an eye-off glyph on a Nerd Font terminal, `[h]`
