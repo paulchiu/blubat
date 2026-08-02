@@ -24,6 +24,12 @@ reconnected trackpad is read at once rather than at the next tick. Devices that
 only `system_profiler` sees, AirPods among them, publish no such notification
 and are still picked up on the ordinary tick.
 
+The nudge reaches the slow tier immediately but its answer is delivered with the
+next fast tick, since every reading blubat hands out is a merge of both sources.
+A connect or disconnect is therefore seen at once for anything IOKit reports,
+and within one `foreground_interval` or `daemon_interval` for anything only
+`system_profiler` knows about.
+
 ## Status
 
 Milestone M0 is complete: both data sources, the merge, and the one-shot CLI
@@ -85,6 +91,7 @@ blubat notify-test                  # post a test banner, name the identity it
                                     # was delivered under
 
   --config <path>                   # read configuration from here instead
+  --state-dir <path>                # keep blubat's own files here instead
 ```
 
 `--device` takes a substring, matched case insensitively against both the
@@ -420,11 +427,21 @@ Nothing installs it for you. blubat never writes that plist on a first run or
 an upgrade, and `daemon uninstall` boots the agent out and removes the file
 again.
 
+The plist names the config file and the state directory the install resolved
+rather than leaving the daemon to work them out again: launchd starts an agent
+with almost no environment, so a daemon resolving its own would land somewhere
+else than the blubat that installed it whenever `XDG_CONFIG_HOME` or
+`XDG_STATE_HOME` is set. The daemon reads that config once at startup, so a
+config change reaches it on the next `daemon install`, which boots out whatever
+was loaded and starts it again.
+
 ```
 $ blubat daemon install
 installed com.paulchiu.blubat
   plist   /Users/paul/Library/LaunchAgents/com.paulchiu.blubat.plist
   running /opt/homebrew/bin/blubat daemon run
+  config  /Users/paul/.config/blubat/config.toml
+  state   /Users/paul/.local/state/blubat
   logging /Users/paul/.local/state/blubat/daemon.log
 
 $ blubat daemon status
@@ -448,16 +465,19 @@ Both logs are plain text and appended to, so `tail -f
 Open the dashboard while the daemon is running and the dashboard takes over: it
 holds `~/.local/state/blubat/tui.lock` for as long as it is up, and the daemon
 checks that file before every banner and every hook, so an event fires once
-rather than twice. The daemon keeps polling and keeps writing the event state
-throughout, so quitting the dashboard does not set off everything it saw while
-it was open. The lock names the process holding it, and a lock left behind by a
-dashboard that was killed is ignored rather than silencing the daemon.
+rather than twice. The dashboard owns the event state while it holds the lock,
+and the daemon reads that state back when the lock goes away, so quitting the
+dashboard does not set off everything it saw while it was open. The lock is the
+kernel's rather than a pid written in a file, so a dashboard that was killed
+frees it at once. A second dashboard opened beside the first draws everything
+and announces nothing, since the first one up owns the side effects.
 
 `blubat wait` hands over the same way. With a daemon running it writes a
 one-shot watch into `~/.local/state/blubat/watches/` and returns at once; the
-daemon takes the file over on its next poll, posts the same banner when the
-level arrives, and drops a watch whose deadline passes or whose device nothing
-paired matches. With no daemon running, `wait` polls in the terminal as before.
+daemon takes the file over on its next poll whether or not a dashboard is up,
+posts the same banner when the level arrives, and drops a watch whose deadline
+passes or whose device nothing paired matches. With no daemon running, `wait`
+polls in the terminal as before.
 
 ## Layout
 
@@ -490,7 +510,10 @@ just ci
 `just ci` is what the CI workflow runs, so a green run here is a green
 pipeline. It includes a core isolation check: `blubat-core`'s direct
 dependencies are an allowlist, and a terminal, notification or process spawning
-crate cannot reach it by being one nobody thought to ban.
+crate cannot reach it by being one nobody thought to ban. It also asks
+[cargo-dist](https://opensource.axo.dev/cargo-dist/) whether the checked-in
+release workflow still matches `dist-workspace.toml`, so a stale one fails here
+rather than at the next tag push.
 
 ## Releasing
 
