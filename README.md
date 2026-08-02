@@ -1,13 +1,14 @@
 # blubat
 
-blubat is a single binary that reports the battery level of every Bluetooth
-peripheral macOS already knows about, as a one-shot CLI reading, JSON for
-scripts and status bars, or a live TUI. macOS has no single source for this:
-Apple HID peripherals such as the Magic Trackpad report through IOKit and are
-absent from `system_profiler`, while devices such as the MX Keys and AirPods
-report through `system_profiler` and never appear in the HID class. blubat
-reads both, merges them, and watches the result for threshold crossings it can
-notify on and run hooks against.
+blubat reports the battery level of Bluetooth peripherals on macOS by gathering
+data from IOKit and `system_profiler`.
+
+Supported output formats are:
+
+- CLI, with JSON output for scripts and status bars.
+- TUI, for quick visual check and trend graphs.
+
+Demo below:
 
 ![blubat dashboard](docs/assets/demo.gif)
 
@@ -36,6 +37,8 @@ blubat wait --device <match>        # hand a one-shot watch to a running daemon
 blubat daemon install               # write the LaunchAgent and start it
 ```
 
+Sample output:
+
 ```
 $ blubat list
 NAME                   ADDRESS            LEVEL  STATE       SOURCE
@@ -48,7 +51,8 @@ Paul's Magic Trackpad  83%  on battery
 $ blubat wait --device trackpad --until 100 --interval 5m
 ```
 
-Bare `blubat` opens the dashboard. The keys worth knowing on sight:
+Just running `blubat` with no arguments opens the TUI dashboard. Navigation keys
+are:
 
 ```
 q      quit                  s  cycle the order: level, name, last seen
@@ -90,14 +94,18 @@ just fmt
 just ci
 ```
 
-`just ci` mirrors the pipeline; [docs/releasing.md](docs/releasing.md) has
-what it checks. A pull request needs exactly one of the `major`, `minor`,
-`patch` or `norelease` labels before it can merge.
+`just ci` mirrors the pipeline; please see
+[docs/releasing.md](docs/releasing.md) for what it checks. A pull request needs
+exactly one of the `major`, `minor`, `patch` or `norelease` labels before it can
+merge.
 
 ## Requirements
 
-macOS only. Rust 1.95 or newer. No entitlements, no sudo, no helper app
-bundle.
+- macOS only.
+
+To develop:
+
+- Rust 1.95 or newer.
 
 ## Licence
 
