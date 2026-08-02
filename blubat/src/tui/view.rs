@@ -67,7 +67,7 @@ pub struct View {
     pub hidden: Vec<String>,
     pub show_hidden: bool,
     /// Whether the disconnected section is left off the table, which `i`
-    /// toggles for the run and never writes back.
+    /// toggles and, like `h` toggling `hidden`, writes back to the config file.
     pub hide_inactive: bool,
 }
 

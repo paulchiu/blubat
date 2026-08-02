@@ -310,12 +310,12 @@ impl Hook {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Dashboard {
-    /// Matches for devices the dashboard leaves out, which `h` maintains and
-    /// which are the only thing blubat ever writes back into the file.
+    /// Matches for devices the dashboard leaves out, which `h` maintains.
     pub hidden: Vec<String>,
     pub sort: Sort,
     /// Whether the dashboard opens with the disconnected section already
-    /// left off. `i` toggles this for the run; blubat never writes it back.
+    /// left off. `i` maintains this the same way `h` maintains `hidden`: the
+    /// only two fields blubat ever writes back into the file.
     pub hide_inactive: bool,
 }
 

@@ -29,7 +29,7 @@ pub struct Binding {
 /// `H` and `i` print here as they read while the section they toggle is
 /// showing; [`dashboard_keys`] is what actually resolves them against the
 /// view in front of the keyboard.
-pub const KEYMAP: [Binding; 10] = [
+pub const KEYMAP: [Binding; 11] = [
     Binding {
         keys: "q",
         label: "quit",
@@ -65,6 +65,10 @@ pub const KEYMAP: [Binding; 10] = [
     Binding {
         keys: "r",
         label: "reload",
+    },
+    Binding {
+        keys: "c",
+        label: "edit config",
     },
     Binding {
         keys: "?",
@@ -109,10 +113,17 @@ const CLEAR_FILTER: Binding = Binding {
 };
 
 /// The keys the detail view binds, which are the only ones it leaves live.
-pub const DETAIL_KEYS: [Binding; 2] = [
+///
+/// `j/k` move over the same row list the dashboard shows, so the selection
+/// underneath follows: esc lands back on whichever device that left it on.
+pub const DETAIL_KEYS: [Binding; 3] = [
     Binding {
         keys: "esc/enter",
         label: "back",
+    },
+    Binding {
+        keys: "j/k",
+        label: "next/previous",
     },
     Binding {
         keys: "q",
@@ -124,14 +135,21 @@ pub const DETAIL_KEYS: [Binding; 2] = [
 ///
 /// Read from either end as [`OVERLAY_ACTIONS`] is, which is what keeps the
 /// footer inside the detail view an account of what pressing something will do.
-const DETAIL_ACTIONS: [Action; 3] = [Action::Back, Action::Detail, Action::Quit];
+const DETAIL_ACTIONS: [Action; 5] = [
+    Action::Back,
+    Action::Detail,
+    Action::Down,
+    Action::Up,
+    Action::Quit,
+];
 
 /// What the overlay says beyond the keys themselves.
-pub const NOTES: [&str; 4] = [
+pub const NOTES: [&str; 5] = [
     "the detail chart is this run only; a restart starts it empty.",
-    "h lasts: it is the one write blubat makes to the config file.",
+    "h and i last: the one table blubat writes to the config file.",
     "a hidden device is hidden here only, never unpaired from macOS.",
     "r re-reads the config file; one it cannot read changes nothing.",
+    "c opens the config in $EDITOR and reloads it once it closes.",
 ];
 
 /// The keys the keymap overlay leaves live, since it swallows every other one.
@@ -203,6 +221,19 @@ pub enum Key {
     Backspace,
 }
 
+/// Which single field of `[dashboard]` a key just changed, and so which one
+/// the file still needs telling about.
+///
+/// `h` and `i` never change both at once, so the loop only ever has one of
+/// these pending: the field named is the only one the write touches, which is
+/// what keeps that write from carrying the other field's in-memory copy over
+/// a change the file gained elsewhere since this dashboard last read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DashboardField {
+    Hidden,
+    HideInactive,
+}
+
 /// What a bound key does to the dashboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -223,6 +254,9 @@ pub enum Action {
     /// Enter, which opens the detail view over the selected device and closes
     /// it again from inside.
     Detail,
+    /// Asks the loop to suspend the terminal and open the config file in
+    /// $EDITOR, which the reducer can no more do than it can read a file.
+    EditConfig,
 }
 
 impl Action {
@@ -239,6 +273,7 @@ impl Action {
             Key::Char('H') => Some(Action::ShowHidden),
             Key::Char('i') => Some(Action::ToggleInactive),
             Key::Char('r') => Some(Action::Reload),
+            Key::Char('c') => Some(Action::EditConfig),
             Key::Enter => Some(Action::Detail),
             Key::Escape => Some(Action::Back),
             _ => None,
@@ -285,8 +320,13 @@ pub enum Event {
     Tick(Timestamp),
     /// What the loop made of the reload [`Action::Reload`] asked for.
     Reloaded(Result<Config, String>),
-    /// What came of writing the hidden devices [`Action::ToggleHidden`] changed.
+    /// What came of writing the dashboard table [`Action::ToggleHidden`] or
+    /// [`Action::ToggleInactive`] changed.
     Saved(Result<(), String>),
+    /// What came of the editor [`Action::EditConfig`] suspended the terminal
+    /// for. A success folds into the same reload `r` uses; a failure, missing
+    /// $EDITOR among them, is a notice instead.
+    Edited(Result<(), String>),
     /// What the event engine raised over the reading that just landed.
     Raised(Vec<Raised>),
     /// Something the loop did that the user needs telling about.
@@ -328,9 +368,13 @@ pub struct App {
     /// a file, so the request travels as state and the answer comes back as an
     /// event.
     pub reload: bool,
-    /// Set by `h` and cleared the same way, for the same reason: the hide is
-    /// already in [`View::hidden`], and the file has yet to be told.
-    pub save_hidden: bool,
+    /// Set by `h` or `i` to the field it changed, and cleared the same way,
+    /// for the same reason: the change is already in [`View`], and the file
+    /// has yet to be told.
+    pub save_dashboard: Option<DashboardField>,
+    /// Set by `c` and cleared by what the loop makes of it: the reducer can no
+    /// more suspend the terminal and spawn an editor than it can touch a file.
+    pub edit_config: bool,
 }
 
 impl App {
@@ -350,7 +394,8 @@ impl App {
             advertised: AdvertisedThresholds::new(),
             notice: None,
             reload: false,
-            save_hidden: false,
+            save_dashboard: None,
+            edit_config: false,
         }
     }
 
@@ -474,6 +519,7 @@ pub fn update(app: App, event: Event) -> App {
         Event::Tick(now) => App { now, ..app },
         Event::Reloaded(read) => reloaded(app, read),
         Event::Saved(written) => saved(app, written),
+        Event::Edited(outcome) => edited(app, outcome),
         Event::Raised(raised) => recorded(app, raised),
         Event::Note(notice) => App {
             notice: Some(notice),
@@ -490,9 +536,10 @@ pub fn update(app: App, event: Event) -> App {
 /// nothing but the line reporting it, so the thresholds, theme, glyphs and
 /// hooks that were working a moment ago carry on working.
 ///
-/// A reload takes the file's hidden devices too, since `h` writes them there:
-/// the file is where hiding lives, so a hand edit is picked up by the key that
-/// re-reads it rather than needing a restart.
+/// A reload takes the file's hidden devices and its hide_inactive too, since
+/// `h` and `i` write them there: the file is where the dashboard table lives,
+/// so a hand edit is picked up by the key that re-reads it rather than needing
+/// a restart.
 fn reloaded(mut app: App, read: Result<Config, String>) -> App {
     app.reload = false;
 
@@ -500,6 +547,7 @@ fn reloaded(mut app: App, read: Result<Config, String>) -> App {
         Ok(config) => {
             app.look = app.look.reloaded(&config.theme);
             app.view.hidden = config.dashboard.hidden.clone();
+            app.view.hide_inactive = config.dashboard.hide_inactive;
             app.config = config;
             app.notice = Some(Notice::said("config reloaded"));
         }
@@ -509,16 +557,35 @@ fn reloaded(mut app: App, read: Result<Config, String>) -> App {
     app
 }
 
-/// Takes what came of writing the hidden devices to the config file.
+/// Takes what came of writing the dashboard table to the config file.
 ///
-/// A hide the file would not take is reported and otherwise left alone: the
-/// device stays hidden on screen, so the dashboard says what did not survive
-/// rather than putting the row back without explanation.
+/// A write the file would not take is reported and otherwise left alone: the
+/// change stays live on screen, so the dashboard says what did not survive
+/// rather than putting it back without explanation.
 fn saved(mut app: App, written: Result<(), String>) -> App {
-    app.save_hidden = false;
+    app.save_dashboard = None;
 
     if let Err(problem) = written {
         app.notice = Some(Notice::problem(problem));
+    }
+
+    app
+}
+
+/// Takes what came of the editor `c` suspended the terminal for.
+///
+/// A successful edit asks for exactly the reload `r` does, rather than
+/// re-reading the file itself: the loop's existing reload handling is the one
+/// place that turns `App::reload` into an `Event::Reloaded`, and a second copy
+/// of it here would be two places the same file gets read. An editor that
+/// never opened, most often for want of $EDITOR, has nothing to reload and
+/// says so instead.
+fn edited(mut app: App, outcome: Result<(), String>) -> App {
+    app.edit_config = false;
+
+    match outcome {
+        Ok(()) => app.reload = true,
+        Err(problem) => app.notice = Some(Notice::problem(problem)),
     }
 
     app
@@ -606,12 +673,16 @@ fn act(app: App, action: Action) -> App {
         Action::Back => backed(app),
         Action::ToggleHidden => hide_selected(app),
         Action::ShowHidden => viewed(app, |view| view.show_hidden = !view.show_hidden),
-        Action::ToggleInactive => viewed(app, |view| view.hide_inactive = !view.hide_inactive),
+        Action::ToggleInactive => toggled_inactive(app),
         Action::Reload => App {
             reload: true,
             ..app
         },
         Action::Detail => detailed(app),
+        Action::EditConfig => App {
+            edit_config: true,
+            ..app
+        },
     }
 }
 
@@ -676,11 +747,25 @@ fn hide_selected(app: App) -> App {
         return app;
     };
     let app = App {
-        save_hidden: true,
+        save_dashboard: Some(DashboardField::Hidden),
         ..app
     };
 
     viewed(app, |view| view.toggle_hidden(&device))
+}
+
+/// Toggles whether the inactive section is shown, and asks the loop to write
+/// that back the same way `h` does.
+///
+/// One key both ways, as `h` is. Never a no-op the way hiding nothing is: the
+/// toggle always has a new value, so it is always worth telling the file.
+fn toggled_inactive(app: App) -> App {
+    let app = App {
+        save_dashboard: Some(DashboardField::HideInactive),
+        ..app
+    };
+
+    viewed(app, |view| view.hide_inactive = !view.hide_inactive)
 }
 
 /// Takes a fresh reading, recording the levels the trend column reads.
@@ -809,7 +894,7 @@ pub(super) mod tests {
 
     /// Every key a person can reach, bound or not.
     fn every_key() -> Vec<Key> {
-        "qjksh H/?rixz1"
+        "qjksh H/?ricxz1"
             .chars()
             .map(Key::Char)
             .chain([Key::Enter, Key::Escape, Key::Backspace])
@@ -1000,7 +1085,10 @@ pub(super) mod tests {
     /// every key it does not is swallowed whole.
     #[test]
     fn a_modal_view_acts_on_its_own_keys_and_swallows_every_other_one() {
-        for app in [press(loaded(), "?"), key(loaded(), Key::Enter)] {
+        // The detail view opens on the middle row, so both j and k in
+        // DETAIL_KEYS have somewhere to move from: opening on the first would
+        // leave k a no-op there and read as swallowed rather than bound.
+        for app in [press(loaded(), "?"), key(press(loaded(), "j"), Key::Enter)] {
             let advertised = advertised_in(&app);
 
             for key in every_key() {
@@ -1279,10 +1367,21 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn hiding_the_inactive_section_asks_the_loop_for_nothing() {
+    fn toggling_the_inactive_section_asks_the_loop_to_write_the_config_file() {
         let hidden = press(with_an_inactive_device(), "i");
+        let written = update(hidden.clone(), Event::Saved(Ok(())));
 
-        assert!(!hidden.save_hidden, "i never writes the config file");
+        assert_eq!(
+            hidden.save_dashboard,
+            Some(DashboardField::HideInactive),
+            "i lasts the same way h does"
+        );
+        assert_eq!(written.save_dashboard, None, "and once told, stops asking");
+        assert_eq!(
+            press(hidden, "i").save_dashboard,
+            Some(DashboardField::HideInactive),
+            "showing the section again is a write too"
+        );
     }
 
     #[test]
@@ -1321,7 +1420,7 @@ pub(super) mod tests {
         let empty = press(app(), "h");
 
         assert!(empty.view.hidden.is_empty());
-        assert!(!empty.save_hidden, "and asks for no write either");
+        assert_eq!(empty.save_dashboard, None, "and asks for no write either");
     }
 
     #[test]
@@ -1329,12 +1428,17 @@ pub(super) mod tests {
         let hidden = press(loaded(), "h");
         let written = update(hidden.clone(), Event::Saved(Ok(())));
 
-        assert!(hidden.save_hidden, "the file has yet to be told");
+        assert_eq!(
+            hidden.save_dashboard,
+            Some(DashboardField::Hidden),
+            "the file has yet to be told"
+        );
         assert_eq!(hidden.view.hidden, ["de-df-38-f0-46-9b"]);
-        assert!(!written.save_hidden, "and once told, stops asking");
+        assert_eq!(written.save_dashboard, None, "and once told, stops asking");
         assert_eq!(written.notice, None, "a hide that worked speaks for itself");
-        assert!(
-            press(press(hidden, "H"), "h").save_hidden,
+        assert_eq!(
+            press(press(hidden, "H"), "h").save_dashboard,
+            Some(DashboardField::Hidden),
             "showing a device again is a write too"
         );
     }
@@ -1374,6 +1478,19 @@ pub(super) mod tests {
             names(&reloaded),
             ["MX Keys M Mac", "Magic Trackpad"],
             "the file is where hiding lives, so `r` is what settles it"
+        );
+    }
+
+    #[test]
+    fn reloading_takes_the_hide_inactive_the_file_now_holds() {
+        let reloaded = update(
+            press(loaded(), "i"),
+            Event::Reloaded(Ok(config("[dashboard]\nhide_inactive = true\n"))),
+        );
+
+        assert!(
+            reloaded.view.hide_inactive,
+            "`r` settles hide_inactive the same way it settles hidden"
         );
     }
 
@@ -1425,12 +1542,97 @@ pub(super) mod tests {
         let open = key(loaded(), Key::Enter);
 
         assert_eq!(
-            press(open.clone(), "jksh/Hi?r"),
+            press(open.clone(), "sh/Hi?rc"),
             open,
             "the dashboard keys do nothing while one device is on screen"
         );
         assert_eq!(key(open.clone(), Key::Backspace), open);
         assert!(!press(open, "q").running, "and q still quits");
+    }
+
+    #[test]
+    fn j_and_k_move_the_detail_view_to_the_next_and_previous_device() {
+        let opened = key(loaded(), Key::Enter);
+        assert_eq!(
+            opened.current().map(|device| device.name.as_str()),
+            Some("MX Keys M Mac"),
+            "the emptiest device leads the default order"
+        );
+
+        let next = press(opened.clone(), "j");
+        assert_eq!(next.mode, Mode::Detail, "still in the detail view");
+        assert_eq!(
+            next.current().map(|device| device.name.as_str()),
+            Some("Magic Trackpad")
+        );
+
+        let previous = press(next, "k");
+        assert_eq!(previous, opened, "k undoes j exactly");
+    }
+
+    #[test]
+    fn j_and_k_in_the_detail_view_clamp_at_the_ends_like_the_dashboards() {
+        let opened = key(loaded(), Key::Enter);
+
+        let last = press(opened.clone(), "jjjjj");
+        assert_eq!(last.mode, Mode::Detail);
+        assert_eq!(
+            last.current().map(|device| device.name.as_str()),
+            Some("Soundcore Liberty"),
+            "stops at the last row"
+        );
+
+        let first = press(last, "kkkkk");
+        assert_eq!(
+            first.current().map(|device| device.name.as_str()),
+            Some("MX Keys M Mac"),
+            "stops at the first row"
+        );
+    }
+
+    #[test]
+    fn esc_from_the_detail_view_lands_on_the_device_j_and_k_left_on() {
+        let moved = press(key(loaded(), Key::Enter), "j");
+
+        let closed = key(moved, Key::Escape);
+        assert_eq!(closed.mode, Mode::Dashboard);
+        assert_eq!(
+            closed.current().map(|device| device.name.as_str()),
+            Some("Magic Trackpad"),
+            "the dashboard selection followed the detail view's j"
+        );
+    }
+
+    #[test]
+    fn detail_navigation_moves_over_the_same_rows_the_dashboard_shows() {
+        // Hides MX Keys M Mac, the row the selection starts on.
+        let hidden = press(loaded(), "h");
+        let opened = key(hidden, Key::Enter);
+        assert_eq!(
+            opened.current().map(|device| device.name.as_str()),
+            Some("Magic Trackpad"),
+            "the selection settled here once MX Keys was hidden"
+        );
+
+        let moved = press(opened, "j");
+        assert_eq!(
+            moved.current().map(|device| device.name.as_str()),
+            Some("Soundcore Liberty"),
+            "j skips the hidden row rather than landing on it"
+        );
+    }
+
+    #[test]
+    fn detail_navigation_skips_the_inactive_section_once_it_is_hidden() {
+        let both = with_an_inactive_device();
+        let hidden = press(both, "i");
+        let opened = key(hidden, Key::Enter);
+
+        assert_eq!(
+            press(opened.clone(), "j"),
+            opened,
+            "no second row to move to once the inactive section is hidden"
+        );
     }
 
     #[test]
@@ -1546,6 +1748,55 @@ pub(super) mod tests {
         assert_eq!(
             rejected.notice,
             Some(Notice::problem("config.toml: expected `=` at line 3"))
+        );
+    }
+
+    #[test]
+    fn c_asks_the_loop_to_suspend_the_terminal_and_edit_the_config_file() {
+        let dashboard = press(loaded(), "c");
+        let filtering = press(loaded(), "/c");
+        let overlay = press(loaded(), "?");
+
+        assert!(dashboard.edit_config, "the dashboard binds it");
+        assert!(!filtering.edit_config, "the filter takes it as text");
+        assert_eq!(filtering.view.filter.query, "c");
+        assert_eq!(
+            press(overlay.clone(), "c"),
+            overlay,
+            "and the overlay swallows what it does not advertise"
+        );
+    }
+
+    #[test]
+    fn a_successful_edit_asks_for_the_same_reload_r_uses() {
+        let asked = press(loaded(), "c");
+        let edited = update(asked, Event::Edited(Ok(())));
+
+        assert!(!edited.edit_config, "the request is answered");
+        assert!(
+            edited.reload,
+            "the editor's own reload is the loop's existing reload path"
+        );
+        assert_eq!(edited.notice, None, "an edit that opened speaks for itself");
+    }
+
+    #[test]
+    fn an_editor_that_never_opened_is_a_notice_rather_than_a_reload() {
+        let asked = press(loaded(), "c");
+        let failed = update(
+            asked,
+            Event::Edited(Err(
+                "set $EDITOR to the editor blubat should open the config in".to_string(),
+            )),
+        );
+
+        assert!(!failed.edit_config, "the request is answered either way");
+        assert!(!failed.reload, "there is nothing to reload");
+        assert_eq!(
+            failed.notice,
+            Some(Notice::problem(
+                "set $EDITOR to the editor blubat should open the config in"
+            ))
         );
     }
 
