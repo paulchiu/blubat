@@ -150,11 +150,18 @@ that needs a fresh reading should use `--json` and check `connected`.
 
 `blubat status --json` emits one object; `blubat list --json` emits an array of
 those same objects, in the order the table shows them, and stays an array (`[]`)
-when nothing is paired. Keys with no value are omitted rather than emitted as
-`null`.
+when nothing is paired.
+
+Every object names the schema it is written in. `schema_version`, `level`,
+`charge`, `source`, `connected` and `read_at` are always written, as `null`
+where there is nothing to report, so a script never has to tell an absent value
+from a missing key. The descriptive keys (`kind`, `transport`, and each entry
+of `levels`) are omitted when they have no value.
 
 ```json
 {
+  "schema_version": 1,
+  "level": 83,
   "address": "30-82-16-f2-24-90",
   "name": "Paul's Magic Trackpad",
   "kind": "Magic Trackpad",
@@ -169,18 +176,20 @@ when nothing is paired. Keys with no value are omitted rather than emitted as
 
 | Key | Type | Notes |
 | --- | ---- | ----- |
+| `schema_version` | integer | `1`. Raised only by a change that breaks a reader, never within a patch release. |
+| `level` | integer or null | The one number that stands for the device: the lowest sub-level present, because a device is as charged as its emptiest part. `null` when no source reported a battery. |
 | `address` | string | Lowercase hex octets joined by hyphens. The stable identity of a device. |
 | `name` | string | |
 | `kind` | string, optional | Device category as `system_profiler` names it. |
 | `transport` | string, optional | Link the IOKit node reports. |
-| `levels` | object | Any of `main`, `left`, `right`, `case`, each a percentage. Absent keys are omitted. |
+| `levels` | object | Any of `main`, `left`, `right`, `case`, each a percentage. Absent keys are omitted, so a single-battery device is `{ "main": 83 }` and AirPods are `{ "left": …, "right": …, "case": … }`. |
 | `charge` | string | `charging`, `discharging` or `unknown`. Only Apple HID devices report it. The human output prints `discharging` as `on battery`, as the POC does. |
 | `source` | string | `iokit` or `system_profiler`. |
 | `connected` | boolean | `false` means `levels` is last seen data of unknown age. |
 | `read_at` | string | RFC 3339 in UTC, whole seconds. When blubat took the reading, not when the device reported it. |
 
 ```sh
-blubat list --json | jq -r '.[] | select(.connected) | "\(.name) \(.levels.main)"'
+blubat list --json | jq -r '.[] | select(.connected) | "\(.name) \(.level)"'
 ```
 
 ## Configuration

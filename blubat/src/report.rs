@@ -3,7 +3,7 @@
 //! The renderers are pure functions over borrowed devices, so every shape a
 //! script consumes is asserted from fixtures rather than from a real machine.
 
-use blubat_core::{Device, Snapshot};
+use blubat_core::{Device, Reading, Snapshot};
 use serde::Serialize;
 
 use crate::Failure;
@@ -67,7 +67,7 @@ fn listing(snapshot: &Snapshot, json: bool, all: bool) -> Result<String, Failure
     };
 
     match (json, devices.is_empty()) {
-        (true, _) => encode(&devices),
+        (true, _) => encode(&Reading::all(devices.iter().copied())),
         (_, true) => Ok(String::new()),
         _ => Ok(table(&devices)),
     }
@@ -112,7 +112,7 @@ fn select<'a>(snapshot: &'a Snapshot, needle: Option<&str>) -> Result<&'a Device
 fn render_status(device: &Device, format: Format) -> Result<String, Failure> {
     match format {
         Format::Human => Ok(line(device)),
-        Format::Json => encode(device),
+        Format::Json => encode(&Reading::of(device)),
         Format::Number => device
             .levels
             .lowest()
@@ -483,13 +483,15 @@ mod tests {
     }
 
     #[test]
-    fn status_json_is_one_object_carrying_the_documented_keys() {
+    fn status_json_is_one_versioned_object_carrying_the_documented_keys() {
         let json: serde_json::Value =
             serde_json::from_str(&render_status(&airpods(), Format::Json).expect("json"))
                 .expect("valid json");
 
+        assert_eq!(json["schema_version"], 1);
         assert_eq!(json["name"], "Paul\u{2019}s AirPods Pro");
         assert_eq!(json["address"], "74-15-f5-02-8e-38");
+        assert_eq!(json["level"], 68, "the lowest sub level present");
         assert_eq!(json["levels"], serde_json::json!({"left": 100, "case": 68}));
         assert_eq!(json["charge"], "unknown");
         assert_eq!(json["source"], "system_profiler");
@@ -507,6 +509,8 @@ mod tests {
 
         assert_eq!(json.as_array().map(Vec::len), Some(2));
         assert_eq!(json[0]["name"], "Paul\u{2019}s AirPods Pro");
+        assert_eq!(json[1]["schema_version"], 1);
+        assert_eq!(json[1]["level"], 85);
         assert_eq!(json[1]["levels"]["main"], 85);
     }
 }
