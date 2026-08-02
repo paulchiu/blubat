@@ -5,9 +5,10 @@
 //! afterwards is the editor's decision, not blubat's, so a machine that has
 //! never been configured stays that way. [`save_dashboard`] is the exception:
 //! `h` and `i` on the dashboard write `[dashboard] hidden` and `[dashboard]
-//! hide_inactive`, and nothing else, ever. [`editor`] and the private `edit`
-//! below it are also what the dashboard's own `c` opens the file in, reached
-//! through [`crate::tui::editor::Cli`] rather than duplicated there.
+//! hide_inactive` respectively, each only its own key and nothing else, ever.
+//! [`editor`] and the private `edit` below it are also what the dashboard's
+//! own `c` opens the file in, reached through [`crate::tui::editor::Cli`]
+//! rather than duplicated there.
 
 use std::ffi::OsString;
 use std::fs;
@@ -46,17 +47,24 @@ pub fn run(command: &Command, paths: &Paths) -> Result<(), Failure> {
     }
 }
 
-/// Writes `[dashboard] hidden` and `[dashboard] hide_inactive`, leaving the
-/// rest of the file exactly as it was.
+/// Writes `[dashboard] hidden`, `[dashboard] hide_inactive`, or both, leaving
+/// the rest of the file, and whichever of the two is not given, exactly as it
+/// was.
 ///
 /// The one table blubat ever writes back, from either of the two keys that
 /// maintain it: `h` and `i` both call this rather than each keeping a write of
-/// its own, so the table on disk is always the whole of what the dashboard is
-/// showing rather than whichever half last changed. A surgical edit rather
-/// than a re-serialisation, since the comments, the blank lines and the order
-/// of everything else in the file are the user's. A file that is not there yet
-/// is created holding that one table.
-pub fn save_dashboard(path: &Path, hidden: &[String], hide_inactive: bool) -> Result<(), String> {
+/// its own. Each names only the field it changed, so a write from one key
+/// never carries the other's possibly stale in-memory value over a change the
+/// file gained since this dashboard last read it, whether that was a hand
+/// edit or a second blubat's own write. A surgical edit rather than a
+/// re-serialisation, since the comments, the blank lines and the order of
+/// everything else in the file are the user's. A file that is not there yet is
+/// created holding whichever of the two keys was given.
+pub fn save_dashboard(
+    path: &Path,
+    hidden: Option<&[String]>,
+    hide_inactive: Option<bool>,
+) -> Result<(), String> {
     document(path)
         .and_then(|mut document| {
             set_dashboard(&mut document, hidden, hide_inactive)?;
@@ -79,8 +87,8 @@ fn document(path: &Path) -> Result<DocumentMut, String> {
 
 fn set_dashboard(
     document: &mut DocumentMut,
-    hidden: &[String],
-    hide_inactive: bool,
+    hidden: Option<&[String]>,
+    hide_inactive: Option<bool>,
 ) -> Result<(), String> {
     document
         .entry("dashboard")
@@ -88,11 +96,15 @@ fn set_dashboard(
         .as_table_like_mut()
         .ok_or_else(|| String::from("[dashboard] is not a table"))
         .map(|dashboard| {
-            dashboard.insert(
-                "hidden",
-                value(hidden.iter().map(String::as_str).collect::<Array>()),
-            );
-            dashboard.insert("hide_inactive", value(hide_inactive));
+            if let Some(hidden) = hidden {
+                dashboard.insert(
+                    "hidden",
+                    value(hidden.iter().map(String::as_str).collect::<Array>()),
+                );
+            }
+            if let Some(hide_inactive) = hide_inactive {
+                dashboard.insert("hide_inactive", value(hide_inactive));
+            }
         })
 }
 
@@ -346,8 +358,8 @@ mod tests {
         assert_eq!(
             save_dashboard(
                 &path,
-                &["MX Master".to_string(), "30-82-16".to_string()],
-                true
+                Some(&["MX Master".to_string(), "30-82-16".to_string()]),
+                Some(true)
             ),
             Ok(())
         );
@@ -363,24 +375,52 @@ mod tests {
         );
     }
 
-    /// `h` and `i` share the one write, so a press of either carries the
-    /// other's value along even where the file has never held it before.
+    /// `i` names only `hide_inactive`, so the key is added to a table that
+    /// predates it without the write carrying `hidden` along, and without
+    /// disturbing whatever `hidden` the table already holds.
     #[test]
     fn hide_inactive_is_added_to_a_table_that_predates_it() {
         let scratch = Scratch::new();
         let written = "[dashboard]\nhidden = [\"MX Master\"]\nsort = \"name\"\n";
         let path = scratch.write_config(written);
 
+        assert_eq!(save_dashboard(&path, None, Some(true)), Ok(()));
+
+        let loaded = Config::load(&path).expect("blubat reads back what it wrote");
+        assert!(
+            loaded.dashboard.hide_inactive,
+            "hide_inactive round trips even though this file never had it"
+        );
         assert_eq!(
-            save_dashboard(&path, &["MX Master".to_string()], true),
+            loaded.dashboard.hidden,
+            ["MX Master".to_string()],
+            "hidden is untouched: this write named hide_inactive alone"
+        );
+    }
+
+    /// The bug the shared write almost reintroduced: a write naming one field
+    /// must never carry the other's in-memory copy over a value the file
+    /// gained since this dashboard last read it, whichever field is which.
+    #[test]
+    fn writing_one_field_leaves_the_other_on_disk_untouched() {
+        let hiding = Scratch::new();
+        let path = hiding.write_config("[dashboard]\nhide_inactive = true\n");
+        assert_eq!(
+            save_dashboard(&path, Some(&["30-82-16".to_string()]), None),
             Ok(())
         );
         assert!(
-            Config::load(&path)
-                .expect("blubat reads back what it wrote")
-                .dashboard
-                .hide_inactive,
-            "hide_inactive round trips even though this file never had it"
+            Config::load(&path).expect("parses").dashboard.hide_inactive,
+            "a hand edit to hide_inactive survives a write that only named hidden"
+        );
+
+        let toggling = Scratch::new();
+        let path = toggling.write_config("[dashboard]\nhidden = [\"30-82-16\"]\n");
+        assert_eq!(save_dashboard(&path, None, Some(true)), Ok(()));
+        assert_eq!(
+            Config::load(&path).expect("parses").dashboard.hidden,
+            ["30-82-16".to_string()],
+            "a hand edit to hidden survives a write that only named hide_inactive"
         );
     }
 
@@ -392,7 +432,7 @@ mod tests {
         let scratch = Scratch::new();
         let path = scratch.write_config("dashboard = 5\n");
 
-        let problem = save_dashboard(&path, &["30-82-16".to_string()], false)
+        let problem = save_dashboard(&path, Some(&["30-82-16".to_string()]), Some(false))
             .expect_err("there is nowhere to put the list");
 
         assert!(problem.contains("[dashboard] is not a table"), "{problem}");
@@ -408,12 +448,12 @@ mod tests {
         let path = scratch.config_file();
 
         assert_eq!(
-            save_dashboard(&path, &["30-82-16".to_string()], false),
+            save_dashboard(&path, Some(&["30-82-16".to_string()]), None),
             Ok(())
         );
         assert_eq!(
             fs::read_to_string(&path).expect("a written config"),
-            "[dashboard]\nhidden = [\"30-82-16\"]\nhide_inactive = false\n"
+            "[dashboard]\nhidden = [\"30-82-16\"]\n"
         );
         assert_eq!(
             Config::load(&path).expect("blubat reads back what it wrote"),
@@ -432,10 +472,10 @@ mod tests {
         let scratch = Scratch::new();
         let path = scratch.write_config("[dashboard]\nhidden = [\"30-82-16\"]\n");
 
-        assert_eq!(save_dashboard(&path, &[], false), Ok(()));
+        assert_eq!(save_dashboard(&path, Some(&[]), None), Ok(()));
         assert_eq!(
             fs::read_to_string(&path).expect("a written config"),
-            "[dashboard]\nhidden = []\nhide_inactive = false\n"
+            "[dashboard]\nhidden = []\n"
         );
     }
 
@@ -444,7 +484,7 @@ mod tests {
         let scratch = Scratch::new();
         let path = scratch.write_config("[defaults\nlow = 25\n");
 
-        let problem = save_dashboard(&path, &["30-82-16".to_string()], false)
+        let problem = save_dashboard(&path, Some(&["30-82-16".to_string()]), None)
             .expect_err("an unclosed table header is not TOML");
 
         assert!(problem.contains(&path.display().to_string()), "{problem}");

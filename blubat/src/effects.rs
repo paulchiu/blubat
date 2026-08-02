@@ -205,8 +205,15 @@ impl Effects {
     ///
     /// The only table blubat writes to that file, and the reason the reload
     /// above and this sit together: they are the two ends of the one file
-    /// blubat both reads and, in this one table, maintains.
-    pub fn save_dashboard(&self, hidden: &[String], hide_inactive: bool) -> Result<(), String> {
+    /// blubat both reads and, in this one table, maintains. Only the field
+    /// that changed is ever given, so a write from one key never carries the
+    /// other's possibly stale in-memory value over a change made to the file
+    /// since this dashboard last read it.
+    pub fn save_dashboard(
+        &self,
+        hidden: Option<&[String]>,
+        hide_inactive: Option<bool>,
+    ) -> Result<(), String> {
         config::save_dashboard(&self.config_file, hidden, hide_inactive)
     }
 

@@ -7,32 +7,105 @@
 //! reading.
 
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use blubat_core::Snapshot;
 use crossterm::event::{self, Event as Terminal, KeyCode, KeyEventKind, KeyModifiers};
 
 use super::app::{Event, Key};
 
+/// How long the keypress reader waits for the terminal between checks of
+/// [`Admission`], so a suspend is noticed quickly without the reader ever
+/// blocking inside a read the way it once did forever.
+const POLL: Duration = Duration::from_millis(50);
+
+/// Whether the keypress reader may touch the terminal right now.
+///
+/// [`super::terminal::Session::suspended`] clears this before an editor takes
+/// the real terminal for `c`, and sets it again once the editor hands it back.
+/// The reader only ever calls `crossterm::event::poll`, which watches the
+/// terminal for readiness without consuming anything, while suspended, so a
+/// keystroke meant for the editor is never read out from under it; it is
+/// `crossterm::event::read` that actually takes bytes off the terminal, and
+/// that call is gated on this being open.
+#[derive(Clone)]
+pub struct Admission {
+    open: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl Admission {
+    fn new() -> Self {
+        Self {
+            open: Arc::new((Mutex::new(true), Condvar::new())),
+        }
+    }
+
+    /// Whether the reader may read the terminal at this instant.
+    fn allowed(&self) -> bool {
+        *self
+            .open
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Parks the calling thread until [`Self::resume`] opens the gate again.
+    fn wait_until_allowed(&self) {
+        let (lock, woken) = &*self.open;
+        let mut allowed = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        while !*allowed {
+            allowed = woken
+                .wait(allowed)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    /// Closes the gate: the reader stops touching the terminal at its next
+    /// check, which is at most one [`POLL`] away.
+    pub fn suspend(&self) {
+        *self
+            .open
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+    }
+
+    /// Opens the gate and wakes a reader parked in [`Self::wait_until_allowed`].
+    pub fn resume(&self) {
+        *self
+            .open
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        self.open.1.notify_all();
+    }
+}
+
 /// Merges keypresses and readings into the one channel the loop waits on, and
-/// hands back the end anything else can join them on.
+/// hands back the end anything else can join them on, and the gate `c`
+/// suspends the keypress reader with while an editor owns the terminal.
 ///
 /// A hook finishing is the third source, and it arrives on a thread of its own
 /// whenever it finishes, so it needs the same door rather than a wait of its
 /// own. The readings thread ends once the returned receiver is dropped, which
-/// is what stops the poller. The keypress thread is parked inside a blocking
-/// terminal read and cannot notice, so it is detached: the process exit
-/// reclaims it, and anything that outlives the dashboard would have to hand it
-/// a way to be woken.
-pub fn events(readings: Receiver<Snapshot>) -> (Sender<Event>, Receiver<Event>) {
+/// is what stops the poller. The keypress thread polls rather than blocking
+/// inside a single forever read, precisely so it can be gated; it is otherwise
+/// detached the same way: the process exit reclaims it, and anything that
+/// outlives the dashboard would have to hand it a way to be woken.
+pub fn events(readings: Receiver<Snapshot>) -> (Sender<Event>, Receiver<Event>, Admission) {
     let (sender, events) = mpsc::channel();
     let keys = sender.clone();
     let others = sender.clone();
+    let admission = Admission::new();
+    let gate = admission.clone();
 
     thread::spawn(move || forward(readings.into_iter().map(Event::Reading), &sender));
-    thread::spawn(move || forward(keypresses(), &keys));
+    thread::spawn(move || forward(keypresses(gate), &keys));
 
-    (others, events)
+    (others, events, admission)
 }
 
 /// Sends everything `source` produces until the loop stops listening.
@@ -44,21 +117,44 @@ fn forward(source: impl Iterator<Item = Event>, sink: &Sender<Event>) {
     }
 }
 
-/// Blocking reads of the terminal, as the keys the dashboard binds on.
+/// Reads of the terminal, as the keys the dashboard binds on, gated by
+/// `admission` so `c` can have the terminal to itself.
 ///
 /// Anything that is not a keypress, a resize among them, is dropped here: the
 /// loop redraws on its own tick and the next draw picks up the new size, so
 /// nothing needs waking for it.
-fn keypresses() -> impl Iterator<Item = Event> {
-    std::iter::from_fn(|| {
+///
+/// Polls rather than reading outright: `poll` only asks whether the terminal
+/// has something waiting, so a suspend that lands between a poll and its read
+/// still leaves whatever arrived for the editor to read instead, unconsumed.
+fn keypresses(admission: Admission) -> impl Iterator<Item = Event> {
+    std::iter::from_fn(move || {
         loop {
-            match event::read() {
-                Ok(terminal) => {
-                    if let Some(event) = pressed(&terminal) {
-                        return Some(event);
+            if !admission.allowed() {
+                admission.wait_until_allowed();
+                continue;
+            }
+
+            match event::poll(POLL) {
+                Ok(true) => {
+                    // A suspend can have landed since the poll above; the read
+                    // right after it is the one that would actually take the
+                    // editor's keystroke, so it is what has to be re-checked.
+                    if !admission.allowed() {
+                        continue;
+                    }
+
+                    match event::read() {
+                        Ok(terminal) => {
+                            if let Some(event) = pressed(&terminal) {
+                                return Some(event);
+                            }
+                        }
+                        // The terminal is gone, so no key will ever arrive again.
+                        Err(_) => return None,
                     }
                 }
-                // The terminal is gone, so no key will ever arrive again.
+                Ok(false) => continue,
                 Err(_) => return None,
             }
         }
@@ -167,6 +263,38 @@ mod tests {
         );
         assert_eq!(pressed(&key(KeyCode::Tab, KeyEventKind::Press)), None);
         assert_eq!(pressed(&Terminal::Resize(80, 24)), None);
+    }
+
+    #[test]
+    fn admission_opens_and_closes_without_a_terminal() {
+        let admission = Admission::new();
+        assert!(
+            admission.allowed(),
+            "the reader may read until told otherwise"
+        );
+
+        admission.suspend();
+        assert!(!admission.allowed());
+
+        admission.resume();
+        assert!(admission.allowed());
+    }
+
+    #[test]
+    fn a_thread_parked_on_a_closed_gate_wakes_once_it_reopens() {
+        let admission = Admission::new();
+        admission.suspend();
+
+        let waiting = admission.clone();
+        let parked = thread::spawn(move || waiting.wait_until_allowed());
+
+        thread::sleep(std::time::Duration::from_millis(20));
+        assert!(!parked.is_finished(), "still parked on the closed gate");
+
+        admission.resume();
+        parked
+            .join()
+            .expect("the parked thread returns once the gate reopens");
     }
 
     #[test]

@@ -221,6 +221,19 @@ pub enum Key {
     Backspace,
 }
 
+/// Which single field of `[dashboard]` a key just changed, and so which one
+/// the file still needs telling about.
+///
+/// `h` and `i` never change both at once, so the loop only ever has one of
+/// these pending: the field named is the only one the write touches, which is
+/// what keeps that write from carrying the other field's in-memory copy over
+/// a change the file gained elsewhere since this dashboard last read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DashboardField {
+    Hidden,
+    HideInactive,
+}
+
 /// What a bound key does to the dashboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -355,9 +368,10 @@ pub struct App {
     /// a file, so the request travels as state and the answer comes back as an
     /// event.
     pub reload: bool,
-    /// Set by `h` or `i` and cleared the same way, for the same reason: the
-    /// change is already in [`View`], and the file has yet to be told.
-    pub save_dashboard: bool,
+    /// Set by `h` or `i` to the field it changed, and cleared the same way,
+    /// for the same reason: the change is already in [`View`], and the file
+    /// has yet to be told.
+    pub save_dashboard: Option<DashboardField>,
     /// Set by `c` and cleared by what the loop makes of it: the reducer can no
     /// more suspend the terminal and spawn an editor than it can touch a file.
     pub edit_config: bool,
@@ -380,7 +394,7 @@ impl App {
             advertised: AdvertisedThresholds::new(),
             notice: None,
             reload: false,
-            save_dashboard: false,
+            save_dashboard: None,
             edit_config: false,
         }
     }
@@ -549,7 +563,7 @@ fn reloaded(mut app: App, read: Result<Config, String>) -> App {
 /// change stays live on screen, so the dashboard says what did not survive
 /// rather than putting it back without explanation.
 fn saved(mut app: App, written: Result<(), String>) -> App {
-    app.save_dashboard = false;
+    app.save_dashboard = None;
 
     if let Err(problem) = written {
         app.notice = Some(Notice::problem(problem));
@@ -733,7 +747,7 @@ fn hide_selected(app: App) -> App {
         return app;
     };
     let app = App {
-        save_dashboard: true,
+        save_dashboard: Some(DashboardField::Hidden),
         ..app
     };
 
@@ -747,7 +761,7 @@ fn hide_selected(app: App) -> App {
 /// toggle always has a new value, so it is always worth telling the file.
 fn toggled_inactive(app: App) -> App {
     let app = App {
-        save_dashboard: true,
+        save_dashboard: Some(DashboardField::HideInactive),
         ..app
     };
 
@@ -1357,10 +1371,15 @@ pub(super) mod tests {
         let hidden = press(with_an_inactive_device(), "i");
         let written = update(hidden.clone(), Event::Saved(Ok(())));
 
-        assert!(hidden.save_dashboard, "i lasts the same way h does");
-        assert!(!written.save_dashboard, "and once told, stops asking");
-        assert!(
+        assert_eq!(
+            hidden.save_dashboard,
+            Some(DashboardField::HideInactive),
+            "i lasts the same way h does"
+        );
+        assert_eq!(written.save_dashboard, None, "and once told, stops asking");
+        assert_eq!(
             press(hidden, "i").save_dashboard,
+            Some(DashboardField::HideInactive),
             "showing the section again is a write too"
         );
     }
@@ -1401,7 +1420,7 @@ pub(super) mod tests {
         let empty = press(app(), "h");
 
         assert!(empty.view.hidden.is_empty());
-        assert!(!empty.save_dashboard, "and asks for no write either");
+        assert_eq!(empty.save_dashboard, None, "and asks for no write either");
     }
 
     #[test]
@@ -1409,12 +1428,17 @@ pub(super) mod tests {
         let hidden = press(loaded(), "h");
         let written = update(hidden.clone(), Event::Saved(Ok(())));
 
-        assert!(hidden.save_dashboard, "the file has yet to be told");
+        assert_eq!(
+            hidden.save_dashboard,
+            Some(DashboardField::Hidden),
+            "the file has yet to be told"
+        );
         assert_eq!(hidden.view.hidden, ["de-df-38-f0-46-9b"]);
-        assert!(!written.save_dashboard, "and once told, stops asking");
+        assert_eq!(written.save_dashboard, None, "and once told, stops asking");
         assert_eq!(written.notice, None, "a hide that worked speaks for itself");
-        assert!(
+        assert_eq!(
             press(press(hidden, "H"), "h").save_dashboard,
+            Some(DashboardField::Hidden),
             "showing a device again is a write too"
         );
     }

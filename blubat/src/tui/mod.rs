@@ -28,7 +28,7 @@ use blubat_core::{Config, Paths, Poll, Tiers, Timestamp};
 use crate::effects::{Effects, Observed};
 use crate::hooks::Outcome;
 use crate::{Failure, lock};
-use app::{App, Event, Notice, update};
+use app::{App, DashboardField, Event, Notice, update};
 use editor::{Cli as EditorCli, Editor};
 use glyph::Glyphs;
 use theme::Look;
@@ -63,7 +63,7 @@ pub fn run(paths: &Paths) -> Result<(), Failure> {
     let owned = dashboard.is_some();
     let (config, unreadable) = load(paths);
     let tiers = tiers(&config.poll);
-    let (notes, events) = events::events(blubat_core::poll(tiers));
+    let (notes, events, admission) = events::events(blubat_core::poll(tiers));
     let (effects, stale_state) = Effects::live(paths, reporter(notes));
     // Nothing can take the lock from a dashboard holding it, so this answer
     // stands for the whole session.
@@ -103,24 +103,35 @@ pub fn run(paths: &Paths) -> Result<(), Failure> {
                 Event::Note(Notice::problem(observed.problems.join("; "))),
             );
         }
-        if app.reload {
-            app = update(app, Event::Reloaded(effects.reload()));
-        }
-        if app.save_dashboard {
-            let written = effects.save_dashboard(&app.view.hidden, app.view.hide_inactive);
-
-            app = update(app, Event::Saved(written));
-        }
         if app.edit_config {
-            // The real terminal for as long as the editor holds it; a success
-            // asks the reducer for the same reload `r` uses, which the loop
-            // picks up on the very next pass through here.
-            let outcome = session.suspended(|| editor.edit(paths.config_file()))?;
+            // The real terminal for as long as the editor holds it. Ahead of
+            // the reload check below, so a successful edit's own request for
+            // the same reload `r` uses is picked up this same pass rather than
+            // waiting for the next one.
+            let outcome = session.suspended(&admission, || editor.edit(paths.config_file()))?;
 
             app = update(
                 app,
                 Event::Edited(outcome.map_err(|failure| failure.to_string())),
             );
+        }
+        if app.reload {
+            app = update(app, Event::Reloaded(effects.reload()));
+        }
+        if let Some(field) = app.save_dashboard {
+            // Only the field `h` or `i` actually changed travels to the write,
+            // so it never carries the other's possibly stale in-memory value
+            // over a change the file gained since this dashboard last read it.
+            let written = match field {
+                DashboardField::Hidden => {
+                    effects.save_dashboard(Some(app.view.hidden.as_slice()), None)
+                }
+                DashboardField::HideInactive => {
+                    effects.save_dashboard(None, Some(app.view.hide_inactive))
+                }
+            };
+
+            app = update(app, Event::Saved(written));
         }
     }
 

@@ -81,13 +81,14 @@ dashboard reads every 5s instead: it is on screen and being read as it
 changes, and the fast tier is a single digit millisecond IOKit call.
 
 `[dashboard] hidden` and `[dashboard] hide_inactive` are maintained from the
-dashboard as well as by hand, and both live in the one write: `h` appends the
+dashboard as well as by hand, and both live in the one table: `h` appends the
 selected device's address and `h` over a shown-again device removes whatever
 was hiding it, and `i` flips whether the dashboard opens with the disconnected
-section shown. Either key writes both fields back, so the file always carries
-the whole of what the dashboard was last showing rather than whichever half
-last changed. The edit is surgical, so a hand written file keeps its comments,
-its blank lines and the order of everything in it. `r` on the
+section shown. Each key writes only the field it changed, so pressing `h`
+never carries `hide_inactive` back over a value the file gained since this
+dashboard last read it, and pressing `i` never carries `hidden` back either.
+The edit is surgical, so a hand written file keeps its comments, its blank
+lines and the order of everything in it. `r` on the
 [dashboard](dashboard.md), and `c`'s reload once its editor closes, re-read
 both along with the rest of the file, which is what settles a hand edit made
 while the dashboard is open.

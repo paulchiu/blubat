@@ -6,6 +6,7 @@ use ratatui::DefaultTerminal;
 use ratatui::widgets::TableState;
 
 use super::app::App;
+use super::events::Admission;
 use super::render::render;
 
 /// The terminal in raw mode on the alternate screen, restored when dropped.
@@ -44,11 +45,20 @@ impl Session {
     ///
     /// What runs in between owns the real terminal, which is what the editor
     /// `c` opens needs: a child process inherits this process's stdio, and
-    /// that is the dashboard's screen until `during` hands it back.
-    pub fn suspended<T>(&mut self, during: impl FnOnce() -> T) -> io::Result<T> {
+    /// that is the dashboard's screen until `during` hands it back. blubat's
+    /// own keypress reader is gated shut around it too: without that, the
+    /// reader and the editor would both be reading the one terminal at once,
+    /// and whichever the kernel wakes would get the keystroke.
+    pub fn suspended<T>(
+        &mut self,
+        admission: &Admission,
+        during: impl FnOnce() -> T,
+    ) -> io::Result<T> {
+        admission.suspend();
         ratatui::try_restore()?;
         let result = during();
         self.terminal = ratatui::try_init()?;
+        admission.resume();
 
         Ok(result)
     }
