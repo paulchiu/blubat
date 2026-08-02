@@ -1,4 +1,5 @@
 use std::fmt;
+use std::time::Duration;
 
 use serde::Serialize;
 
@@ -57,6 +58,35 @@ impl fmt::Display for ChargeState {
     }
 }
 
+/// Which battery of a device one level belongs to.
+///
+/// `system_profiler` reports AirPods and similar as three separate keys, so a
+/// frontend showing the parts needs a name for each of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Part {
+    Main,
+    Left,
+    Right,
+    Case,
+}
+
+impl Part {
+    /// Every part in the order a frontend lists them.
+    pub const ALL: [Self; 4] = [Part::Main, Part::Left, Part::Right, Part::Case];
+}
+
+impl fmt::Display for Part {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Part::Main => "main",
+            Part::Left => "left",
+            Part::Right => "right",
+            Part::Case => "case",
+        })
+    }
+}
+
 /// Battery levels in percent.
 ///
 /// Single battery devices report `main`; AirPods and similar report the other
@@ -77,12 +107,25 @@ impl Levels {
     /// The single level that stands for the device: the lowest one present.
     ///
     /// A multi battery device is as charged as its emptiest part, so this is
-    /// what thresholds and the one line CLI output both read.
+    /// what thresholds and every one number surface both read.
     pub fn lowest(self) -> Option<u8> {
-        [self.main, self.left, self.right, self.case]
+        self.present().map(|(_, level)| level).min()
+    }
+
+    /// The parts that reported a level, in [`Part::ALL`] order.
+    ///
+    /// The detail view lists these; everything judging a device reads
+    /// [`Levels::lowest`] over them instead.
+    pub fn present(self) -> impl Iterator<Item = (Part, u8)> {
+        Part::ALL
             .into_iter()
-            .flatten()
-            .min()
+            .zip([self.main, self.left, self.right, self.case])
+            .filter_map(|(part, level)| level.map(|level| (part, level)))
+    }
+
+    /// Whether more than one battery reported, which is what AirPods do.
+    pub fn multi_battery(self) -> bool {
+        self.present().count() > 1
     }
 }
 
@@ -124,11 +167,22 @@ impl Device {
 
     /// The level a threshold may act on, absent while the device is disconnected.
     ///
-    /// macOS keeps reporting the last level of a disconnected device with no
-    /// timestamp, so that number is last seen data and can be arbitrarily old.
-    /// Frontends still show it, reading `connected` to label it; events do not.
+    /// The lowest sub level present, because a multi battery device is as
+    /// charged as its emptiest part. macOS keeps reporting the last level of a
+    /// disconnected device with no timestamp, so that number is last seen data
+    /// and can be arbitrarily old: frontends still show it, reading `connected`
+    /// to label it, and events do not.
     pub fn active_level(&self) -> Option<u8> {
         self.connected.then(|| self.levels.lowest()).flatten()
+    }
+
+    /// Whether this device's newest reading is older than the stale window.
+    ///
+    /// The one staleness rule in blubat: the engine raises `stale` on it and a
+    /// frontend marks a row with it, so the two cannot come to disagree about
+    /// which devices have gone quiet.
+    pub fn is_stale(&self, stale_after: Duration, now: Timestamp) -> bool {
+        now >= self.read_at.plus(stale_after)
     }
 }
 
@@ -210,6 +264,61 @@ mod tests {
             "empty is a level, not the absence of one"
         );
         assert_eq!(flat.active_level(), Some(0));
+    }
+
+    #[test]
+    fn the_parts_that_reported_are_listed_in_their_own_order() {
+        let airpods = Levels {
+            main: None,
+            left: Some(100),
+            right: Some(97),
+            case: Some(68),
+        };
+
+        assert_eq!(
+            airpods.present().collect::<Vec<_>>(),
+            [(Part::Left, 100), (Part::Right, 97), (Part::Case, 68)]
+        );
+        assert!(airpods.multi_battery());
+        assert_eq!(
+            Levels {
+                main: Some(42),
+                ..Levels::default()
+            }
+            .present()
+            .collect::<Vec<_>>(),
+            [(Part::Main, 42)]
+        );
+        assert!(
+            !Levels {
+                main: Some(42),
+                ..Levels::default()
+            }
+            .multi_battery()
+        );
+        assert_eq!(Levels::default().present().count(), 0);
+        assert!(!Levels::default().multi_battery());
+    }
+
+    #[test]
+    fn each_part_names_itself() {
+        assert_eq!(
+            Part::ALL.map(|part| part.to_string()),
+            ["main", "left", "right", "case"]
+        );
+    }
+
+    #[test]
+    fn a_reading_is_stale_once_the_window_has_passed() {
+        let window = Duration::from_secs(600);
+        let trackpad = Device {
+            read_at: Timestamp::from_unix(1_000),
+            ..device("Paul\u{2019}s Magic Trackpad", "30-82-16-f2-24-90")
+        };
+
+        assert!(!trackpad.is_stale(window, Timestamp::from_unix(1_599)));
+        assert!(trackpad.is_stale(window, Timestamp::from_unix(1_600)));
+        assert!(trackpad.is_stale(window, Timestamp::from_unix(9_000)));
     }
 
     #[test]

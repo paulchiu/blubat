@@ -29,6 +29,7 @@ mod error;
 mod event;
 mod history;
 mod iokit;
+mod json;
 mod paths;
 mod poll;
 mod profiler;
@@ -42,13 +43,14 @@ pub use config::{
     Advertised, AdvertisedThresholds, Config, Dashboard, Defaults, DeviceRule, Hook, Notifications,
     Poll, Sort, Thresholds,
 };
-pub use device::{ChargeState, Device, Levels, Source};
+pub use device::{ChargeState, Device, Levels, Part, Source};
 pub use duration::{Debounce, parse_duration};
 pub use engine::{Engine, Raised};
 pub use error::{Error, Result};
 pub use event::Event;
 pub use history::{Direction, History, Sample, Trend};
 pub use iokit::advertised;
+pub use json::Reading;
 pub use paths::Paths;
 pub use poll::{Tiers, poll, snapshot};
 pub use snapshot::Snapshot;
