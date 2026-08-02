@@ -32,17 +32,17 @@ fn stderr(output: &Output) -> String {
 }
 
 /// A bare `blubat` opens the dashboard, which needs a screen to draw on. Piped
-/// into a test or a script there is none, so it says so and points at the
-/// command that does answer in text rather than taking over a terminal it does
-/// not have.
+/// into a test or a script there is none, so it offers what it can do in text
+/// instead of taking over a terminal it does not have, and exits clean: a first
+/// run that produces help is not a failure.
 #[test]
-fn a_bare_invocation_with_nowhere_to_draw_says_so() {
+fn a_bare_invocation_with_nowhere_to_draw_offers_the_commands() {
     let output = blubat(&[]);
 
-    assert_eq!(code(&output), 1);
-    assert!(output.stdout.is_empty(), "{output:?}");
-    assert!(stderr(&output).contains("needs a terminal"), "{output:?}");
-    assert!(stderr(&output).contains("blubat list"), "{output:?}");
+    assert_eq!(code(&output), 0);
+    assert!(stdout(&output).contains("Usage: blubat"), "{output:?}");
+    assert!(stdout(&output).contains("blubat list"), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
 }
 
 #[test]

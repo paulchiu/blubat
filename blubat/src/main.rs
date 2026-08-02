@@ -1,6 +1,7 @@
 //! The blubat binary: the dashboard and the one-shot CLI over `blubat-core`.
 //!
-//! A bare `blubat` opens the live dashboard. Every other command reads one
+//! A bare `blubat` opens the live dashboard, or prints what it can do when
+//! there is no terminal to draw one on. Every other command reads one
 //! snapshot, prints it in the form the caller asked for, and exits with a code
 //! a script can branch on: 0 for a usable reading, 3 when no matching device
 //! has a battery, 1 for anything else.
@@ -10,10 +11,11 @@ mod tui;
 mod wait;
 
 use std::fmt;
+use std::io::{self, IsTerminal};
 use std::process::ExitCode;
 
 use blubat_core::Snapshot;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 use report::Format;
 
@@ -115,8 +117,21 @@ fn run(cli: Cli) -> Result<(), Failure> {
             number,
         }) => report::status(&reading(), device.as_deref(), Format::of(json, number)),
         Some(Command::Wait(args)) => wait::run(&args),
-        None => tui::run(),
+        None if io::stdout().is_terminal() => tui::run(),
+        None => offer_the_commands(),
     }
+}
+
+/// What a bare `blubat` says when there is no screen to draw a dashboard on.
+///
+/// Piped into a script or a test there is nowhere to put a full screen view, so
+/// blubat prints what it can do instead. A successful request for text, so it
+/// exits 0 the way `--help` does rather than failing a first run.
+fn offer_the_commands() -> Result<(), Failure> {
+    Cli::command().print_help()?;
+    println!("\nRun `blubat list` for a reading, or `blubat` in a terminal for the dashboard.");
+
+    Ok(())
 }
 
 /// One reading, with whatever the core could not use reported on stderr.
@@ -141,8 +156,6 @@ fn fail(failure: Failure) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
-
     use super::*;
 
     #[test]

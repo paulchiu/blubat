@@ -3,6 +3,7 @@
 use std::io;
 
 use ratatui::DefaultTerminal;
+use ratatui::widgets::TableState;
 
 use super::app::App;
 use super::render::render;
@@ -15,17 +16,27 @@ use super::render::render;
 /// echo and no cursor.
 pub struct Session {
     terminal: DefaultTerminal,
+    /// The table's scroll offset, which has to outlive the frame that set it
+    /// for the view to follow the selection rather than jump to it.
+    table: TableState,
 }
 
 impl Session {
     /// Takes the screen, entering raw mode and the alternate buffer.
     pub fn open() -> io::Result<Self> {
-        ratatui::try_init().map(|terminal| Self { terminal })
+        ratatui::try_init().map(|terminal| Self {
+            terminal,
+            table: TableState::new(),
+        })
     }
 
     /// Draws one frame of `app`.
     pub fn draw(&mut self, app: &App) -> io::Result<()> {
-        self.terminal.draw(|frame| render(frame, app)).map(|_| ())
+        let table = &mut self.table;
+
+        self.terminal
+            .draw(|frame| render(frame, app, table))
+            .map(|_| ())
     }
 }
 

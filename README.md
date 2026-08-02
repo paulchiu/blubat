@@ -56,7 +56,10 @@ $ blubat wait --device trackpad --until 100 --interval 5m
 
 ## Dashboard
 
-Bare `blubat` opens the dashboard. Connected devices come first; disconnected
+Bare `blubat` opens the dashboard, or prints the command help and exits 0 when
+there is no terminal to draw one on, so a piped `blubat` still answers. The trend
+column is a six cell sparkline over the levels read this run, with dots for a
+device nothing has been read from yet. Connected devices come first; disconnected
 ones sit under a dimmed `inactive` heading with their own count, keeping their
 last seen level out of the critical summary. A device no source reports a level
 for is listed as `unreported` rather than dropped, and a narrow terminal gives
@@ -68,6 +71,9 @@ j/k    move the selection    /  filter on name or address, esc clears it
 enter  detail view, later    h  hide the selected device, H show hidden again
 ?      the full keymap
 ```
+
+`q` and ctrl+c both leave the dashboard; the keymap overlay takes the keyboard
+while it is open, so `?` closes it before anything else responds again.
 
 Hiding lasts for the session: nothing is written anywhere. The charging mark is
 ascii by default and becomes the Nerd Font bolt when the environment says a

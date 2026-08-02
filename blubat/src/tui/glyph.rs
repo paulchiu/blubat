@@ -26,23 +26,24 @@ impl Glyphs {
     /// Best effort and deliberately shy: no terminal reports the font it draws
     /// with, so this reads the variables some terminals and shells set and
     /// answers ascii whenever it is not sure, since a wrong yes prints tofu
-    /// while a wrong no only prints a plainer glyph. A variable that exists to
-    /// answer this question is taken at its word either way, which is the
-    /// escape hatch for a terminal the guess reads wrong.
+    /// while a wrong no only prints a plainer glyph. Only blubat's own variable
+    /// is an answer, taken at its word either way, which is the escape hatch
+    /// for a terminal the guess reads wrong. Every other name is a hint: they
+    /// belong to whoever set them, and `NERD_FONT` holding a font name is as
+    /// likely as it holding a yes.
     fn from_env(var: impl Fn(&str) -> Option<String>) -> Self {
-        const ANSWERS: [&str; 2] = ["BLUBAT_NERD_FONT", "NERD_FONT"];
-        const FONTS: [&str; 3] = ["TERM_PROGRAM", "TERMINAL_FONT", "FONT"];
+        const ANSWER: &str = "BLUBAT_NERD_FONT";
+        const FONTS: [&str; 4] = ["NERD_FONT", "TERM_PROGRAM", "TERMINAL_FONT", "FONT"];
 
-        let answered = ANSWERS.iter().find_map(|name| var(name));
-        if let Some(answer) = answered {
-            return Self::of(matches!(answer.trim(), "1" | "true" | "yes"));
+        if let Some(answer) = var(ANSWER) {
+            return Self::of(said_yes(&answer));
         }
 
         Self::of(
             FONTS
                 .iter()
                 .filter_map(|name| var(name))
-                .any(|value| value.to_lowercase().contains("nerd")),
+                .any(|value| said_yes(&value) || value.to_lowercase().contains("nerd")),
         )
     }
 
@@ -53,6 +54,11 @@ impl Glyphs {
             Self::ASCII
         }
     }
+}
+
+/// Whether a variable's value reads as yes rather than as a font name.
+fn said_yes(value: &str) -> bool {
+    matches!(value.trim().to_lowercase().as_str(), "1" | "true" | "yes")
 }
 
 #[cfg(test)]
@@ -83,6 +89,7 @@ mod tests {
             ("TERMINAL_FONT", "JetBrainsMono Nerd Font Mono"),
             ("FONT", "hack nerd font"),
             ("NERD_FONT", "1"),
+            ("NERD_FONT", "JetBrainsMono Nerd Font"),
             ("TERM_PROGRAM", "WezTerm-NerdFont"),
         ] {
             assert_eq!(
@@ -106,6 +113,11 @@ mod tests {
             ])),
             Glyphs::ASCII,
             "an explicit no beats a hint"
+        );
+        assert_eq!(
+            Glyphs::from_env(env(vec![("NERD_FONT", "0")])),
+            Glyphs::ASCII,
+            "a hint that is not blubat's own says no by saying nothing"
         );
     }
 

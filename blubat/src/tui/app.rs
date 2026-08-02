@@ -10,6 +10,7 @@ use std::time::Duration;
 use blubat_core::{Device, History, Snapshot, Timestamp};
 
 use super::glyph::Glyphs;
+use super::theme;
 use super::view::{Filter, Rows, View};
 
 /// One advertised key: what to press, and what pressing it does.
@@ -56,13 +57,22 @@ pub const KEYMAP: [Binding; 8] = [
     },
 ];
 
+/// The key a filter that is no longer being typed still answers to.
+///
+/// Advertised beside the dashboard keymap while a kept filter is narrowing the
+/// table, since that is the only state in which it does anything.
+const CLEAR_FILTER: Binding = Binding {
+    keys: "esc",
+    label: "clear filter",
+};
+
 /// What the overlay says beyond the keys themselves.
 pub const NOTES: [&str; 2] = [
     "enter opens the detail view, which arrives later.",
     "h hides for this session only; a lasting hide arrives later.",
 ];
 
-/// The keys that stay live while the keymap overlay covers the dashboard.
+/// The keys the keymap overlay leaves live, since it swallows every other one.
 const OVERLAY_KEYS: [Binding; 2] = [
     Binding {
         keys: "?",
@@ -73,6 +83,12 @@ const OVERLAY_KEYS: [Binding; 2] = [
         label: "quit",
     },
 ];
+
+/// What [`OVERLAY_KEYS`] stand for, and the only actions the overlay performs.
+///
+/// The advertised keys and the accepted actions are one list read from either
+/// end, which is what keeps the footer an account of what the overlay does.
+const OVERLAY_ACTIONS: [Action; 2] = [Action::ToggleKeymap, Action::Quit];
 
 /// The keys that mean something while the filter is being typed.
 ///
@@ -88,6 +104,31 @@ const FILTER_KEYS: [Binding; 2] = [
         label: "keep",
     },
 ];
+
+/// Which of the dashboard's views has the keyboard.
+///
+/// Exactly one at a time, so the footer and the dispatcher read the same value
+/// and a state that advertises one set of keys while acting on another cannot
+/// be built.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mode {
+    #[default]
+    Dashboard,
+    /// The filter has the keyboard, so every printable key is text.
+    Filtering,
+    /// The keymap overlay covers the dashboard and swallows its keys.
+    Keymap,
+}
+
+impl Mode {
+    /// The overlay opens over whatever is on screen and closes onto the dashboard.
+    fn keymap_toggled(self) -> Self {
+        match self {
+            Mode::Keymap => Mode::Dashboard,
+            _ => Mode::Keymap,
+        }
+    }
+}
 
 /// A key as the dashboard binds on it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,6 +178,8 @@ impl Action {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     Key(Key),
+    /// Ctrl+C, which raw mode leaves to blubat rather than to the terminal.
+    Interrupt,
     /// A fresh reading from the poller.
     Reading(Snapshot),
     /// The redraw timer expired at this moment.
@@ -152,7 +195,8 @@ pub struct App {
     pub history: History,
     /// The row the selection sits on, always a real index while there are rows.
     pub selected: usize,
-    pub keymap_open: bool,
+    /// Which view has the keyboard, and so which keys the footer advertises.
+    pub mode: Mode,
     /// Cleared by `q`, which is how the loop learns to stop.
     pub running: bool,
     /// The latest moment the clock reported, which the countdown measures from.
@@ -172,7 +216,7 @@ impl App {
             reading: None,
             history: History::default(),
             selected: 0,
-            keymap_open: false,
+            mode: Mode::Dashboard,
             running: true,
             now,
             interval,
@@ -186,6 +230,24 @@ impl App {
         self.reading
             .as_ref()
             .map_or(&[], |reading| reading.devices.as_slice())
+    }
+
+    /// The connected devices of the last reading, whatever the view is showing.
+    ///
+    /// Read from the reading rather than from the rows, so a filter narrows
+    /// what is drawn without changing what the status line counts.
+    pub fn connected(&self) -> impl Iterator<Item = &Device> {
+        self.devices().iter().filter(|device| device.connected)
+    }
+
+    /// Connected devices low enough to want attention.
+    ///
+    /// A disconnected device can never count: its level is what macOS last
+    /// persisted, so it is history rather than an alert.
+    pub fn critical(&self) -> usize {
+        self.connected()
+            .filter(|device| theme::is_critical(device.active_level()))
+            .count()
     }
 
     /// The devices on screen, which is what the table draws and `j` moves through.
@@ -217,14 +279,19 @@ impl App {
         Some(Duration::from_secs(u64::try_from(remaining).unwrap_or(0)))
     }
 
-    /// The keys the current view binds, which the footer shows.
-    pub fn keys(&self) -> &'static [Binding] {
-        if self.keymap_open {
-            &OVERLAY_KEYS
-        } else if self.view.filter.typing {
-            &FILTER_KEYS
-        } else {
-            &KEYMAP
+    /// The keys the mode on screen binds, which the footer shows.
+    ///
+    /// Every key listed here reaches [`Action::of`] in this mode and no key
+    /// outside it does anything, which is what makes the footer an account of
+    /// what pressing something will do.
+    pub fn keys(&self) -> Vec<Binding> {
+        match self.mode {
+            Mode::Keymap => OVERLAY_KEYS.to_vec(),
+            Mode::Filtering => FILTER_KEYS.to_vec(),
+            Mode::Dashboard if self.view.filter.narrows() => {
+                KEYMAP.iter().copied().chain([CLEAR_FILTER]).collect()
+            }
+            Mode::Dashboard => KEYMAP.to_vec(),
         }
     }
 }
@@ -233,6 +300,7 @@ impl App {
 pub fn update(app: App, event: Event) -> App {
     let app = match event {
         Event::Key(key) => pressed(app, key),
+        Event::Interrupt => act(app, Action::Quit),
         Event::Reading(reading) => receive(app, reading),
         Event::Tick(now) => App { now, ..app },
     };
@@ -240,27 +308,55 @@ pub fn update(app: App, event: Event) -> App {
     onto_a_row(app)
 }
 
-/// A key is text while the filter is being typed, and a command otherwise.
+/// A key means what the mode it was pressed in says it means.
+///
+/// The one dispatch [`App::keys`] advertises: the filter takes every key as
+/// text, the overlay accepts only what it lists, and the dashboard binds its
+/// whole keymap.
 fn pressed(app: App, key: Key) -> App {
-    match (app.view.filter.typing, Action::of(key)) {
-        (true, _) => typed(app, key),
-        (false, Some(action)) => act(app, action),
-        (false, None) => app,
+    match app.mode {
+        Mode::Filtering => typed(app, key),
+        Mode::Keymap => acted(
+            app,
+            Action::of(key).filter(|action| OVERLAY_ACTIONS.contains(action)),
+        ),
+        Mode::Dashboard => acted(app, Action::of(key)),
+    }
+}
+
+/// The state after `action`, unchanged where the mode binds nothing to the key.
+fn acted(app: App, action: Option<Action>) -> App {
+    match action {
+        Some(action) => act(app, action),
+        None => app,
     }
 }
 
 /// Editing the filter, where every printable key narrows the table further.
 fn typed(app: App, key: Key) -> App {
-    viewed(app, |view| match key {
-        Key::Char(key) => view.filter.query.push(key),
-        Key::Backspace => {
+    match key {
+        Key::Char(character) => viewed(app, |view| view.filter.query.push(character)),
+        Key::Backspace => viewed(app, |view| {
             view.filter.query.pop();
-        }
+        }),
         // Escape abandons the filter altogether; enter keeps what it matched
         // and hands the keys back to the dashboard.
-        Key::Escape => view.filter = Filter::default(),
-        Key::Enter => view.filter.typing = false,
-    })
+        Key::Escape => cleared(app),
+        Key::Enter => App {
+            mode: Mode::Dashboard,
+            ..app
+        },
+    }
+}
+
+/// Drops the filter and gives the keys back to the dashboard.
+fn cleared(app: App) -> App {
+    let app = App {
+        mode: Mode::Dashboard,
+        ..app
+    };
+
+    viewed(app, |view| view.filter = Filter::default())
 }
 
 fn act(app: App, action: Action) -> App {
@@ -272,12 +368,15 @@ fn act(app: App, action: Action) -> App {
         Action::Down => moved(app, 1),
         Action::Up => moved(app, -1),
         Action::ToggleKeymap => App {
-            keymap_open: !app.keymap_open,
+            mode: app.mode.keymap_toggled(),
             ..app
         },
         Action::CycleSort => viewed(app, |view| view.sort = view.sort.next()),
-        Action::OpenFilter => viewed(app, |view| view.filter.typing = true),
-        Action::ClearFilter => viewed(app, |view| view.filter = Filter::default()),
+        Action::OpenFilter => App {
+            mode: Mode::Filtering,
+            ..app
+        },
+        Action::ClearFilter => cleared(app),
         Action::ToggleHidden => hide_selected(app),
         Action::ShowHidden => viewed(app, |view| view.show_hidden = !view.show_hidden),
         // The detail view arrives later. The key is bound and advertised now so
@@ -401,12 +500,40 @@ pub(super) mod tests {
             .fold(app, |app, key| update(app, Event::Key(Key::Char(key))))
     }
 
-    fn key(app: App, key: Key) -> App {
+    pub fn key(app: App, key: Key) -> App {
         update(app, Event::Key(key))
     }
 
     fn names(app: &App) -> Vec<String> {
         app.rows().all().map(|device| device.name.clone()).collect()
+    }
+
+    /// One state per set of keys the footer can carry.
+    fn every_view() -> Vec<App> {
+        vec![
+            loaded(),
+            press(loaded(), "?"),
+            press(loaded(), "/key"),
+            key(press(loaded(), "/key"), Key::Enter),
+        ]
+    }
+
+    /// Every key the footer of `app` names, as it would be pressed.
+    fn advertised_in(app: &App) -> Vec<Key> {
+        let pressed = |text: &str| match text {
+            "esc" => Key::Escape,
+            "enter" => Key::Enter,
+            other => Key::Char(other.chars().next().expect("a key to press")),
+        };
+
+        app.keys()
+            .iter()
+            // `/` is a key of its own as well as the separator between two of them.
+            .flat_map(|binding| match binding.keys {
+                "/" => vec![Key::Char('/')],
+                several => several.split('/').map(pressed).collect(),
+            })
+            .collect()
     }
 
     #[test]
@@ -416,7 +543,7 @@ pub(super) mod tests {
         assert!(app.running);
         assert!(app.devices().is_empty());
         assert_eq!(app.next_poll_in(), None, "nothing has been read yet");
-        assert!(!app.keymap_open);
+        assert_eq!(app.mode, Mode::Dashboard);
         assert_eq!(app.view, View::default());
     }
 
@@ -466,10 +593,65 @@ pub(super) mod tests {
         let closed = loaded();
         let open = press(closed.clone(), "?");
 
-        assert!(open.keymap_open);
+        assert_eq!(open.mode, Mode::Keymap);
         assert_eq!(open.keys()[0].label, "close");
-        assert!(!press(open, "?").keymap_open);
+        assert_eq!(press(open, "?").mode, Mode::Dashboard);
         assert_eq!(closed.keys(), KEYMAP, "the dashboard advertises its keymap");
+    }
+
+    #[test]
+    fn the_overlay_swallows_every_key_it_does_not_advertise() {
+        let open = press(loaded(), "?");
+
+        assert_eq!(
+            press(open.clone(), "jksh/H"),
+            open,
+            "the dashboard keys do nothing underneath the overlay"
+        );
+        assert_eq!(key(open.clone(), Key::Enter), open);
+        assert_eq!(key(open.clone(), Key::Escape), open);
+
+        assert_eq!(
+            press(open.clone(), "?").mode,
+            Mode::Dashboard,
+            "? closes it"
+        );
+        assert!(!press(open, "q").running, "and q still quits");
+    }
+
+    #[test]
+    fn a_key_the_footer_advertises_is_never_swallowed_as_filter_text() {
+        for app in every_view() {
+            for key in advertised_in(&app) {
+                let after = update(app.clone(), Event::Key(key));
+
+                assert!(
+                    after.view.filter.query.len() <= app.view.filter.query.len(),
+                    "{key:?} is advertised in {:?} and types itself instead",
+                    app.mode
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_filter_cannot_be_opened_from_underneath_the_overlay() {
+        let still_open = press(press(loaded(), "?"), "/");
+
+        assert_eq!(still_open.mode, Mode::Keymap, "one view holds the keys");
+        assert!(still_open.view.filter.query.is_empty());
+        assert_eq!(
+            press(still_open, "?/key").view.filter.query,
+            "key",
+            "and the filter opens once the overlay is closed"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_stops_the_loop_from_wherever_it_arrives() {
+        for app in [loaded(), press(loaded(), "?"), press(loaded(), "/key")] {
+            assert!(!update(app, Event::Interrupt).running);
+        }
     }
 
     #[test]
@@ -508,19 +690,8 @@ pub(super) mod tests {
 
     #[test]
     fn every_advertised_key_is_bound_to_an_action() {
-        let pressed = |text: &str| match text {
-            "esc" => Key::Escape,
-            "enter" => Key::Enter,
-            other => Key::Char(other.chars().next().expect("a key to press")),
-        };
-        // `/` is a key of its own as well as the separator between two of them.
-        let advertised = |keys: &'static str| match keys {
-            "/" => vec![Key::Char('/')],
-            several => several.split('/').map(pressed).collect(),
-        };
-
-        for binding in KEYMAP.iter().chain(&OVERLAY_KEYS) {
-            for key in advertised(binding.keys) {
+        for app in every_view() {
+            for key in advertised_in(&app) {
                 assert!(Action::of(key).is_some(), "{key:?} is advertised unbound");
             }
         }
@@ -561,7 +732,7 @@ pub(super) mod tests {
     fn the_filter_narrows_the_table_as_it_is_typed() {
         let filtering = press(loaded(), "/key");
 
-        assert!(filtering.view.filter.typing);
+        assert_eq!(filtering.mode, Mode::Filtering);
         assert_eq!(filtering.view.filter.query, "key");
         assert_eq!(names(&filtering), ["MX Keys M Mac"]);
     }
@@ -594,7 +765,7 @@ pub(super) mod tests {
     fn enter_keeps_the_filter_and_hands_the_keys_back() {
         let kept = key(press(loaded(), "/keys"), Key::Enter);
 
-        assert!(!kept.view.filter.typing);
+        assert_eq!(kept.mode, Mode::Dashboard);
         assert_eq!(kept.view.filter.query, "keys");
         assert_eq!(names(&kept), ["MX Keys M Mac"]);
         assert!(!press(kept, "q").running, "q is a command again");
@@ -611,6 +782,61 @@ pub(super) mod tests {
             assert_eq!(cleared.view.filter, Filter::default());
             assert_eq!(names(&cleared).len(), 3);
         }
+    }
+
+    #[test]
+    fn j_and_k_type_rather_than_move_while_the_filter_is_open() {
+        let filtering = press(loaded(), "/k");
+
+        assert_eq!(filtering.rows().len(), 2, "two devices are still on screen");
+
+        let typed = press(filtering.clone(), "j");
+        assert_eq!(typed.view.filter.query, "kj");
+        assert_eq!(typed.selected, 0, "and the selection has not moved");
+
+        let kept = key(filtering, Key::Enter);
+        assert_eq!(
+            press(kept, "j").selected,
+            1,
+            "j moves once the filter is kept"
+        );
+    }
+
+    #[test]
+    fn a_reading_arriving_leaves_the_view_alone() {
+        let filtering = press(press(loaded(), "s"), "/key");
+        let before = press(key(filtering, Key::Enter), "h");
+        let after = update(before.clone(), Event::Reading(three_devices()));
+
+        assert_eq!(
+            after.view, before.view,
+            "sort, filter and hidden all survive"
+        );
+        assert_eq!(after.mode, before.mode);
+    }
+
+    #[test]
+    fn a_filter_cannot_talk_the_status_line_out_of_an_alert() {
+        let low = device("Soundcore Liberty", "d0-03-4b-0b-e6-4e", Some(9));
+        let app = update(
+            app(),
+            Event::Reading(reading(vec![
+                device("Magic Trackpad", "30-82-16-f2-24-90", Some(85)),
+                low.clone(),
+                Device {
+                    connected: false,
+                    ..device("AirPods Pro", "74-15-f5-02-8e-38", Some(4))
+                },
+            ])),
+        );
+
+        assert_eq!(app.critical(), 1, "the disconnected 4% is history");
+        assert_eq!(app.connected().count(), 2);
+
+        let filtered = press(app, "/trackpad");
+        assert_eq!(filtered.rows().len(), 1, "the low device is off screen");
+        assert_eq!(filtered.critical(), 1, "and still counted");
+        assert_eq!(filtered.connected().count(), 2);
     }
 
     #[test]
@@ -666,13 +892,14 @@ pub(super) mod tests {
 
     #[test]
     fn readings_accumulate_into_the_trend_history() {
+        let an_hour_ago = Timestamp::from_unix(READ_AT.unix() - 3_600);
         let earlier = Snapshot {
-            read_at: Timestamp::from_unix(READ_AT.unix() - 3_600),
-            ..reading(vec![device(
-                "Magic Trackpad",
-                "30-82-16-f2-24-90",
-                Some(90),
-            )])
+            read_at: an_hour_ago,
+            devices: vec![Device {
+                read_at: an_hour_ago,
+                ..device("Magic Trackpad", "30-82-16-f2-24-90", Some(90))
+            }],
+            warnings: Vec::new(),
         };
         let app = update(app(), Event::Reading(earlier));
         let app = update(app, Event::Reading(three_devices()));

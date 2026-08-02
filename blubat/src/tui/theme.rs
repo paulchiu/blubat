@@ -1,7 +1,6 @@
 //! The dashboard's visual language: one accent, one level scale, one
 //! placeholder, so every view blubat grows reads as the same app.
 
-use blubat_core::{Direction, Trend};
 use ratatui::style::Color;
 
 /// Used for the app name, the selection marker and the keymap.
@@ -19,6 +18,20 @@ pub const CRITICAL_BELOW: u8 = 15;
 
 /// Cells in the battery bar.
 pub const BAR_WIDTH: usize = 12;
+
+/// Cells in the trend sparkline, which is as many recent levels as it draws.
+///
+/// Six is enough to answer which way a battery is going, which is the question
+/// the level on its own cannot.
+pub const SPARK_WIDTH: usize = 6;
+
+/// The sparkline's eight heights, lowest first.
+const SPARKS: [char; 8] = [
+    '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}', '\u{2588}',
+];
+
+/// Stands in for a cell no reading has reached yet.
+const NO_DATA: char = '\u{b7}';
 
 /// Green from 50, yellow from 15, red below it, dim for no reading at all.
 pub fn level_color(level: Option<u8>) -> Color {
@@ -59,27 +72,35 @@ pub fn battery_bar(level: Option<u8>) -> (String, String) {
     )
 }
 
-/// Which way a level is going and how fast, absent until history can say.
-pub fn trend(trend: Option<Trend>) -> String {
-    trend.map_or_else(
-        || UNKNOWN.to_string(),
-        |trend| format!("{} {}%/h", arrow(trend.direction), magnitude(trend.rate)),
-    )
-}
-
-fn arrow(direction: Direction) -> char {
-    match direction {
-        Direction::Rising => '\u{2191}',
-        Direction::Falling => '\u{2193}',
-        Direction::Flat => '\u{2192}',
-    }
-}
-
-/// A rate without its sign, which the arrow beside it already carries.
+/// Recent levels as a sparkline, oldest first and always [`SPARK_WIDTH`] cells.
 ///
-/// Clamped so a rate measured over a couple of seconds cannot widen the column.
-fn magnitude(rate: f64) -> u32 {
-    rate.abs().round().clamp(0.0, 999.0) as u32
+/// Scaled over the range the levels themselves cover rather than over nothing
+/// to full, since the question is which way a battery is going rather than how
+/// full it is. Cells no reading has reached yet are dots, so a device blubat
+/// has never sampled reads as no data rather than as a flat line.
+pub fn sparkline(levels: &[u8]) -> String {
+    let recent = &levels[levels.len().saturating_sub(SPARK_WIDTH)..];
+    let lowest = recent.iter().copied().min().unwrap_or_default();
+    let highest = recent.iter().copied().max().unwrap_or_default();
+
+    std::iter::repeat_n(NO_DATA, SPARK_WIDTH - recent.len())
+        .chain(recent.iter().map(|level| spark(*level, lowest, highest)))
+        .collect()
+}
+
+/// One level's height against the lowest and highest of the run it is in.
+fn spark(level: u8, lowest: u8, highest: u8) -> char {
+    let top = SPARKS.len() - 1;
+    let span = f64::from(highest.saturating_sub(lowest));
+    // A run that never changed is steady rather than empty, so it draws mid
+    // scale: along the bottom it would read as a flat empty battery.
+    let height = if span > 0.0 {
+        (f64::from(level.saturating_sub(lowest)) / span * top as f64).round() as usize
+    } else {
+        SPARKS.len() / 2
+    };
+
+    SPARKS[height.min(top)]
 }
 
 /// How long ago a reading was taken, in the largest unit that still says something.
@@ -96,10 +117,6 @@ pub fn age(seconds: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn trend_of(rate: f64, direction: Direction) -> String {
-        trend(Some(Trend { rate, direction }))
-    }
 
     #[test]
     fn the_level_scale_colours_each_band() {
@@ -150,17 +167,51 @@ mod tests {
     }
 
     #[test]
-    fn a_trend_reads_as_a_direction_and_a_rate() {
-        assert_eq!(trend_of(-4.2, Direction::Falling), "\u{2193} 4%/h");
-        assert_eq!(trend_of(10.0, Direction::Rising), "\u{2191} 10%/h");
-        assert_eq!(trend_of(0.0, Direction::Flat), "\u{2192} 0%/h");
-        assert_eq!(trend(None), UNKNOWN, "no history is not a flat line");
+    fn a_sparkline_is_always_the_same_width() {
+        for levels in [
+            vec![],
+            vec![50],
+            vec![10, 90],
+            vec![1, 2, 3, 4, 5, 6],
+            (0..40).collect(),
+        ] {
+            assert_eq!(
+                sparkline(&levels).chars().count(),
+                SPARK_WIDTH,
+                "at {levels:?}"
+            );
+        }
     }
 
     #[test]
-    fn a_rate_measured_over_seconds_cannot_widen_the_column() {
-        assert_eq!(trend_of(-7_200.0, Direction::Falling), "\u{2193} 999%/h");
-        assert_eq!(trend_of(f64::NAN, Direction::Flat), "\u{2192} 0%/h");
+    fn a_sparkline_draws_the_most_recent_levels_oldest_first() {
+        assert_eq!(sparkline(&[0, 20, 40, 60, 80, 100]), "▁▂▄▅▇█");
+        assert_eq!(
+            sparkline(&[9, 9, 0, 20, 40, 60, 80, 100]),
+            "▁▂▄▅▇█",
+            "an older reading than the line holds is dropped rather than scaled in"
+        );
+        assert_eq!(sparkline(&[100, 0]), "\u{b7}\u{b7}\u{b7}\u{b7}█▁");
+    }
+
+    #[test]
+    fn a_line_is_scaled_over_what_it_holds_rather_than_over_a_full_battery() {
+        assert_eq!(
+            sparkline(&[80, 81, 82]),
+            "\u{b7}\u{b7}\u{b7}▁▅█",
+            "three points apart still read as a climb"
+        );
+    }
+
+    #[test]
+    fn no_data_is_dots_and_an_unchanged_level_is_a_flat_line() {
+        assert_eq!(sparkline(&[]), "\u{b7}".repeat(SPARK_WIDTH));
+        assert_eq!(sparkline(&[77, 77, 77, 77, 77, 77]), "▅▅▅▅▅▅");
+        assert_eq!(
+            sparkline(&[0, 0, 0, 0, 0, 0]),
+            "▅▅▅▅▅▅",
+            "an empty battery is as flat as a full one"
+        );
     }
 
     #[test]

@@ -10,14 +10,17 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use blubat_core::Snapshot;
-use crossterm::event::{self, Event as Terminal, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event as Terminal, KeyCode, KeyEventKind, KeyModifiers};
 
 use super::app::{Event, Key};
 
 /// Merges keypresses and readings into the one channel the loop waits on.
 ///
-/// Both threads end once the returned receiver is dropped, and dropping the
-/// readings with them is what stops the poller.
+/// The readings thread ends once the returned receiver is dropped, which is
+/// what stops the poller. The keypress thread is parked inside a blocking
+/// terminal read and cannot notice, so it is detached: the process exit
+/// reclaims it, and anything that outlives the dashboard would have to hand it
+/// a way to be woken.
 pub fn events(readings: Receiver<Snapshot>) -> Receiver<Event> {
     let (sender, events) = mpsc::channel();
     let keys = sender.clone();
@@ -47,8 +50,8 @@ fn keypresses() -> impl Iterator<Item = Event> {
         loop {
             match event::read() {
                 Ok(terminal) => {
-                    if let Some(key) = pressed(&terminal) {
-                        return Some(Event::Key(key));
+                    if let Some(event) = pressed(&terminal) {
+                        return Some(event);
                     }
                 }
                 // The terminal is gone, so no key will ever arrive again.
@@ -58,31 +61,47 @@ fn keypresses() -> impl Iterator<Item = Event> {
     })
 }
 
-/// The key a keypress carries, absent for anything the dashboard cannot bind.
+/// The event a keypress carries, absent for anything the dashboard cannot bind.
 ///
-/// Releases and repeats are ignored so a held key acts once per press on the
-/// terminals that report them.
-fn pressed(terminal: &Terminal) -> Option<Key> {
+/// Ctrl+C is an interrupt rather than a key: raw mode stops the terminal
+/// turning it into a signal, so blubat owes the habit an answer of its own, and
+/// as a key it would type a `c` into the filter. Releases and repeats are
+/// ignored so a held key acts once per press on the terminals that report them.
+fn pressed(terminal: &Terminal) -> Option<Event> {
     match terminal {
-        Terminal::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-            KeyCode::Char(key) => Some(Key::Char(key)),
-            KeyCode::Enter => Some(Key::Enter),
-            KeyCode::Esc => Some(Key::Escape),
-            KeyCode::Backspace => Some(Key::Backspace),
-            _ => None,
-        },
+        Terminal::Key(key) if key.kind == KeyEventKind::Press => {
+            let control = key.modifiers.contains(KeyModifiers::CONTROL);
+
+            match key.code {
+                KeyCode::Char('c') if control => Some(Event::Interrupt),
+                KeyCode::Char(_) if control => None,
+                KeyCode::Char(key) => Some(Event::Key(Key::Char(key))),
+                KeyCode::Enter => Some(Event::Key(Key::Enter)),
+                KeyCode::Esc => Some(Event::Key(Key::Escape)),
+                KeyCode::Backspace => Some(Event::Key(Key::Backspace)),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{KeyEvent, KeyModifiers};
+    use crossterm::event::KeyEvent;
 
     use super::*;
 
     fn key(code: KeyCode, kind: KeyEventKind) -> Terminal {
         Terminal::Key(KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind))
+    }
+
+    fn control(code: KeyCode) -> Terminal {
+        Terminal::Key(KeyEvent::new_with_kind(
+            code,
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        ))
     }
 
     #[test]
@@ -132,7 +151,10 @@ mod tests {
             (KeyCode::Esc, Key::Escape),
             (KeyCode::Backspace, Key::Backspace),
         ] {
-            assert_eq!(pressed(&key(code, KeyEventKind::Press)), Some(expected));
+            assert_eq!(
+                pressed(&key(code, KeyEventKind::Press)),
+                Some(Event::Key(expected))
+            );
         }
 
         assert_eq!(
@@ -141,5 +163,23 @@ mod tests {
         );
         assert_eq!(pressed(&key(KeyCode::Tab, KeyEventKind::Press)), None);
         assert_eq!(pressed(&Terminal::Resize(80, 24)), None);
+    }
+
+    #[test]
+    fn ctrl_c_interrupts_and_no_other_chord_types_a_character() {
+        assert_eq!(
+            pressed(&control(KeyCode::Char('c'))),
+            Some(Event::Interrupt)
+        );
+        assert_eq!(
+            pressed(&control(KeyCode::Char('u'))),
+            None,
+            "a chord blubat does not bind is not the letter in it"
+        );
+        assert_eq!(
+            pressed(&key(KeyCode::Char('c'), KeyEventKind::Press)),
+            Some(Event::Key(Key::Char('c'))),
+            "and c on its own is still a c"
+        );
     }
 }

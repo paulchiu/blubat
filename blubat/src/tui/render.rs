@@ -11,13 +11,16 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Padding, Paragraph, Row, Table, TableState};
 
-use super::app::{App, KEYMAP, NOTES};
+use super::app::{App, KEYMAP, Mode, NOTES};
 use super::columns::{self, Column};
 use super::theme;
 use super::view::Rows;
 
 /// Kept in front of every name so rows stay aligned whatever the gutter holds.
 const GUTTER: &str = "  ";
+
+/// What separates two pieces of the status line, and the budget they cost.
+const GAP: &str = "   ";
 
 /// The selected row's gutter marker, which colour alone could not carry.
 const MARKER: &str = "\u{258e} ";
@@ -28,7 +31,16 @@ const ALERT: &str = "\u{25b2} ";
 /// Where the next typed character will land in the filter.
 const CURSOR: &str = "\u{2588}";
 
-pub fn render(frame: &mut Frame, app: &App) {
+/// Cells the alert is given, and the width below which it is not drawn at all.
+const ALERT_WIDTH: u16 = 14;
+
+/// Draws one frame of `app` into `table`, which carries the scroll offset.
+///
+/// The offset is the one piece of state a frame leaves behind: ratatui scrolls
+/// the table only as far as it takes to bring the selection back into view, so
+/// handing it a fresh state each frame would pin the selection to the last
+/// visible row.
+pub fn render(frame: &mut Frame, app: &App, table: &mut TableState) {
     let screen = frame.area();
     let [status, filter, devices, footer] = Layout::vertical([
         Constraint::Length(1),
@@ -41,30 +53,36 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     let rows = app.rows();
 
-    render_status(frame, app, &rows, status);
+    render_status(frame, app, status);
     frame.render_widget(filter_line(app, &rows), filter);
-    render_devices(frame, app, &rows, devices);
+    render_devices(frame, app, &rows, devices, table);
     frame.render_widget(keys_footer(app), footer);
 
-    if app.keymap_open {
+    if app.mode == Mode::Keymap {
         render_keymap(frame, screen);
     }
 }
 
 /// The one line of context above the table, with the alert count on the right.
-fn render_status(frame: &mut Frame, app: &App, rows: &Rows<'_>, area: Rect) {
+///
+/// The alert is drawn only where it fits whole: cut short it would read as a
+/// different count, which is the one thing on this line that must not be wrong.
+fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     let [left, right] =
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(14)]).areas(area);
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(ALERT_WIDTH)]).areas(area);
 
-    frame.render_widget(status_line(app, rows, left.width), left);
-    frame.render_widget(alert_line(rows.critical()), right);
+    frame.render_widget(status_line(app, left.width), left);
+
+    if right.width == ALERT_WIDTH {
+        frame.render_widget(alert_line(app.critical()), right);
+    }
 }
 
-fn status_line(app: &App, rows: &Rows<'_>, width: u16) -> Line<'static> {
+fn status_line(app: &App, width: u16) -> Line<'static> {
     const NAME: &str = "blubat";
 
     let warnings = warnings(app.warnings().len());
-    let spent = NAME.len() + 3 + warnings.content.chars().count();
+    let spent = NAME.len() + GAP.len() + warnings.content.chars().count();
     let room = usize::from(width).saturating_sub(spent);
 
     Line::from(vec![
@@ -72,7 +90,7 @@ fn status_line(app: &App, rows: &Rows<'_>, width: u16) -> Line<'static> {
             NAME,
             Style::new().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!("   {}", summary(app, rows, room)), Color::DarkGray),
+        Span::styled(format!("{GAP}{}", summary(app, room)), Color::DarkGray),
         warnings,
     ])
 }
@@ -81,13 +99,13 @@ fn status_line(app: &App, rows: &Rows<'_>, width: u16) -> Line<'static> {
 ///
 /// Assembled a piece at a time and cut short at `room` rather than truncated,
 /// so a narrow terminal loses the last detail whole instead of mid word.
-fn summary(app: &App, rows: &Rows<'_>, room: usize) -> String {
+fn summary(app: &App, room: usize) -> String {
     let poll = format!("poll {}", seconds(app.interval));
     let pieces = app.next_poll_in().map_or_else(
         || vec!["waiting for the first reading".to_string(), poll.clone()],
         |next| {
             vec![
-                format!("{} active", rows.active.len()),
+                format!("{} active", app.connected().count()),
                 format!("sort {}", app.view.sort.label()),
                 poll.clone(),
                 format!("next {}", seconds(next)),
@@ -99,7 +117,7 @@ fn summary(app: &App, rows: &Rows<'_>, room: usize) -> String {
         let extended = if line.is_empty() {
             piece
         } else {
-            format!("{line}   {piece}")
+            format!("{line}{GAP}{piece}")
         };
 
         if extended.chars().count() <= room {
@@ -115,7 +133,7 @@ fn summary(app: &App, rows: &Rows<'_>, room: usize) -> String {
 fn warnings(count: usize) -> Span<'static> {
     match count {
         0 => Span::raw(""),
-        count => Span::styled(format!("   {}", counted(count, "warning")), Color::Yellow),
+        count => Span::styled(format!("{GAP}{}", counted(count, "warning")), Color::Yellow),
     }
 }
 
@@ -135,13 +153,14 @@ fn alert_line(critical: usize) -> Line<'static> {
 /// layout keeps its breathing room the rest of the time.
 fn filter_line(app: &App, rows: &Rows<'_>) -> Line<'static> {
     let filter = &app.view.filter;
+    let typing = app.mode == Mode::Filtering;
 
-    if !filter.typing && !filter.narrows() {
+    if !typing && !filter.narrows() {
         return Line::default();
     }
 
-    let cursor = if filter.typing { CURSOR } else { "" };
-    let colour = if filter.typing {
+    let cursor = if typing { CURSOR } else { "" };
+    let colour = if typing {
         theme::ACCENT
     } else {
         Color::DarkGray
@@ -150,23 +169,27 @@ fn filter_line(app: &App, rows: &Rows<'_>) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("/{}{cursor}", filter.query), colour),
         Span::styled(
-            format!("   {}", counted(rows.len(), "match")),
+            format!("{GAP}{}", counted(rows.len(), "match")),
             Color::DarkGray,
         ),
     ])
 }
 
-fn render_devices(frame: &mut Frame, app: &App, rows: &Rows<'_>, area: Rect) {
+fn render_devices(
+    frame: &mut Frame,
+    app: &App,
+    rows: &Rows<'_>,
+    area: Rect,
+    table: &mut TableState,
+) {
     if rows.is_empty() {
         frame.render_widget(nothing_to_show(app), area);
         return;
     }
 
-    // The table owns the scroll offset that follows the selection, and the
-    // selection itself lives in `App`, so the state is built fresh each frame.
-    let mut state = TableState::new().with_selected(Some(table_row(rows, app.selected)));
+    table.select(Some(table_row(rows, app.selected)));
 
-    frame.render_stateful_widget(device_table(app, rows, area.width), area, &mut state);
+    frame.render_stateful_widget(device_table(app, rows, area.width), area, table);
 }
 
 /// Where the selected device sits among the table's rows.
@@ -292,14 +315,31 @@ fn cell<'a>(
             Cell::from(Span::styled(text, section.tint(colour)))
         }
         Column::Trend => Cell::from(Span::styled(
-            theme::trend(app.history.trend(&device.address)),
+            theme::sparkline(&recent_levels(app, device)),
             section.tint(if critical { Color::Red } else { Color::Gray }),
         )),
-        Column::Age => Cell::from(Span::styled(
+        Column::LastSeen => Cell::from(Span::styled(
             theme::age(app.now.unix().saturating_sub(device.read_at.unix())),
             section.tint(Color::DarkGray),
         )),
     }
+}
+
+/// The levels behind one device's sparkline, oldest first.
+///
+/// Taken from the newest end, since the line only has room for the most recent
+/// few and it is the recent ones the trend is about.
+fn recent_levels(app: &App, device: &Device) -> Vec<u8> {
+    let mut levels: Vec<u8> = app
+        .history
+        .samples(&device.address)
+        .rev()
+        .take(theme::SPARK_WIDTH)
+        .map(|sample| sample.level)
+        .collect();
+    levels.reverse();
+
+    levels
 }
 
 /// The name, behind the gutter that a critical device puts its mark in.
@@ -455,25 +495,35 @@ mod tests {
     use blubat_core::{ChargeState, Levels, Snapshot, Timestamp};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratatui::buffer::Cell as Drawn;
+    use ratatui::buffer::{Buffer, Cell as Drawn};
 
     use super::super::app::tests::{READ_AT, app, device, loaded, press, reading, three_devices};
     use super::super::app::{Event, Key, update};
     use super::super::glyph::Glyphs;
     use super::*;
 
-    /// What a real terminal of this size would show, one string per row.
+    /// The buffer left behind after drawing each of `apps` in turn.
+    ///
+    /// One table state throughout, as the loop keeps one, so a test can see
+    /// where the previous frame's scroll offset leaves the next one.
+    fn buffer_of(apps: &[&App], width: u16, height: u16) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("a test terminal");
+        let mut table = TableState::new();
+
+        for app in apps {
+            terminal
+                .draw(|frame| render(frame, app, &mut table))
+                .expect("a rendered frame");
+        }
+
+        terminal.backend().buffer().clone()
+    }
+
+    /// A buffer as one string per row.
     ///
     /// Trailing blanks are cut: they are invisible on screen and unreadable in
     /// an expected frame, and every difference that shows still shows.
-    fn drawn(app: &App, width: u16, height: u16) -> Vec<String> {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("a test terminal");
-
-        terminal
-            .draw(|frame| render(frame, app))
-            .expect("a rendered frame");
-
-        let buffer = terminal.backend().buffer();
+    fn rows_of(buffer: &Buffer) -> Vec<String> {
         buffer
             .content()
             .chunks(usize::from(buffer.area.width))
@@ -485,6 +535,27 @@ mod tests {
                     .to_string()
             })
             .collect()
+    }
+
+    /// What a real terminal of this size would show, one string per row.
+    fn drawn(app: &App, width: u16, height: u16) -> Vec<String> {
+        rows_of(&buffer_of(&[app], width, height))
+    }
+
+    /// The cell drawing the first character of `needle`, for asserting the
+    /// colours and weights a frame compared as text cannot carry.
+    fn cell_of<'a>(buffer: &'a Buffer, needle: &str) -> &'a Drawn {
+        let symbols: Vec<&str> = buffer.content().iter().map(Drawn::symbol).collect();
+        let wanted: Vec<String> = needle
+            .chars()
+            .map(|character| character.to_string())
+            .collect();
+        let start = symbols
+            .windows(wanted.len())
+            .position(|run| run.iter().zip(&wanted).all(|(drawn, want)| drawn == want))
+            .unwrap_or_else(|| panic!("`{needle}` is nowhere on screen"));
+
+        &buffer.content()[start]
     }
 
     /// The whole screen as one string, for asserting a line is somewhere on it.
@@ -530,16 +601,24 @@ mod tests {
             },
         ];
 
-        // An hour older reading of the same devices, so the trend column has
-        // something to measure and every frame below is reproducible.
-        let earlier = Snapshot {
-            read_at: Timestamp::from_unix(READ_AT.unix() - 3_600),
+        // Five earlier readings a minute apart, each five points fuller, so the
+        // sparkline has a full run to draw and every frame below is reproducible.
+        let earlier = |step: u8| Snapshot {
+            read_at: minutes_before(step),
             devices: devices
                 .iter()
                 .map(|device| Device {
                     levels: Levels {
-                        main: device.levels.main.map(|level| level.saturating_add(5)),
+                        main: device
+                            .levels
+                            .main
+                            .map(|level| level.saturating_add(5 * step)),
                         ..device.levels
+                    },
+                    read_at: if device.connected {
+                        minutes_before(step)
+                    } else {
+                        device.read_at
                     },
                     ..device.clone()
                 })
@@ -547,23 +626,45 @@ mod tests {
             warnings: Vec::new(),
         };
 
-        let app = update(app(), Event::Reading(earlier));
+        let app = (1..=5).rev().fold(app(), |app, step| {
+            update(app, Event::Reading(earlier(step)))
+        });
 
         update(app, Event::Reading(reading(devices)))
+    }
+
+    fn minutes_before(minutes: u8) -> Timestamp {
+        Timestamp::from_unix(READ_AT.unix() - i64::from(minutes) * 60)
+    }
+
+    /// More devices than a test terminal can show at once, each one named
+    /// distinctly enough to say which of them is on screen.
+    fn crowd(count: u8) -> App {
+        let devices = (0..count)
+            .map(|n| {
+                device(
+                    &format!("Device {n:02}"),
+                    &format!("aa-bb-cc-dd-ee-{n:02x}"),
+                    Some(50),
+                )
+            })
+            .collect();
+
+        update(app(), Event::Reading(reading(devices)))
     }
 
     #[test]
     fn the_dashboard_draws_the_frame_it_is_specified_to_draw() {
         let expected = " blubat   3 active   sort level   poll 5s   next 5s                                    ▲ 1 critical
 
-     Device                   Type         Battery         % State       Trend    Age
- ▎ ▲ Soundcore Liberty        audio        █░░░░░░░░░░░  12% on battery  ↓ 5%/h   now
-     Magic Trackpad           trackpad     ███░░░░░░░░░  23% + charging  ↓ 5%/h   now
-     MX Keys M Mac            keyboard     ████████░░░░  67% on battery  ↓ 5%/h   now
+     Device                   Type         Battery         % State       Trend  Last seen
+ ▎ ▲ Soundcore Liberty        audio        █░░░░░░░░░░░  12% on battery  █▇▅▄▂▁ now
+     Magic Trackpad           trackpad     ███░░░░░░░░░  23% + charging  █▇▅▄▂▁ now
+     MX Keys M Mac            keyboard     ████████░░░░  67% on battery  █▇▅▄▂▁ now
 
    inactive (2)
-     AirPods Pro              audio        █████░░░░░░░  45% last seen   --       3h ago
-     MX Master 3S             mouse        ░░░░░░░░░░░░   -- unreported  --       2d ago
+     AirPods Pro              audio        █████░░░░░░░  45% last seen   ······ 3h ago
+     MX Master 3S             mouse        ░░░░░░░░░░░░   -- unreported  ······ 2d ago
 
 
 
@@ -674,25 +775,47 @@ mod tests {
         }
     }
 
+    /// The overlay covers what is under it, which only a whole frame can say:
+    /// the box, its border, the keys it lists and the dashboard rows it hides
+    /// are one assertion rather than four substrings on a screen that already
+    /// contains them.
     #[test]
     fn the_keymap_overlay_covers_the_dashboard_and_says_what_is_still_to_come() {
-        let open = update(loaded(), Event::Key(Key::Char('?')));
-        let rows = drawn(&open, 100, 30);
-        let screen = rows.join("\n");
+        let expected = " blubat   3 active   sort level   poll 5s   next 5s                                    ▲ 1 critical
 
-        assert!(screen.contains("keys"), "the overlay is titled\n{screen}");
-        assert!(screen.contains("j/k"), "and lists the keymap\n{screen}");
-        assert!(
-            screen.contains("detail view, which arrives later"),
-            "enter is advertised as not yet doing anything\n{screen}"
-        );
-        assert!(
-            screen.contains("this session only"),
-            "and hiding is advertised as lasting one run\n{screen}"
-        );
-        assert!(
-            rows.last().expect("a footer row").contains("? close"),
-            "the footer follows the view"
+     Device                   Type         Battery         % State       Trend  Last seen
+ ▎ ▲ Soundcore Liberty        audio        █░░░░░░░░░░░  12% on battery  █▇▅▄▂▁ now
+     Magic Trackpad           trackpad     ███░░░░░░░░░  23% + charging  █▇▅▄▂▁ now
+     MX Keys M Mac            keyboard     ████████░░░░  67% on battery  █▇▅▄▂▁ now
+
+   inactive (2)
+     AirPods Pro              audio        █████░░░░░░░  45% last seen   ······ 3h ago
+     MX Master 3┌ keys ────────────────────────────────────────────────────────────┐go
+                │     q  quit                                                      │
+                │   j/k  move                                                      │
+                │ enter  detail                                                    │
+                │     s  sort                                                      │
+                │     /  filter                                                    │
+                │     h  hide                                                      │
+                │     H  show hidden                                               │
+                │     ?  help                                                      │
+                │                                                                  │
+                │ enter opens the detail view, which arrives later.                │
+                │ h hides for this session only; a lasting hide arrives later.     │
+                └──────────────────────────────────────────────────────────────────┘
+
+
+
+
+
+
+
+ ? close  q quit";
+        assert_frame(
+            &update(dashboard(), Event::Key(Key::Char('?'))),
+            100,
+            30,
+            expected,
         );
     }
 
@@ -828,17 +951,129 @@ mod tests {
     #[test]
     fn no_size_a_terminal_can_be_panics_the_render() {
         let open = update(loaded(), Event::Key(Key::Char('?')));
-        let filtering = press(dashboard(), "/a");
+        let states = [
+            app(),
+            loaded(),
+            open.clone(),
+            press(dashboard(), "/a"),
+            dashboard(),
+        ];
 
-        for width in 20..=120 {
-            for app in [&loaded(), &open, &filtering, &dashboard()] {
-                drawn(app, width, 30);
+        for app in &states {
+            // Densest under the minimum width, which is the band the guarantee
+            // is about: a column can be half a cell wide and a line can have
+            // nowhere at all to put itself.
+            for width in 1..=40 {
+                for height in 1..=8 {
+                    drawn(app, width, height);
+                }
+            }
+            for width in 1..=120 {
+                for height in [1, 3, 30] {
+                    drawn(app, width, height);
+                }
             }
         }
-        for (width, height) in [(1, 1), (1, 30), (20, 3), (40, 10), (200, 60)] {
+        for (width, height) in [(1, 1), (5, 5), (1, 30), (20, 3), (40, 10), (200, 60)] {
             drawn(&dashboard(), width, height);
             drawn(&open, width, height);
         }
+    }
+
+    #[test]
+    fn the_alert_is_drawn_whole_or_not_at_all() {
+        let whole = format!("{ALERT}1 critical");
+
+        for width in 1..=120 {
+            let screen = drawn(&dashboard(), width, 30).join("\n");
+
+            assert!(
+                screen.contains(&whole) || !screen.contains("critical"),
+                "a cut alert reads as a different count, at {width}:\n{screen}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_table_taller_than_the_terminal_scrolls_with_the_selection() {
+        let top = crowd(40);
+        let bottom = press(top.clone(), &"j".repeat(39));
+        let up = press(bottom.clone(), "k");
+
+        let at_the_end = rows_of(&buffer_of(&[&top, &bottom], 100, 14)).join("\n");
+        assert!(
+            at_the_end.contains("Device 39"),
+            "the table scrolls to the selection\n{at_the_end}"
+        );
+        assert!(!at_the_end.contains("Device 00"), "{at_the_end}");
+
+        let rows = rows_of(&buffer_of(&[&top, &bottom, &up], 100, 14));
+        let marked = rows
+            .iter()
+            .find(|line| line.contains(MARKER))
+            .expect("a marked row");
+
+        assert!(marked.contains("Device 38"), "{marked}");
+        assert!(
+            rows.iter().any(|line| line.contains("Device 39")),
+            "and moving up does not drag the rows above it along\n{}",
+            rows.join("\n")
+        );
+    }
+
+    #[test]
+    fn a_dashboard_with_nothing_connected_selects_through_the_inactive_section() {
+        let asleep = update(
+            app(),
+            Event::Reading(reading(
+                [
+                    ("Magic Trackpad", "30-82-16-f2-24-90"),
+                    ("MX Keys M Mac", "de-df-38-f0-46-9b"),
+                ]
+                .into_iter()
+                .map(|(name, address)| Device {
+                    connected: false,
+                    ..device(name, address, Some(50))
+                })
+                .collect(),
+            )),
+        );
+
+        assert!(line_containing(&asleep, "blubat").contains("0 active"));
+        assert!(!line_containing(&asleep, "inactive (2)").contains(MARKER));
+        assert!(line_containing(&asleep, "Magic Trackpad").contains(MARKER));
+        assert!(line_containing(&press(asleep, "j"), "MX Keys M Mac").contains(MARKER));
+    }
+
+    /// Colour and weight carry as much of this layout as the glyphs do: the
+    /// dimmed inactive section, the level scale, the selection tint and the
+    /// critical red are all invisible to a frame compared as text.
+    #[test]
+    fn the_palette_reaches_the_buffer_it_is_drawn_into() {
+        let buffer = buffer_of(&[&press(dashboard(), "j")], 100, 30);
+        let cell = |needle| cell_of(&buffer, needle);
+
+        assert_eq!(cell("blubat").fg, theme::ACCENT);
+        assert!(cell("blubat").modifier.contains(Modifier::BOLD));
+
+        assert_eq!(cell("Soundcore").fg, Color::LightRed, "a critical name");
+        assert_eq!(cell("12%").fg, Color::Red, "and the level under it");
+        assert!(cell("12%").modifier.contains(Modifier::BOLD));
+        assert_eq!(cell("67%").fg, Color::Green);
+
+        assert_eq!(
+            cell("Magic Trackpad").bg,
+            theme::SELECTION_BG,
+            "the selected row is tinted rather than inverted"
+        );
+        assert_eq!(cell("MX Keys").bg, Color::Reset);
+
+        assert_eq!(
+            cell("AirPods Pro").fg,
+            Color::DarkGray,
+            "the inactive section is dim throughout"
+        );
+        assert_eq!(cell("45%").fg, Color::DarkGray);
     }
 
     #[test]

@@ -8,8 +8,6 @@ use std::collections::BTreeSet;
 
 use blubat_core::{Address, Device};
 
-use super::theme;
-
 /// The order the table lists devices in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Sort {
@@ -41,12 +39,13 @@ impl Sort {
     }
 }
 
-/// The incremental filter: what has been typed, and whether it is being typed.
+/// The incremental filter: whatever has been typed into it so far.
+///
+/// Whether it is still being typed is the dashboard's mode rather than a field
+/// here, so the query and the keyboard cannot disagree about who owns a key.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Filter {
     pub query: String,
-    /// While true every key is text, which is what makes the filter live.
-    pub typing: bool,
 }
 
 impl Filter {
@@ -124,17 +123,6 @@ impl<'a> Rows<'a> {
 
     pub fn get(&self, index: usize) -> Option<&'a Device> {
         self.all().nth(index)
-    }
-
-    /// Connected devices low enough to want attention.
-    ///
-    /// Disconnected ones can never count: their level is what macOS last
-    /// persisted, so it is history rather than an alert.
-    pub fn critical(&self) -> usize {
-        self.active
-            .iter()
-            .filter(|device| theme::is_critical(device.active_level()))
-            .count()
     }
 }
 
@@ -214,7 +202,6 @@ mod tests {
         View {
             filter: Filter {
                 query: query.to_string(),
-                typing: false,
             },
             ..View::default()
         }
@@ -234,14 +221,6 @@ mod tests {
             "the inactive section is selected through last"
         );
         assert_eq!(rows.get(4), None);
-    }
-
-    #[test]
-    fn only_a_live_low_reading_counts_as_critical() {
-        let devices = devices();
-        let rows = Rows::of(&devices, &View::default());
-
-        assert_eq!(rows.critical(), 1, "the disconnected 4% is history");
     }
 
     #[test]
@@ -376,7 +355,6 @@ mod tests {
         let rows = Rows::of(&[], &View::default());
 
         assert!(rows.is_empty());
-        assert_eq!(rows.critical(), 0);
         assert_eq!(names(rows.all()), Vec::<String>::new());
     }
 }

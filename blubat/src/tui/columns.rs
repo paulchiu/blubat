@@ -17,7 +17,7 @@ pub enum Column {
     Level,
     State,
     Trend,
-    Age,
+    LastSeen,
 }
 
 impl Column {
@@ -29,7 +29,7 @@ impl Column {
         Column::Level,
         Column::State,
         Column::Trend,
-        Column::Age,
+        Column::LastSeen,
     ];
 
     /// The order columns are given up in as the terminal narrows.
@@ -40,7 +40,7 @@ impl Column {
     /// here: they are the reading itself, so below the width that holds them
     /// the table truncates rather than drops.
     const GIVEN_UP: [Column; 5] = [
-        Column::Age,
+        Column::LastSeen,
         Column::Trend,
         Column::Kind,
         Column::Bar,
@@ -55,7 +55,7 @@ impl Column {
             Column::Level => "%",
             Column::State => "State",
             Column::Trend => "Trend",
-            Column::Age => "Age",
+            Column::LastSeen => "Last seen",
         }
     }
 
@@ -66,8 +66,8 @@ impl Column {
             Column::Kind | Column::Bar => 12,
             Column::Level => 4,
             Column::State => 11,
-            Column::Trend => 8,
-            Column::Age => 9,
+            Column::Trend => 6,
+            Column::LastSeen => 9,
         }
     }
 
@@ -123,26 +123,32 @@ fn needed(columns: &[Column]) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::theme;
     use super::*;
 
+    /// What fits, written out at each width where the set of columns changes.
+    ///
+    /// Written out rather than derived from [`Column::GIVEN_UP`], so reordering
+    /// the drop order or changing a column's width fails here rather than
+    /// quietly redefining what the test asserts.
     #[test]
-    fn a_wide_terminal_shows_every_column() {
-        assert_eq!(fitting(100), Column::ALL);
-        assert_eq!(fitting(200), Column::ALL);
-    }
+    fn each_width_keeps_the_columns_the_drop_order_leaves_it() {
+        use Column::{Bar, Kind, Level, Name, State, Trend};
 
-    #[test]
-    fn columns_are_given_up_in_the_documented_order() {
-        // The narrowest terminal a column survives on: the first column given
-        // up is the one that needs the most room to come back.
-        let survives_at = |column| (0..=200).find(|width| fitting(*width).contains(&column));
-        let thresholds: Vec<Option<u16>> =
-            Column::GIVEN_UP.iter().copied().map(survives_at).collect();
+        let table: [(u16, &[Column]); 8] = [
+            (200, &Column::ALL),
+            (76, &Column::ALL),
+            (75, &[Name, Kind, Bar, Level, State, Trend]),
+            (65, &[Name, Kind, Bar, Level, State]),
+            (58, &[Name, Bar, Level, State]),
+            (45, &[Name, Level, State]),
+            (32, &[Name, Level]),
+            (0, &[Name, Level]),
+        ];
 
-        assert!(
-            thresholds.windows(2).all(|pair| pair[0] > pair[1]),
-            "{thresholds:?}"
-        );
+        for (width, columns) in table {
+            assert_eq!(fitting(width).as_slice(), columns, "at {width}");
+        }
     }
 
     #[test]
@@ -182,6 +188,12 @@ mod tests {
         for column in Column::ALL {
             assert!(!column.header().is_empty());
             assert!(column.floor() <= column.width());
+            assert!(
+                column.header().len() <= usize::from(column.width()),
+                "{column:?} cannot print its own header"
+            );
         }
+
+        assert!(usize::from(Column::Trend.width()) >= theme::SPARK_WIDTH);
     }
 }

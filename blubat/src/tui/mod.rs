@@ -16,7 +16,7 @@ mod terminal;
 mod theme;
 mod view;
 
-use std::io::{self, IsTerminal};
+use std::io;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 
@@ -28,9 +28,10 @@ use glyph::Glyphs;
 
 /// How often the dashboard reads while someone is watching it.
 ///
-/// Faster than the core default, which is set for a daemon polling in the
-/// background: the fast tier is a single digit millisecond IOKit read, so a
-/// dashboard on screen can afford one every few seconds.
+/// Faster than the core's foreground default because a dashboard on screen is
+/// being read as it changes: the fast tier is a single digit millisecond IOKit
+/// read, so it can afford one every few seconds. Configuration takes this over
+/// once the config file lands, and the core keeps the default it overrides.
 const TIERS: Tiers = Tiers {
     fast: Duration::from_secs(5),
     slow: Duration::from_secs(300),
@@ -43,13 +44,11 @@ const TIERS: Tiers = Tiers {
 const REDRAW: Duration = Duration::from_millis(250);
 
 /// Opens the dashboard and holds the terminal until the user quits.
+///
+/// The caller decides there is a terminal to take: `blubat` piped into
+/// something has a reading to offer instead, and that choice belongs where the
+/// bare invocation is handled rather than here.
 pub fn run() -> Result<(), Failure> {
-    if !io::stdout().is_terminal() {
-        return Err(Failure::Error(
-            "the dashboard needs a terminal; run `blubat list` for a reading instead".to_string(),
-        ));
-    }
-
     let events = events::events(blubat_core::poll(TIERS));
     let mut session = terminal::Session::open()?;
     let mut app = App::new(TIERS.fast, Timestamp::now(), Glyphs::detected());
@@ -88,7 +87,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_dashboard_polls_faster_than_a_background_daemon_does() {
+    fn the_dashboard_polls_faster_than_the_core_default_it_overrides() {
         assert!(TIERS.fast < Tiers::default().fast);
         assert!(
             REDRAW < TIERS.fast,
