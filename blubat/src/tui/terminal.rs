@@ -38,6 +38,20 @@ impl Session {
             .draw(|frame| render(frame, app, table))
             .map(|_| ())
     }
+
+    /// Leaves raw mode and the alternate screen for as long as `during` runs,
+    /// then takes them back, the same way `open` first did.
+    ///
+    /// What runs in between owns the real terminal, which is what the editor
+    /// `c` opens needs: a child process inherits this process's stdio, and
+    /// that is the dashboard's screen until `during` hands it back.
+    pub fn suspended<T>(&mut self, during: impl FnOnce() -> T) -> io::Result<T> {
+        ratatui::try_restore()?;
+        let result = during();
+        self.terminal = ratatui::try_init()?;
+
+        Ok(result)
+    }
 }
 
 impl Drop for Session {

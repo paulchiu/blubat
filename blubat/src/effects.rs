@@ -201,13 +201,13 @@ impl Effects {
         Config::load(&self.config_file).map_err(|error| error.to_string())
     }
 
-    /// Writes the dashboard's hidden devices back, which `h` asks for.
+    /// Writes the dashboard table back, which `h` or `i` ask for.
     ///
-    /// The only write blubat makes to that file, and the reason the reload above
-    /// and this sit together: they are the two ends of the one file blubat both
-    /// reads and, in this one table, maintains.
-    pub fn save_hidden(&self, hidden: &[String]) -> Result<(), String> {
-        config::save_hidden(&self.config_file, hidden)
+    /// The only table blubat writes to that file, and the reason the reload
+    /// above and this sit together: they are the two ends of the one file
+    /// blubat both reads and, in this one table, maintains.
+    pub fn save_dashboard(&self, hidden: &[String], hide_inactive: bool) -> Result<(), String> {
+        config::save_dashboard(&self.config_file, hidden, hide_inactive)
     }
 
     /// Writes the state file, and only when the last reading moved anything.

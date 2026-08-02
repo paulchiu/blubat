@@ -869,7 +869,7 @@ mod tests {
 
     #[test]
     fn the_dashboard_draws_the_frame_it_is_specified_to_draw() {
-        let expected = " blubat   3 active   sort level   poll 5s   next 5s                                                        ▲ 1 critical
+        let expected = " blubat   3 active   sort level   poll 5s   next 5s                                                                  ▲ 1 critical
 
      Device                   Type         Battery         % State       Trend  Last seen
  ▎ ▲ Soundcore Liberty        audio        █░░░░░░░░░░░   8% on battery  █▇▅▄▂▁ now
@@ -898,8 +898,8 @@ mod tests {
 
 
 
- q quit  j/k move  enter detail  s sort  / filter  h hide  H show hidden  i hide inactive  r reload  ? help";
-        assert_frame(&dashboard(), 120, 30, expected);
+ q quit  j/k move  enter detail  s sort  / filter  h hide  H show hidden  i hide inactive  r reload  c edit config  ? help";
+        assert_frame(&dashboard(), 130, 30, expected);
     }
 
     #[test]
@@ -972,7 +972,7 @@ mod tests {
 
     #[test]
     fn the_footer_carries_the_keys_of_the_view_on_screen() {
-        let dashboard = drawn(&loaded(), 120, 30);
+        let dashboard = drawn(&loaded(), 130, 30);
         let footer = dashboard.last().expect("a footer row").clone();
 
         for key in [
@@ -985,6 +985,7 @@ mod tests {
             "H show hidden",
             "i hide inactive",
             "r reload",
+            "c edit config",
             "? help",
         ] {
             assert!(footer.contains(key), "{key} is missing from `{footer}`");
@@ -1000,30 +1001,30 @@ mod tests {
         let expected = " blubat   3 active   sort level   poll 5s   next 5s                                    ▲ 1 critical
 
      Device                   Type         Battery         % State       Trend  Last seen
- ▎ ▲ Soundcore Liberty        audio        █░░░░░░░░░░░   8% on battery  █▇▅▄▂▁ now
-     Magic Trackpad           trackpad     ███░░░░░░░░░  23% + charging  █▇▅▄▂▁ now
-     MX Keys M M┌ keys ────────────────────────────────────────────────────────────┐
-                │         q  quit                                                  │
-   inactive (2) │       j/k  move                                                  │
-     AirPods Pro│     enter  detail                                                │go
-     MX Master 3│         s  sort                                                  │go
-                │         /  filter                                                │
-                │         h  hide                                                  │
+ ▎ ▲ Soundcore L┌ keys ────────────────────────────────────────────────────────────┐
+     Magic Track│         q  quit                                                  │
+     MX Keys M M│       j/k  move                                                  │
+                │     enter  detail                                                │
+   inactive (2) │         s  sort                                                  │
+     AirPods Pro│         /  filter                                                │go
+     MX Master 3│         h  hide                                                  │go
                 │         H  show hidden                                           │
                 │         i  hide inactive                                         │
                 │         r  reload                                                │
+                │         c  edit config                                           │
                 │         ?  help                                                  │
                 │                                                                  │
                 │   in the detail view                                             │
                 │ esc/enter  back                                                  │
+                │       j/k  next/previous                                         │
                 │         q  quit                                                  │
                 │                                                                  │
                 │ the detail chart is this run only; a restart starts it empty.    │
-                │ h lasts: it is the one write blubat makes to the config file.    │
+                │ h and i both last: together they are the one table blubat writes │
                 │ a hidden device is hidden here only, never unpaired from macOS.  │
                 │ r re-reads the config file; one it cannot read changes nothing.  │
+                │ c opens the config file in $EDITOR and reloads it once you retur │
                 └──────────────────────────────────────────────────────────────────┘
-
 
 
  ? close  q quit";
@@ -1487,7 +1488,7 @@ mod tests {
 ││                                                                                                ││
 ││                                                                                                ││
 │╰────────────────────────────────────────────────────────────────────────────────────────────────╯│
-│esc/enter back  q quit                                                                            │
+│esc/enter back  j/k next/previous  q quit                                                         │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯";
         assert_frame(&detail(), 100, 30, expected);
     }

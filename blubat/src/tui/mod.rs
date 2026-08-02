@@ -11,6 +11,7 @@
 mod app;
 mod columns;
 mod detail;
+pub(crate) mod editor;
 mod events;
 mod glyph;
 mod journal;
@@ -28,6 +29,7 @@ use crate::effects::{Effects, Observed};
 use crate::hooks::Outcome;
 use crate::{Failure, lock};
 use app::{App, Event, Notice, update};
+use editor::{Cli as EditorCli, Editor};
 use glyph::Glyphs;
 use theme::Look;
 
@@ -67,6 +69,7 @@ pub fn run(paths: &Paths) -> Result<(), Failure> {
     // stands for the whole session.
     let mut effects = effects.deferring_to(move || !owned);
     let mut session = terminal::Session::open()?;
+    let editor = EditorCli;
     let mut app = App {
         notice: notice([unreadable, stale_state, unlocked]),
         advertised: effects.advertised().clone(),
@@ -103,10 +106,21 @@ pub fn run(paths: &Paths) -> Result<(), Failure> {
         if app.reload {
             app = update(app, Event::Reloaded(effects.reload()));
         }
-        if app.save_hidden {
-            let written = effects.save_hidden(&app.view.hidden);
+        if app.save_dashboard {
+            let written = effects.save_dashboard(&app.view.hidden, app.view.hide_inactive);
 
             app = update(app, Event::Saved(written));
+        }
+        if app.edit_config {
+            // The real terminal for as long as the editor holds it; a success
+            // asks the reducer for the same reload `r` uses, which the loop
+            // picks up on the very next pass through here.
+            let outcome = session.suspended(|| editor.edit(paths.config_file()))?;
+
+            app = update(
+                app,
+                Event::Edited(outcome.map_err(|failure| failure.to_string())),
+            );
         }
     }
 
