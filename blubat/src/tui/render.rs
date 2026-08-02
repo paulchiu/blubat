@@ -11,8 +11,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Padding, Paragraph, Row, Table, TableState};
 
-use super::app::{App, KEYMAP, Mode, NOTES, Notice};
+use super::app::{App, Binding, DETAIL_KEYS, KEYMAP, Mode, NOTES, Notice};
 use super::columns::{self, Column};
+use super::detail;
 use super::theme::{self, Palette};
 use super::view::Rows;
 
@@ -42,6 +43,14 @@ const ALERT_WIDTH: u16 = 14;
 /// visible row.
 pub fn render(frame: &mut Frame, app: &App, table: &mut TableState) {
     let screen = frame.area();
+
+    // The detail view replaces the dashboard rather than covering it, and it
+    // draws one device, so a mode holding no device falls back to the table.
+    if let (Mode::Detail, Some(device)) = (app.mode, app.current()) {
+        detail::render(frame, app, device, screen);
+        return;
+    }
+
     // The notice takes a line only while there is one, so the dashboard keeps
     // the layout it usually has.
     let [status, notice, filter, devices, footer] = Layout::vertical([
@@ -410,14 +419,18 @@ fn bar(
 
 /// What a device is doing, which is not always something it is doing.
 ///
-/// A device no source has a level for is unreported rather than absent, and a
-/// disconnected one's level is labelled last seen, since macOS keeps reporting
-/// it with no timestamp long after the device went away.
+/// A device no source has a level for is unreported rather than absent; one
+/// that has stopped reporting is stale, which is the same rule the `stale`
+/// event is raised by; and a disconnected one's level is labelled last seen,
+/// since macOS keeps reporting it with no timestamp long after the device went
+/// away.
 fn state(app: &App, device: &Device, critical: bool) -> (String, Color) {
     let palette = app.look.palette;
 
     if !device.has_battery() {
         ("unreported".to_string(), palette.dim)
+    } else if app.is_stale(device) {
+        ("stale".to_string(), palette.low)
     } else if !device.connected {
         ("last seen".to_string(), palette.dim)
     } else if device.charge == ChargeState::Charging {
@@ -457,7 +470,7 @@ fn nothing_to_show(app: &App) -> Paragraph<'static> {
 }
 
 /// The keys live in the current view, which is what makes the footer contextual.
-fn keys_footer(app: &App) -> Line<'static> {
+pub(super) fn keys_footer(app: &App) -> Line<'static> {
     let palette = app.look.palette;
     let spans = app
         .keys()
@@ -474,8 +487,12 @@ fn keys_footer(app: &App) -> Line<'static> {
 }
 
 /// The full keymap, centred over the dashboard rather than replacing it.
+///
+/// It lists the detail view's keys as well as the dashboard's, since the
+/// overlay is the one place both sets can be read at once: inside the detail
+/// view only its own footer is on screen.
 fn render_keymap(frame: &mut Frame, screen: Rect, palette: Palette) {
-    let height = KEYMAP.len() + NOTES.len() + 3;
+    let height = KEYMAP.len() + DETAIL_KEYS.len() + NOTES.len() + 5;
     let area = centred(screen, 68, u16::try_from(height).unwrap_or(u16::MAX));
 
     frame.render_widget(Clear, area);
@@ -483,17 +500,22 @@ fn render_keymap(frame: &mut Frame, screen: Rect, palette: Palette) {
 }
 
 fn keymap(palette: Palette) -> Paragraph<'static> {
-    let keys = KEYMAP.iter().map(|binding| {
-        Line::from(vec![
-            Span::styled(format!("{:>5}  ", binding.keys), palette.accent),
-            Span::raw(binding.label),
-        ])
-    });
+    let bound = |bindings: &'static [Binding]| {
+        bindings.iter().map(move |binding| {
+            Line::from(vec![
+                Span::styled(format!("{:>9}  ", binding.keys), palette.accent),
+                Span::raw(binding.label),
+            ])
+        })
+    };
+    let heading = Line::from(Span::styled("  in the detail view", palette.dim));
     let notes = NOTES
         .iter()
         .map(|note| Line::from(Span::styled(*note, palette.dim)));
-    let lines = keys
-        .chain(std::iter::once(Line::default()))
+    let lines = bound(&KEYMAP)
+        .chain([Line::default(), heading])
+        .chain(bound(&DETAIL_KEYS))
+        .chain([Line::default()])
         .chain(notes)
         .collect::<Vec<_>>();
 
@@ -535,7 +557,7 @@ fn seconds(duration: std::time::Duration) -> String {
 
 #[cfg(test)]
 mod tests {
-    use blubat_core::{ChargeState, Levels, Snapshot, Timestamp};
+    use blubat_core::{ChargeState, Levels, Raised, Snapshot, Timestamp};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::{Buffer, Cell as Drawn};
@@ -691,6 +713,95 @@ mod tests {
         Timestamp::from_unix(READ_AT.unix() - i64::from(minutes) * 60)
     }
 
+    /// One device's readings over the two hours before now, a quarter of an
+    /// hour apart and `step` points fuller each time.
+    ///
+    /// An injected clock and an injected history throughout: the chart, the
+    /// rate and the estimate the detail view draws are all derived from these
+    /// stamps, so nothing below depends on when or where it is run.
+    fn charging_up(device: &Device, step: u8) -> App {
+        let at = |quarter: i64| Timestamp::from_unix(READ_AT.unix() - quarter * 900);
+        let earlier = |quarter: i64| Snapshot {
+            read_at: at(quarter),
+            devices: vec![Device {
+                levels: Levels {
+                    main: device.levels.main.map(|level| {
+                        level.saturating_sub(step * u8::try_from(quarter).unwrap_or(0))
+                    }),
+                    ..device.levels
+                },
+                read_at: at(quarter),
+                ..device.clone()
+            }],
+            degraded: false,
+            warnings: Vec::new(),
+        };
+
+        let app = (1..=8).rev().fold(app(), |app, quarter| {
+            update(app, Event::Reading(earlier(quarter)))
+        });
+
+        update(app, Event::Reading(reading(vec![device.clone()])))
+    }
+
+    fn raised(device: &Device, event: blubat_core::Event, level: u8, seconds_ago: i64) -> Raised {
+        Raised {
+            event,
+            device: device.name.clone(),
+            address: device.address.clone(),
+            level: Some(level),
+            previous: None,
+            charge: device.charge,
+            source: device.source,
+            threshold: Some(20),
+            cycle: 0,
+            at: Timestamp::from_unix(READ_AT.unix() - seconds_ago),
+        }
+    }
+
+    /// A charging trackpad on its own detail view, with two hours of history
+    /// behind it and the two events that history raised.
+    fn detail() -> App {
+        let trackpad = Device {
+            charge: ChargeState::Charging,
+            ..typed(
+                "Paul\u{2019}s Magic Trackpad",
+                "trackpad",
+                "30-82-16-f2-24-90",
+                Some(23),
+            )
+        };
+        let app = charging_up(&trackpad, 2);
+        let app = update(
+            app,
+            Event::Raised(vec![
+                raised(&trackpad, blubat_core::Event::LowBattery, 19, 3_600),
+                raised(&trackpad, blubat_core::Event::CriticalBattery, 9, 1_800),
+            ]),
+        );
+
+        update(app, Event::Key(Key::Enter))
+    }
+
+    /// The same view over a device that reports three batteries, which is what
+    /// the sub level rows exist for.
+    fn airpods() -> App {
+        let airpods = Device {
+            levels: Levels {
+                main: None,
+                left: Some(100),
+                right: Some(97),
+                case: Some(68),
+            },
+            ..typed("AirPods Pro", "audio", "74-15-f5-02-8e-38", None)
+        };
+
+        update(
+            update(app(), Event::Reading(reading(vec![airpods]))),
+            Event::Key(Key::Enter),
+        )
+    }
+
     /// More devices than a test terminal can show at once, each one named
     /// distinctly enough to say which of them is on screen.
     fn crowd(count: u8) -> App {
@@ -717,7 +828,7 @@ mod tests {
      MX Keys M Mac            keyboard     ████████░░░░  67% on battery  █▇▅▄▂▁ now
 
    inactive (2)
-     AirPods Pro              audio        █████░░░░░░░  45% last seen   ······ 3h ago
+     AirPods Pro              audio        █████░░░░░░░  45% stale       ······ 3h ago
      MX Master 3S             mouse        ░░░░░░░░░░░░   -- unreported  ······ 2d ago
 
 
@@ -752,7 +863,7 @@ mod tests {
      MX Keys M Mac            ████████░░░░  67% on battery
 
    inactive (2)
-     AirPods Pro              █████░░░░░░░  45% last seen
+     AirPods Pro              █████░░░░░░░  45% stale
      MX Master 3S             ░░░░░░░░░░░░   -- unreported
 
 
@@ -831,36 +942,36 @@ mod tests {
     }
 
     /// The overlay covers what is under it, which only a whole frame can say:
-    /// the box, its border, the keys it lists and the dashboard rows it hides
-    /// are one assertion rather than four substrings on a screen that already
-    /// contains them.
+    /// the box, its border, the keys of both views it lists and the dashboard
+    /// rows it hides are one assertion rather than four substrings on a screen
+    /// that already contains them.
     #[test]
-    fn the_keymap_overlay_covers_the_dashboard_and_says_what_is_still_to_come() {
+    fn the_keymap_overlay_covers_the_dashboard_and_lists_both_views_keys() {
         let expected = " blubat   3 active   sort level   poll 5s   next 5s                                    ▲ 1 critical
 
      Device                   Type         Battery         % State       Trend  Last seen
  ▎ ▲ Soundcore Liberty        audio        █░░░░░░░░░░░   8% on battery  █▇▅▄▂▁ now
      Magic Trackpad           trackpad     ███░░░░░░░░░  23% + charging  █▇▅▄▂▁ now
      MX Keys M Mac            keyboard     ████████░░░░  67% on battery  █▇▅▄▂▁ now
-
-   inactive (2)
-     AirPods Pro┌ keys ────────────────────────────────────────────────────────────┐go
-     MX Master 3│     q  quit                                                      │go
-                │   j/k  move                                                      │
-                │ enter  detail                                                    │
-                │     s  sort                                                      │
-                │     /  filter                                                    │
-                │     h  hide                                                      │
-                │     H  show hidden                                               │
-                │     r  reload                                                    │
-                │     ?  help                                                      │
+                ┌ keys ────────────────────────────────────────────────────────────┐
+   inactive (2) │         q  quit                                                  │
+     AirPods Pro│       j/k  move                                                  │go
+     MX Master 3│     enter  detail                                                │go
+                │         s  sort                                                  │
+                │         /  filter                                                │
+                │         h  hide                                                  │
+                │         H  show hidden                                           │
+                │         r  reload                                                │
+                │         ?  help                                                  │
                 │                                                                  │
-                │ enter opens the detail view, which arrives later.                │
+                │   in the detail view                                             │
+                │ esc/enter  back                                                  │
+                │         q  quit                                                  │
+                │                                                                  │
+                │ the detail chart is this run only; a restart starts it empty.    │
                 │ h hides for this session only; a lasting hide arrives later.     │
                 │ r re-reads the config file; one it cannot read changes nothing.  │
                 └──────────────────────────────────────────────────────────────────┘
-
-
 
 
 
@@ -946,7 +1057,34 @@ mod tests {
     #[test]
     fn a_device_no_source_has_a_level_for_is_shown_as_unreported() {
         assert!(line_containing(&dashboard(), "MX Master 3S").contains("unreported"));
-        assert!(line_containing(&dashboard(), "AirPods Pro").contains("last seen"));
+    }
+
+    /// The one staleness rule reaching the table: the same window the `stale`
+    /// event is raised by decides which rows say so.
+    #[test]
+    fn a_device_that_has_stopped_reporting_is_marked_stale_in_the_table() {
+        let fresh = update(
+            dashboard(),
+            Event::Reading(reading(vec![Device {
+                connected: false,
+                ..typed("AirPods Pro", "audio", "74-15-f5-02-8e-38", Some(45))
+            }])),
+        );
+
+        assert!(
+            line_containing(&dashboard(), "AirPods Pro").contains("stale"),
+            "three hours is well past the ten minute window"
+        );
+        assert!(
+            line_containing(&fresh, "AirPods Pro").contains("last seen"),
+            "a disconnected reading taken just now is not stale"
+        );
+
+        let patient = App {
+            config: config("[poll]\nstale_after = \"6h\"\n"),
+            ..dashboard()
+        };
+        assert!(line_containing(&patient, "AirPods Pro").contains("last seen"));
     }
 
     #[test]
@@ -1203,6 +1341,150 @@ mod tests {
             let screen = drawn(&dashboard(), width, 30).join("\n");
 
             assert!(screen.contains("8%"), "at {width}:\n{screen}");
+        }
+    }
+
+    /// The whole detail view at the size the mock was approved at: the panels,
+    /// the chart drawn over an injected history, the rate and the estimate
+    /// derived from it, the thresholds it is judged by, the event log and the
+    /// footer of the keys that work here. One assertion, because the point of
+    /// this view is that all of it is on screen at once.
+    #[test]
+    fn the_detail_view_draws_the_frame_it_is_specified_to_draw() {
+        let expected = "╭ blubat | Paul’s Magic Trackpad ──────────────────────────────────────────────────────────────────╮
+│╭ power ─────────────────────────────────────────────────────────────────────────────────────────╮│
+││ 23%  █████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  charging, est. 9h 38m to full                     ││
+││connected  ·  iokit  ·  last reading now                                                        ││
+│╰────────────────────────────────────────────────────────────────────────────────────────────────╯│
+│╭ battery, last 2h ─────────────────────────────────────────────╮╭ stats ────────────────────────╮│
+││100  │                                                         ││charge rate              8.0%/h││
+││     │                                                         ││trend                    rising││
+││     │                                                         ││to full                  9h 38m││
+││     │                                                         ││                               ││
+││     │                                                         ││low                         20%││
+││     │                                                         ││critical                    10%││
+││50   │                                                         ││charged at                 100%││
+││     │                                                         ││                               ││
+││     │                                                         ││address       30-82-16-f2-24-90││
+││     │••••••••••••••••••••••••••••••••⢀⣀⣀⣀⣀⣀⣀⡠⠤⠤⠤⠤⠤⠤⠔⠒⠒⠒⠒⠒⠒⠊⠉⠉⠉││source                    iokit││
+││     │    ⣀⣀⣀⣀⣀⣀⣀⠤⠤⠤⠤⠤⠤⠤⠒⠒⠒⠒⠒⠒⠒⠉⠉⠉⠉⠉⠉⠉⠁                        ││type                   trackpad││
+││0    │⠉⠉⠉⠉                                                     ││samples                       9││
+││     └─────────────────────────────────────────────────────────││                               ││
+││2h ago                                                      now││                               ││
+│╰───────────────────────────────────────────────────────────────╯╰───────────────────────────────╯│
+│╭ recent events ─────────────────────────────────────────────────────────────────────────────────╮│
+││30m ago   critical_battery  at 9%, threshold 20%                                                ││
+││1h ago    low_battery       at 19%, threshold 20%                                               ││
+││                                                                                                ││
+││                                                                                                ││
+││                                                                                                ││
+│╰────────────────────────────────────────────────────────────────────────────────────────────────╯│
+│esc/enter back  q quit                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯";
+        assert_frame(&detail(), 100, 30, expected);
+    }
+
+    /// Each battery a device reports gets a row of its own, under the one level
+    /// every threshold is applied to.
+    #[test]
+    fn a_multi_battery_device_lists_every_battery_it_reports() {
+        let rows = drawn(&airpods(), 100, 30);
+        let row = |needle: &str| {
+            rows.iter()
+                .find(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("no row for `{needle}`"))
+                .clone()
+        };
+
+        assert!(
+            row(" 68%").contains("on battery"),
+            "the emptiest part leads"
+        );
+        assert!(row("left").contains("100%"));
+        assert!(row("right").contains("97%"));
+        assert!(row("case").contains("68%"));
+        assert!(
+            drawn(&detail(), 100, 30)
+                .iter()
+                .all(|line| !line.contains("main")),
+            "and a single battery device has no sub rows at all"
+        );
+    }
+
+    #[test]
+    fn a_device_with_nothing_to_extrapolate_from_says_so_rather_than_guessing() {
+        let unread = airpods();
+
+        assert!(
+            drawn(&unread, 100, 30)
+                .join("\n")
+                .contains("no history yet")
+        );
+        for label in ["rate ", "trend ", "estimate"] {
+            assert!(
+                line_containing(&unread, label).contains(theme::UNKNOWN),
+                "`{label}` is guessed at rather than left unknown"
+            );
+        }
+    }
+
+    /// The same staleness rule as the table, on the view opened from it.
+    #[test]
+    fn a_stale_device_is_marked_in_the_detail_view_as_well_as_the_table() {
+        let quiet = update(
+            press(dashboard(), "jjj"),
+            Event::Tick(Timestamp::from_unix(READ_AT.unix() + 3_600)),
+        );
+        let open = update(quiet.clone(), Event::Key(Key::Enter));
+
+        assert!(line_containing(&open, "last reading").contains("stale"));
+        assert!(
+            line_containing(&open, "last seen level").contains("45%"),
+            "and its level is still labelled as the last seen one"
+        );
+        assert!(
+            !line_containing(&update(dashboard(), Event::Key(Key::Enter)), "last reading")
+                .contains("stale"),
+            "a reading taken this moment is not"
+        );
+        assert!(line_containing(&quiet, "AirPods Pro").contains("stale"));
+    }
+
+    /// Colour carries the detail view as much as the glyphs do: the accented
+    /// panel titles, the level scale on the bar, the chart against its
+    /// threshold line and the band each event belongs to are all invisible to a
+    /// frame compared as text.
+    #[test]
+    fn the_palette_reaches_the_detail_view_it_is_drawn_into() {
+        let buffer = buffer_of(&[&detail()], 100, 30);
+        let cell = |needle| cell_of(&buffer, needle);
+        let dark = Palette::DARK;
+
+        assert_eq!(cell("blubat | Paul").fg, dark.accent, "the panel titles");
+        assert_eq!(cell("power").fg, dark.accent);
+        assert_eq!(cell("recent events").fg, dark.accent);
+
+        assert_eq!(cell(" 23%").fg, dark.low, "the level, on its own scale");
+        assert!(cell("23%").modifier.contains(Modifier::BOLD));
+        assert_eq!(cell("rising").fg, dark.charging);
+        assert_eq!(cell("low ").fg, dark.dim, "a stats label");
+
+        assert_eq!(cell("critical_battery").fg, dark.critical);
+        assert_eq!(cell("low_battery").fg, dark.low);
+        assert_eq!(cell("30m ago").fg, dark.dim);
+    }
+
+    #[test]
+    fn no_size_a_terminal_can_be_panics_the_detail_view() {
+        for app in [&detail(), &airpods()] {
+            for width in 1..=60 {
+                for height in 1..=10 {
+                    drawn(app, width, height);
+                }
+            }
+            for (width, height) in [(1, 1), (100, 30), (200, 60), (1, 60), (200, 1)] {
+                drawn(app, width, height);
+            }
         }
     }
 }

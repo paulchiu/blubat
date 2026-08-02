@@ -90,7 +90,7 @@ impl Resident {
     /// One reading: the engine first, then the watches, and whatever both left
     /// worth writing down.
     fn tick(&mut self, reading: &Snapshot, config: &Config) -> Vec<String> {
-        let mut lines = self.effects.observe(reading, config);
+        let mut lines = self.effects.observe(reading, config).problems;
 
         // Watches wait for the dashboard to close rather than being consumed
         // while it owns the banners, which is what keeps each one exactly one

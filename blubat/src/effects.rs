@@ -11,13 +11,26 @@
 
 use std::path::PathBuf;
 
-use blubat_core::{AdvertisedThresholds, Config, Engine, Paths, Snapshot};
+use blubat_core::{AdvertisedThresholds, Config, Engine, Paths, Raised, Snapshot};
 
 use crate::hooks::{self, Hooks, Outcome, Runner};
 use crate::notify::{self, Desktop, Notifier};
 
 /// Whether another blubat owns the side effects at this moment.
 type Deferring = Box<dyn Fn() -> bool + Send + Sync>;
+
+/// What one reading came to, for whoever is driving the chain.
+///
+/// The events travel back rather than only the problems because a frontend has
+/// its own use for them: the dashboard's detail view lists what each device has
+/// raised, which nothing in this chain keeps.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Observed {
+    pub raised: Vec<Raised>,
+    /// What went wrong, for the caller to place: stderr would land on top of
+    /// whatever the dashboard is drawing.
+    pub problems: Vec<String>,
+}
 
 /// Everything one reading sets off outside the reducer.
 pub struct Effects {
@@ -105,14 +118,12 @@ impl Effects {
     /// raised, and persists what it moved.
     ///
     /// The reading's own moment is the clock, so what the engine makes of a
-    /// reading does not depend on how long it took to arrive. Problems come
-    /// back to be placed rather than printed: stderr would land on top of
-    /// whatever the dashboard is drawing.
+    /// reading does not depend on how long it took to arrive.
     ///
     /// While the side effects belong to another blubat the engine still steps
     /// and the state file is still written, so what was raised while deferring
     /// is not raised again once the owner goes away.
-    pub fn observe(&mut self, reading: &Snapshot, config: &Config) -> Vec<String> {
+    pub fn observe(&mut self, reading: &Snapshot, config: &Config) -> Observed {
         let now = reading.read_at;
         // `step` consumes the engine and hands the next one back, which is what
         // keeps it a pure function of the state it was given.
@@ -145,7 +156,7 @@ impl Effects {
         // After dispatch, since allowing a hook to run is what records it.
         problems.extend(self.persist());
 
-        problems
+        Observed { raised, problems }
     }
 
     /// Whether this blubat is the one that acts on what a reading raised.
@@ -302,7 +313,11 @@ mod tests {
         levels
             .iter()
             .enumerate()
-            .flat_map(|(tick, level)| effects.observe(&reading(Some(*level), tick as i64), config))
+            .flat_map(|(tick, level)| {
+                effects
+                    .observe(&reading(Some(*level), tick as i64), config)
+                    .problems
+            })
             .collect()
     }
 
@@ -323,6 +338,40 @@ mod tests {
         assert_eq!(banners.posted()[0].body, "Battery low at 19%");
         assert_eq!(banners.posted()[0].sound.as_deref(), Some("Glass"));
         assert_eq!(hooks.commands(), ["nag"], "the charged hook waits its turn");
+    }
+
+    /// The events come back as well as being acted on, since a frontend has its
+    /// own use for them and nothing in this chain keeps them.
+    #[test]
+    fn what_a_reading_raised_travels_back_beside_what_went_wrong() {
+        let scratch = Scratch::new();
+        let (mut effects, _, _) = effects(&scratch);
+
+        effects.observe(&reading(Some(50), 0), &Config::default());
+        let observed = effects.observe(&reading(Some(19), 1), &Config::default());
+
+        assert!(observed.problems.is_empty(), "{:?}", observed.problems);
+        assert_eq!(
+            observed
+                .raised
+                .iter()
+                .map(|raised| (raised.event, raised.level))
+                .collect::<Vec<_>>(),
+            [(Event::LowBattery, Some(19))]
+        );
+    }
+
+    #[test]
+    fn what_was_raised_while_deferring_still_travels_back() {
+        let scratch = Scratch::new();
+        let (effects, banners, _) = effects(&scratch);
+        let mut effects = effects.deferring_to(|| true);
+
+        effects.observe(&reading(Some(50), 0), &Config::default());
+        let observed = effects.observe(&reading(Some(19), 1), &Config::default());
+
+        assert_eq!(observed.raised.len(), 1, "the dashboard still lists it");
+        assert!(banners.posted().is_empty(), "without announcing it");
     }
 
     #[test]

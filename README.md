@@ -33,8 +33,8 @@ complete: bare `blubat` opens a live dashboard listing every device with its
 level, charge state, trend and freshness, sorted, filtered and narrowed from
 the keyboard. M2 is underway: the config file, the threshold event engine, the
 desktop notifications and the hooks that run alongside them, all live in the
-dashboard and reloadable with `r`. The device detail view and the background
-daemon come after it.
+dashboard and reloadable with `r`. M3 is underway: the background daemon and
+the device detail view `enter` opens over the selected device.
 
 blubat reads an optional configuration file and never writes one. The only
 files it creates are its own state, under `~/.local/state/blubat/`: the event
@@ -100,12 +100,22 @@ up columns from the right rather than breaking the table.
 ```
 q      quit                  s  cycle the order: level, name, last seen
 j/k    move the selection    /  filter on name or address, esc clears it
-enter  detail view, later    h  hide the selected device, H show hidden again
+enter  the detail view       h  hide the selected device, H show hidden again
 r      reload the config     ?  the full keymap
 ```
 
 `q` and ctrl+c both leave the dashboard; the keymap overlay takes the keyboard
 while it is open, so `?` closes it before anything else responds again.
+
+`enter` opens the detail view over the selected device, and `esc` or `enter`
+closes it again. It answers the questions one table row has no room for, all of
+which are about time: a chart of the levels read this run against the threshold
+that would raise an event, the charge or drain rate behind it, an estimate to
+full or to empty where the level is actually moving, the thresholds the device
+is judged by, and the events blubat has raised for it. A multi-battery device
+lists each of its batteries under the one level every threshold is applied to.
+The history is in memory and per run, so the chart starts empty after a restart
+and fills as blubat polls.
 
 `r` re-reads `~/.config/blubat/config.toml` in place: thresholds, notification
 toggles, hooks, the colour scheme and the charging glyph all take the new

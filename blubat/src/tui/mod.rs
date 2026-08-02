@@ -10,8 +10,10 @@
 
 mod app;
 mod columns;
+mod detail;
 mod events;
 mod glyph;
+mod journal;
 mod render;
 mod terminal;
 mod theme;
@@ -22,7 +24,7 @@ use std::time::Duration;
 
 use blubat_core::{Config, Paths, Poll, Tiers, Timestamp};
 
-use crate::effects::Effects;
+use crate::effects::{Effects, Observed};
 use crate::hooks::Outcome;
 use crate::{Failure, lock};
 use app::{App, Event, Notice, update};
@@ -75,15 +77,23 @@ pub fn run(paths: &Paths) -> Result<(), Failure> {
         session.draw(&app)?;
 
         let Some(event) = next(&events) else { break };
-        let problems = match &event {
+        let observed = match &event {
             Event::Reading(reading) => effects.observe(reading, &app.config),
-            _ => Vec::new(),
+            _ => Observed::default(),
         };
 
         app = update(app, event);
 
-        if !problems.is_empty() {
-            app = update(app, Event::Note(Notice::problem(problems.join("; "))));
+        // After the reading they came from, so the detail view's log and the
+        // chart under it are drawn from the same tick.
+        if !observed.raised.is_empty() {
+            app = update(app, Event::Raised(observed.raised));
+        }
+        if !observed.problems.is_empty() {
+            app = update(
+                app,
+                Event::Note(Notice::problem(observed.problems.join("; "))),
+            );
         }
         if app.reload {
             app = update(app, Event::Reloaded(effects.reload()));

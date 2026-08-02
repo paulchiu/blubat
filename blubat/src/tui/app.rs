@@ -8,9 +8,11 @@
 use std::time::Duration;
 
 use blubat_core::{
-    Advertised, AdvertisedThresholds, Config, Device, History, Snapshot, Thresholds, Timestamp,
+    Advertised, AdvertisedThresholds, Config, Device, History, Raised, Snapshot, Thresholds,
+    Timestamp,
 };
 
+use super::journal::Journal;
 use super::theme::{self, Look};
 use super::view::{Filter, Rows, View};
 
@@ -71,9 +73,27 @@ const CLEAR_FILTER: Binding = Binding {
     label: "clear filter",
 };
 
+/// The keys the detail view binds, which are the only ones it leaves live.
+pub const DETAIL_KEYS: [Binding; 2] = [
+    Binding {
+        keys: "esc/enter",
+        label: "back",
+    },
+    Binding {
+        keys: "q",
+        label: "quit",
+    },
+];
+
+/// What [`DETAIL_KEYS`] stand for, and the only actions the detail view performs.
+///
+/// Read from either end as [`OVERLAY_ACTIONS`] is, which is what keeps the
+/// footer inside the detail view an account of what pressing something will do.
+const DETAIL_ACTIONS: [Action; 3] = [Action::Back, Action::Detail, Action::Quit];
+
 /// What the overlay says beyond the keys themselves.
 pub const NOTES: [&str; 3] = [
-    "enter opens the detail view, which arrives later.",
+    "the detail chart is this run only; a restart starts it empty.",
     "h hides for this session only; a lasting hide arrives later.",
     "r re-reads the config file; one it cannot read changes nothing.",
 ];
@@ -124,6 +144,8 @@ pub enum Mode {
     Filtering,
     /// The keymap overlay covers the dashboard and swallows its keys.
     Keymap,
+    /// One device on its own: its history, its thresholds and what it raised.
+    Detail,
 }
 
 impl Mode {
@@ -154,12 +176,15 @@ pub enum Action {
     ToggleKeymap,
     CycleSort,
     OpenFilter,
-    ClearFilter,
+    /// Escape, which backs out of whatever the mode on screen is: the detail
+    /// view, or a filter the dashboard is still narrowing by.
+    Back,
     ToggleHidden,
     ShowHidden,
     /// Asks the loop to read the config file again, which the reducer cannot.
     Reload,
-    /// Bound and drawn in the keymap, but the detail view arrives later.
+    /// Enter, which opens the detail view over the selected device and closes
+    /// it again from inside.
     Detail,
 }
 
@@ -177,7 +202,7 @@ impl Action {
             Key::Char('H') => Some(Action::ShowHidden),
             Key::Char('r') => Some(Action::Reload),
             Key::Enter => Some(Action::Detail),
-            Key::Escape => Some(Action::ClearFilter),
+            Key::Escape => Some(Action::Back),
             _ => None,
         }
     }
@@ -222,6 +247,8 @@ pub enum Event {
     Tick(Timestamp),
     /// What the loop made of the reload [`Action::Reload`] asked for.
     Reloaded(Result<Config, String>),
+    /// What the event engine raised over the reading that just landed.
+    Raised(Vec<Raised>),
     /// Something the loop did that the user needs telling about.
     Note(Notice),
 }
@@ -231,8 +258,10 @@ pub enum Event {
 pub struct App {
     /// The last reading, absent until the first poll lands.
     pub reading: Option<Snapshot>,
-    /// The levels seen this run, which the trend column reads.
+    /// The levels seen this run, which the trend column and the detail chart read.
     pub history: History,
+    /// What each device has raised this run, which the detail view lists.
+    pub journal: Journal,
     /// The row the selection sits on, always a real index while there are rows.
     pub selected: usize,
     /// Which view has the keyboard, and so which keys the footer advertises.
@@ -266,6 +295,7 @@ impl App {
         Self {
             reading: None,
             history: History::default(),
+            journal: Journal::default(),
             selected: 0,
             mode: Mode::Dashboard,
             running: true,
@@ -290,6 +320,15 @@ impl App {
                 .copied()
                 .unwrap_or(Advertised::NONE),
         )
+    }
+
+    /// Whether a device has gone quiet for longer than the config allows.
+    ///
+    /// The core's own rule against the clock the dashboard is drawing at, so a
+    /// row marked stale is one blubat has raised `stale` for rather than one it
+    /// merely drew that way.
+    pub fn is_stale(&self, device: &Device) -> bool {
+        device.is_stale(self.config.poll.stale_after, self.now)
     }
 
     /// The devices of the last reading, empty before the first one lands.
@@ -355,6 +394,7 @@ impl App {
         match self.mode {
             Mode::Keymap => OVERLAY_KEYS.to_vec(),
             Mode::Filtering => FILTER_KEYS.to_vec(),
+            Mode::Detail => DETAIL_KEYS.to_vec(),
             Mode::Dashboard if self.view.filter.narrows() => {
                 KEYMAP.iter().copied().chain([CLEAR_FILTER]).collect()
             }
@@ -380,6 +420,7 @@ pub fn update(app: App, event: Event) -> App {
         Event::Reading(reading) => receive(app, reading),
         Event::Tick(now) => App { now, ..app },
         Event::Reloaded(read) => reloaded(app, read),
+        Event::Raised(raised) => recorded(app, raised),
         Event::Note(notice) => App {
             notice: Some(notice),
             ..app
@@ -418,17 +459,28 @@ fn reloaded(app: App, read: Result<Config, String>) -> App {
     }
 }
 
+/// Keeps what the engine raised, which is the detail view's event log.
+fn recorded(mut app: App, raised: Vec<Raised>) -> App {
+    app.journal.record(raised);
+
+    app
+}
+
 /// A key means what the mode it was pressed in says it means.
 ///
 /// The one dispatch [`App::keys`] advertises: the filter takes every key as
-/// text, the overlay accepts only what it lists, and the dashboard binds its
-/// whole keymap.
+/// text, the overlay and the detail view accept only what they list, and the
+/// dashboard binds its whole keymap.
 fn pressed(app: App, key: Key) -> App {
     match app.mode {
         Mode::Filtering => typed(app, key),
         Mode::Keymap => acted(
             app,
             Action::of(key).filter(|action| OVERLAY_ACTIONS.contains(action)),
+        ),
+        Mode::Detail => acted(
+            app,
+            Action::of(key).filter(|action| DETAIL_ACTIONS.contains(action)),
         ),
         Mode::Dashboard => acted(app, Action::of(key)),
     }
@@ -486,16 +538,48 @@ fn act(app: App, action: Action) -> App {
             mode: Mode::Filtering,
             ..app
         },
-        Action::ClearFilter => cleared(app),
+        Action::Back => backed(app),
         Action::ToggleHidden => hide_selected(app),
         Action::ShowHidden => viewed(app, |view| view.show_hidden = !view.show_hidden),
         Action::Reload => App {
             reload: true,
             ..app
         },
-        // The detail view arrives later. The key is bound and advertised now so
-        // the keymap it appears in is the one that ships.
-        Action::Detail => app,
+        Action::Detail => detailed(app),
+    }
+}
+
+/// Opens the detail view over the selected device, or closes it again.
+///
+/// One key both ways, as `?` is for the overlay. A dashboard with no row
+/// selected has no device to detail, so enter does nothing there rather than
+/// opening a view of nothing.
+fn detailed(app: App) -> App {
+    match app.mode {
+        Mode::Detail => onto_the_dashboard(app),
+        _ if app.current().is_some() => App {
+            mode: Mode::Detail,
+            ..app
+        },
+        _ => app,
+    }
+}
+
+/// Backs out of the detail view, or drops the filter under the dashboard.
+///
+/// Escape means "leave what is on screen" in both, which is why one action
+/// covers them: what is on screen is what the mode already says.
+fn backed(app: App) -> App {
+    match app.mode {
+        Mode::Detail => onto_the_dashboard(app),
+        _ => cleared(app),
+    }
+}
+
+fn onto_the_dashboard(app: App) -> App {
+    App {
+        mode: Mode::Dashboard,
+        ..app
     }
 }
 
@@ -542,16 +626,24 @@ fn receive(mut app: App, reading: Snapshot) -> App {
     app
 }
 
-/// Pulls the selection back onto a row that exists.
+/// Pulls the selection back onto a row that exists, and the detail view with it.
 ///
 /// Every way the table can shrink ends here, so a filter, a hide and a shorter
-/// reading all leave the selection somewhere real without each having to say so.
+/// reading all leave the selection somewhere real without each having to say
+/// so. The detail view draws whichever device the selection is on, so a table
+/// that has shrunk out from under it leaves it on the device that took the
+/// row, and one that has emptied leaves it nothing to draw at all: that is the
+/// one case it backs out to the dashboard on its own.
 fn onto_a_row(app: App) -> App {
     let last = app.rows().len().saturating_sub(1);
-
-    App {
+    let app = App {
         selected: app.selected.min(last),
         ..app
+    };
+
+    match app.mode {
+        Mode::Detail if app.current().is_none() => onto_the_dashboard(app),
+        _ => app,
     }
 }
 
@@ -642,7 +734,17 @@ pub(super) mod tests {
             press(loaded(), "?"),
             press(loaded(), "/key"),
             key(press(loaded(), "/key"), Key::Enter),
+            key(loaded(), Key::Enter),
         ]
+    }
+
+    /// Every key a person can reach, bound or not.
+    fn every_key() -> Vec<Key> {
+        "qjksh H/?rxz1"
+            .chars()
+            .map(Key::Char)
+            .chain([Key::Enter, Key::Escape, Key::Backspace])
+            .collect()
     }
 
     /// Every key the footer of `app` names, as it would be pressed.
@@ -820,6 +922,27 @@ pub(super) mod tests {
         for app in every_view() {
             for key in advertised_in(&app) {
                 assert!(Action::of(key).is_some(), "{key:?} is advertised unbound");
+            }
+        }
+    }
+
+    /// A modal view's footer is a complete account of it rather than a
+    /// selection from a longer list: every key it names moves the state, and
+    /// every key it does not is swallowed whole.
+    #[test]
+    fn a_modal_view_acts_on_its_own_keys_and_swallows_every_other_one() {
+        for app in [press(loaded(), "?"), key(loaded(), Key::Enter)] {
+            let advertised = advertised_in(&app);
+
+            for key in every_key() {
+                let moved = update(app.clone(), Event::Key(key)) != app;
+
+                assert_eq!(
+                    moved,
+                    advertised.contains(&key),
+                    "{key:?} in {:?}",
+                    app.mode
+                );
             }
         }
     }
@@ -1051,11 +1174,114 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn enter_on_the_dashboard_waits_for_the_detail_view() {
-        let app = loaded();
+    fn enter_opens_the_detail_view_over_the_selected_device_and_closes_it() {
+        let opened = key(press(loaded(), "j"), Key::Enter);
 
-        assert_eq!(key(app.clone(), Key::Enter), app);
-        assert_eq!(Action::of(Key::Enter), Some(Action::Detail));
+        assert_eq!(opened.mode, Mode::Detail);
+        assert_eq!(
+            opened.current().map(|device| device.name.as_str()),
+            Some("Magic Trackpad"),
+            "the row the selection was on"
+        );
+        assert_eq!(key(opened.clone(), Key::Enter).mode, Mode::Dashboard);
+        assert_eq!(key(opened, Key::Escape).mode, Mode::Dashboard);
+    }
+
+    #[test]
+    fn enter_and_esc_round_trip_from_every_mode_that_binds_them() {
+        let dashboard = loaded();
+        let filtered = key(press(loaded(), "/key"), Key::Enter);
+
+        for app in [dashboard, filtered] {
+            let opened = key(app.clone(), Key::Enter);
+
+            assert_eq!(opened.mode, Mode::Detail);
+            assert_eq!(key(opened.clone(), Key::Escape), app, "esc backs out whole");
+            assert_eq!(key(opened, Key::Enter), app, "and so does enter");
+        }
+    }
+
+    #[test]
+    fn enter_on_an_empty_dashboard_opens_nothing() {
+        let unread = app();
+        let filtered_out = press(loaded(), "/nothing here");
+
+        for app in [unread, key(filtered_out, Key::Enter)] {
+            assert_eq!(app.current(), None);
+            assert_eq!(
+                key(app.clone(), Key::Enter),
+                app,
+                "there is nothing to show"
+            );
+        }
+    }
+
+    #[test]
+    fn the_detail_view_swallows_every_key_it_does_not_advertise() {
+        let open = key(loaded(), Key::Enter);
+
+        assert_eq!(
+            press(open.clone(), "jksh/H?r"),
+            open,
+            "the dashboard keys do nothing while one device is on screen"
+        );
+        assert_eq!(key(open.clone(), Key::Backspace), open);
+        assert!(!press(open, "q").running, "and q still quits");
+    }
+
+    #[test]
+    fn a_detail_view_whose_device_went_away_backs_out_to_the_table() {
+        let open = key(press(loaded(), "jj"), Key::Enter);
+        let alone = update(
+            open.clone(),
+            Event::Reading(reading(vec![device(
+                "Magic Trackpad",
+                "30-82-16-f2-24-90",
+                Some(85),
+            )])),
+        );
+        let emptied = update(open, Event::Reading(reading(Vec::new())));
+
+        assert_eq!(alone.mode, Mode::Detail, "the selection took the last row");
+        assert_eq!(
+            alone.current().map(|device| device.name.as_str()),
+            Some("Magic Trackpad")
+        );
+        assert_eq!(
+            emptied.mode,
+            Mode::Dashboard,
+            "and a table with no rows leaves it nothing to draw"
+        );
+    }
+
+    #[test]
+    fn the_events_the_engine_raised_are_kept_for_the_device_they_belong_to() {
+        let trackpad = device("Magic Trackpad", "30-82-16-f2-24-90", Some(9));
+        let raised = Raised {
+            event: blubat_core::Event::LowBattery,
+            device: trackpad.name.clone(),
+            address: trackpad.address.clone(),
+            level: Some(9),
+            previous: Some(21),
+            charge: ChargeState::Discharging,
+            source: Source::IoKit,
+            threshold: Some(20),
+            cycle: 0,
+            at: READ_AT,
+        };
+        let app = update(loaded(), Event::Raised(vec![raised.clone()]));
+
+        assert_eq!(
+            app.journal.recent(&trackpad.address).collect::<Vec<_>>(),
+            [&raised]
+        );
+        assert_eq!(
+            app.journal
+                .recent(&Address::parse("de-df-38-f0-46-9b").expect("valid address"))
+                .count(),
+            0,
+            "and only for that device"
+        );
     }
 
     #[test]
