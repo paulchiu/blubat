@@ -87,16 +87,26 @@ fn set_hidden(document: &mut DocumentMut, hidden: &[String]) -> Result<(), Strin
 }
 
 /// Writes through a partial file and a rename, so nothing reads half a config.
+///
+/// A rename that failed takes the partial file with it: leaving one beside the
+/// user's config would be blubat writing a second file into a directory it is
+/// only ever meant to maintain one table in.
 fn write_atomically(path: &Path, contents: &str) -> Result<(), String> {
     let mut partial = OsString::from(path);
     partial.push(".partial");
     let partial = PathBuf::from(partial);
 
-    path.parent()
+    let written = path
+        .parent()
         .map_or(Ok(()), fs::create_dir_all)
         .and_then(|()| fs::write(&partial, contents))
-        .and_then(|()| fs::rename(&partial, path))
-        .map_err(|error| error.to_string())
+        .and_then(|()| fs::rename(&partial, path));
+
+    if written.is_err() {
+        let _ = fs::remove_file(&partial);
+    }
+
+    written.map_err(|error| error.to_string())
 }
 
 /// The editor to open the file in, `$EDITOR` or failing that `$VISUAL`.
@@ -304,13 +314,20 @@ mod tests {
         assert!(warned.contains("trackpad"), "{warned}");
     }
 
+    /// One realistic file: a comment, arrays of tables, a table blubat's own
+    /// `Config` knows nothing about, and a trailing comment on the very line
+    /// being rewritten. Asserted whole, since the claim is that everything
+    /// outside the hidden list is exactly as the user left it.
     #[test]
     fn hiding_a_device_writes_the_table_and_nothing_else_in_the_file() {
         let scratch = Scratch::new();
-        let path = scratch.write_config(
-            "# my thresholds\n[defaults]\nlow = 25\n\n\
-             [dashboard]\nhidden = [\"MX Master\"]\nsort = \"name\"\n",
-        );
+        let written = "# my thresholds\n[defaults]\nlow = 25\n\n\
+             [[device]]\nmatch = \"trackpad\"\nlow = 30\n\n\
+             [[hook]]\nevent = \"low_battery\"\ncommand = \"nag\"  # shouts\n\n\
+             [[hook]]\nevent = \"charged\"\ncommand = \"unplug\"\n\n\
+             [experimental]\nnothing_blubat_knows = true\n\n\
+             [dashboard]\nhidden = [\"MX Master\"] # for now\nsort = \"name\"\n";
+        let path = scratch.write_config(written);
 
         assert_eq!(
             save_hidden(&path, &["MX Master".to_string(), "30-82-16".to_string()]),
@@ -318,9 +335,29 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(&path).expect("a written config"),
-            "# my thresholds\n[defaults]\nlow = 25\n\n\
-             [dashboard]\nhidden = [\"MX Master\", \"30-82-16\"]\nsort = \"name\"\n",
-            "the comment, the order and every other table survive the hide"
+            written.replace(
+                "hidden = [\"MX Master\"] # for now",
+                "hidden = [\"MX Master\", \"30-82-16\"]"
+            ),
+            "the comments, the order and every other table survive the hide"
+        );
+    }
+
+    /// The one place blubat writes to a file it does not own, so a `[dashboard]`
+    /// that is not a table is reported and left exactly as it was, the same
+    /// guarantee a file that will not parse gets.
+    #[test]
+    fn a_dashboard_that_is_not_a_table_is_reported_rather_than_replaced() {
+        let scratch = Scratch::new();
+        let path = scratch.write_config("dashboard = 5\n");
+
+        let problem = save_hidden(&path, &["30-82-16".to_string()])
+            .expect_err("there is nowhere to put the list");
+
+        assert!(problem.contains("[dashboard] is not a table"), "{problem}");
+        assert_eq!(
+            fs::read_to_string(&path).expect("still there"),
+            "dashboard = 5\n"
         );
     }
 
