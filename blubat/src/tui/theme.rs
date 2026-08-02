@@ -1,14 +1,167 @@
 //! The dashboard's visual language: one accent, one level scale, one
 //! placeholder, so every view blubat grows reads as the same app.
+//!
+//! What that language is drawn in is the config's to say. A [`Palette`] is one
+//! named scheme with the `[theme]` overrides applied over it, and a [`Look`] is
+//! that palette beside the glyphs, which the same table also has a say in. Both
+//! are values rather than constants so `r` can replace them mid run.
 
+use blubat_core::{Rgb, Scheme, Theme};
 use ratatui::style::Color;
 
-/// Used for the app name, the selection marker and the keymap.
-pub const ACCENT: Color = Color::Cyan;
+use super::glyph::Glyphs;
 
-/// Selection background: a dark cyan tint rather than a full inverse, which
-/// would destroy the per column colours that carry the meaning.
-pub const SELECTION_BG: Color = Color::Rgb(0x14, 0x33, 0x3b);
+/// The colours the dashboard draws with.
+///
+/// The four the config file can name are the accent and the three bands of the
+/// level scale. The rest are the structure those sit in and follow the scheme
+/// alone, since a file that could recolour a heading could also make the
+/// dashboard unreadable one key at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Palette {
+    /// The app name, the selection marker and the keymap.
+    pub accent: Color,
+    /// The top band of the level scale, and anything that is fine.
+    pub ok: Color,
+    /// The middle band: worth a glance rather than attention.
+    pub low: Color,
+    /// The bottom band, and the count of what is in it.
+    pub critical: Color,
+    /// The critical colour where it has to be caught first: a device's name,
+    /// and the state beside it.
+    pub alert: Color,
+    /// The charging mark, which is the one piece of good news on a row.
+    pub charging: Color,
+    /// Ordinary row text.
+    pub text: Color,
+    /// Device names, which sit above the rest of their row.
+    pub strong: Color,
+    /// Headings, troughs, and everything the eye should skip.
+    pub dim: Color,
+    /// The selected row's background: a tint rather than a full inverse, which
+    /// would destroy the per column colours that carry the meaning.
+    pub selection: Color,
+}
+
+impl Palette {
+    /// The scheme blubat draws in unless the file says otherwise.
+    pub const DARK: Self = Self {
+        accent: Color::Cyan,
+        ok: Color::Green,
+        low: Color::Yellow,
+        critical: Color::Red,
+        alert: Color::LightRed,
+        charging: Color::LightGreen,
+        text: Color::Gray,
+        strong: Color::White,
+        dim: Color::DarkGray,
+        selection: Color::Rgb(0x14, 0x33, 0x3b),
+    };
+
+    /// The same language over a light terminal.
+    ///
+    /// Spelled out rather than named, because a named colour is whatever the
+    /// terminal makes of it and half of them assume something dark behind.
+    pub const LIGHT: Self = Self {
+        accent: Color::Rgb(0x09, 0x69, 0xda),
+        ok: Color::Rgb(0x1a, 0x7f, 0x37),
+        low: Color::Rgb(0x9a, 0x67, 0x00),
+        critical: Color::Rgb(0xcf, 0x22, 0x2e),
+        alert: Color::Rgb(0xa4, 0x0e, 0x26),
+        charging: Color::Rgb(0x1a, 0x7f, 0x37),
+        text: Color::Rgb(0x24, 0x29, 0x2f),
+        strong: Color::Rgb(0x01, 0x04, 0x09),
+        dim: Color::Rgb(0x6e, 0x77, 0x81),
+        selection: Color::Rgb(0xdd, 0xf4, 0xff),
+    };
+
+    /// The terminal's own foreground and one grey, for a setup wanting no
+    /// colour at all. The grey stays: without it a heading and a reading would
+    /// be the same mark, and the layout is dense enough to need the difference.
+    pub const MONO: Self = Self {
+        accent: Color::Reset,
+        ok: Color::Reset,
+        low: Color::Reset,
+        critical: Color::Reset,
+        alert: Color::Reset,
+        charging: Color::Reset,
+        text: Color::Reset,
+        strong: Color::Reset,
+        dim: Color::DarkGray,
+        selection: Color::DarkGray,
+    };
+
+    /// The palette one `[theme]` table asks for.
+    ///
+    /// An override replaces every use of the colour it names, the brighter
+    /// variant the scheme pairs with it included: a file that recoloured
+    /// critical and kept the scheme's light red would read as two reds.
+    pub fn of(theme: &Theme) -> Self {
+        let base = match theme.scheme {
+            Scheme::Dark => Self::DARK,
+            Scheme::Light => Self::LIGHT,
+            Scheme::Mono => Self::MONO,
+        };
+
+        Self {
+            accent: colour(theme.accent).unwrap_or(base.accent),
+            ok: colour(theme.ok).unwrap_or(base.ok),
+            charging: colour(theme.ok).unwrap_or(base.charging),
+            low: colour(theme.low).unwrap_or(base.low),
+            critical: colour(theme.critical).unwrap_or(base.critical),
+            alert: colour(theme.critical).unwrap_or(base.alert),
+            ..base
+        }
+    }
+
+    /// Green from 50, yellow from 15, red below it, dim for no reading at all.
+    pub fn level(self, level: Option<u8>) -> Color {
+        match level {
+            Some(50..) => self.ok,
+            Some(CRITICAL_BELOW..) => self.low,
+            Some(_) => self.critical,
+            None => self.dim,
+        }
+    }
+}
+
+impl Default for Palette {
+    fn default() -> Self {
+        Self::DARK
+    }
+}
+
+/// Everything `[theme]` decides, resolved over what the environment suggested.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Look {
+    pub palette: Palette,
+    pub glyphs: Glyphs,
+    /// The glyphs the environment was guessed to support, kept so a reload
+    /// applies the file's override to the guess rather than to the last
+    /// override, which a removed `charging_glyph` would otherwise leave behind.
+    detected: Glyphs,
+}
+
+impl Look {
+    /// What `theme` asks for, over the glyphs the environment suggested.
+    pub fn of(theme: &Theme, detected: Glyphs) -> Self {
+        Self {
+            palette: Palette::of(theme),
+            glyphs: detected.clone().overridden(theme.charging_glyph.as_deref()),
+            detected,
+        }
+    }
+
+    /// The look a freshly read config asks for, over the same guess.
+    pub fn reloaded(&self, theme: &Theme) -> Self {
+        Self::of(theme, self.detected.clone())
+    }
+}
+
+/// One config colour as ratatui draws it.
+fn colour(rgb: Option<Rgb>) -> Option<Color> {
+    rgb.map(|rgb| Color::Rgb(rgb.red, rgb.green, rgb.blue))
+}
 
 /// Stands in for anything no source reported, as the CLI prints it.
 pub const UNKNOWN: &str = "--";
@@ -32,16 +185,6 @@ const SPARKS: [char; 8] = [
 
 /// Stands in for a cell no reading has reached yet.
 const NO_DATA: char = '\u{b7}';
-
-/// Green from 50, yellow from 15, red below it, dim for no reading at all.
-pub fn level_color(level: Option<u8>) -> Color {
-    match level {
-        Some(50..) => Color::Green,
-        Some(CRITICAL_BELOW..) => Color::Yellow,
-        Some(_) => Color::Red,
-        None => Color::DarkGray,
-    }
-}
 
 /// Whether a level is low enough to want attention.
 ///
@@ -118,15 +261,107 @@ pub fn age(seconds: i64) -> String {
 mod tests {
     use super::*;
 
+    /// A `[theme]` table as the config file writes it.
+    fn theme(written: &str) -> Theme {
+        blubat_core::Config::parse(&format!("[theme]\n{written}"))
+            .expect("the test theme parses")
+            .theme
+    }
+
     #[test]
     fn the_level_scale_colours_each_band() {
-        assert_eq!(level_color(Some(100)), Color::Green);
-        assert_eq!(level_color(Some(50)), Color::Green);
-        assert_eq!(level_color(Some(49)), Color::Yellow);
-        assert_eq!(level_color(Some(15)), Color::Yellow);
-        assert_eq!(level_color(Some(14)), Color::Red);
-        assert_eq!(level_color(Some(0)), Color::Red, "empty is still a reading");
-        assert_eq!(level_color(None), Color::DarkGray);
+        let palette = Palette::DARK;
+
+        assert_eq!(palette.level(Some(100)), palette.ok);
+        assert_eq!(palette.level(Some(50)), palette.ok);
+        assert_eq!(palette.level(Some(49)), palette.low);
+        assert_eq!(palette.level(Some(15)), palette.low);
+        assert_eq!(palette.level(Some(14)), palette.critical);
+        assert_eq!(
+            palette.level(Some(0)),
+            palette.critical,
+            "empty is still a reading"
+        );
+        assert_eq!(palette.level(None), palette.dim);
+    }
+
+    #[test]
+    fn an_unconfigured_dashboard_draws_in_the_dark_scheme() {
+        assert_eq!(Palette::of(&Theme::default()), Palette::DARK);
+        assert_eq!(Palette::default(), Palette::DARK);
+    }
+
+    #[test]
+    fn the_named_scheme_chooses_the_palette_under_the_overrides() {
+        assert_eq!(Palette::of(&theme("scheme = \"light\"")), Palette::LIGHT);
+        assert_eq!(Palette::of(&theme("scheme = \"mono\"")), Palette::MONO);
+        assert_eq!(
+            Palette::of(&theme("scheme = \"light\"")).level(Some(10)),
+            Palette::LIGHT.critical,
+            "the level scale follows the scheme too"
+        );
+    }
+
+    #[test]
+    fn each_override_replaces_one_colour_of_the_scheme_it_sits_on() {
+        let palette = Palette::of(&theme(
+            "scheme = \"light\"\naccent = \"#39c5cf\"\nlow = \"#c69026\"\n",
+        ));
+
+        assert_eq!(
+            palette.accent,
+            Color::Rgb(0x39, 0xc5, 0xcf),
+            "what the file named"
+        );
+        assert_eq!(palette.low, Color::Rgb(0xc6, 0x90, 0x26));
+        assert_eq!(palette.ok, Palette::LIGHT.ok, "and nothing else moved");
+        assert_eq!(palette.dim, Palette::LIGHT.dim);
+    }
+
+    #[test]
+    fn an_override_carries_the_brighter_variant_paired_with_it() {
+        let palette = Palette::of(&theme("critical = \"#f47067\"\nok = \"#57ab5a\"\n"));
+
+        assert_eq!(palette.alert, palette.critical, "one red, not two");
+        assert_eq!(palette.charging, palette.ok);
+        assert_ne!(
+            Palette::DARK.alert,
+            Palette::DARK.critical,
+            "which the scheme itself does distinguish"
+        );
+    }
+
+    #[test]
+    fn a_look_takes_its_glyph_from_the_file_and_its_colours_from_the_scheme() {
+        let look = Look::of(
+            &theme("scheme = \"mono\"\ncharging_glyph = \"^\"\n"),
+            Glyphs::NERD_FONT,
+        );
+
+        assert_eq!(look.palette, Palette::MONO);
+        assert_eq!(look.glyphs.charging, "^");
+        assert_eq!(
+            Look::of(&Theme::default(), Glyphs::NERD_FONT).glyphs,
+            Glyphs::NERD_FONT,
+            "an unconfigured glyph stays the guessed one"
+        );
+    }
+
+    #[test]
+    fn a_reload_applies_the_new_theme_to_the_guess_rather_than_to_the_old_one() {
+        let overridden = Look::of(&theme("charging_glyph = \"^\""), Glyphs::NERD_FONT);
+
+        let removed = overridden.reloaded(&Theme::default());
+
+        assert_eq!(
+            removed.glyphs,
+            Glyphs::NERD_FONT,
+            "taking the override out puts the guess back"
+        );
+        assert_eq!(
+            overridden.reloaded(&theme("scheme = \"light\"")).palette,
+            Palette::LIGHT
+        );
     }
 
     #[test]

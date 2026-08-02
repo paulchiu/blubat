@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use blubat_core::{Device, Notifications, Snapshot, Watch, parse_duration, watch_dir};
+use blubat_core::{Config, Device, Paths, Snapshot, Watch, parse_duration, watch_dir};
 
 use crate::notify::{Banner, Desktop, Notifier};
 use crate::{Failure, reading};
@@ -28,7 +28,12 @@ pub struct Args {
 }
 
 /// Runs `blubat wait` in whichever of its two modes applies.
-pub fn run(args: &Args) -> Result<(), Failure> {
+///
+/// What ends a wait is the `--until` level and nothing else: the config's
+/// thresholds are about the events blubat raises, and a wait is a question the
+/// caller has already answered. The banner that ends one is the config's, since
+/// nothing else decides what a blubat notification sounds like.
+pub fn run(args: &Args, paths: &Paths) -> Result<(), Failure> {
     if daemon_is_running() {
         watch_dir()
             .map_err(Failure::from)
@@ -42,8 +47,10 @@ pub fn run(args: &Args) -> Result<(), Failure> {
                 );
             })
     } else {
+        let sound = Config::load(paths.config_file())?.notifications.sound;
+
         wait_for_level(args, reading).map(|(device, level)| {
-            notify(&format!("{device} is at {level}%, safe to unplug."));
+            notify(&format!("{device} is at {level}%, safe to unplug."), &sound);
             println!("{device} reached {level}%");
         })
     }
@@ -139,14 +146,9 @@ fn wait_for_level(args: &Args, read: impl Fn() -> Snapshot) -> Result<(String, u
     }
 }
 
-/// Posts the banner that ends a wait.
-///
-/// Sounds as an unconfigured blubat does: a wait is a one-shot command that
-/// resolves no config of its own. A wait that cannot notify still exits 0.
-fn notify(body: &str) {
-    let sound = Notifications::default().sound;
-
-    if let Err(problem) = Desktop.post(&Banner::new("blubat", body, &sound)) {
+/// Posts the banner that ends a wait, which cannot fail the wait itself.
+fn notify(body: &str, sound: &str) {
+    if let Err(problem) = Desktop.post(&Banner::new("blubat", body, sound)) {
         eprintln!("blubat: {problem}");
     }
 }

@@ -7,9 +7,6 @@
 //! Script Editor. That is why a send can succeed and show nothing, and why
 //! [`run`] exists to name the identity that was used.
 
-// TODO: remove once the poll loop calls `announce`; only tests reach it so far.
-#![allow(dead_code)]
-
 use std::fmt;
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
@@ -237,7 +234,7 @@ fn literal(text: &str) -> String {
 /// wire the real one up.
 #[cfg(test)]
 pub mod fake {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use super::{Banner, Delivery, Notifier, Route};
 
@@ -282,6 +279,14 @@ pub mod fake {
                     identity: String::from("com.example.recorder"),
                 }),
             }
+        }
+    }
+
+    /// So a test can read what was posted while the code under test owns the
+    /// notifier it posted through.
+    impl Notifier for Arc<Recorder> {
+        fn post(&self, banner: &Banner) -> Result<Delivery, String> {
+            self.as_ref().post(banner)
         }
     }
 }

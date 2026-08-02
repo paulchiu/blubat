@@ -14,21 +14,25 @@ use crossterm::event::{self, Event as Terminal, KeyCode, KeyEventKind, KeyModifi
 
 use super::app::{Event, Key};
 
-/// Merges keypresses and readings into the one channel the loop waits on.
+/// Merges keypresses and readings into the one channel the loop waits on, and
+/// hands back the end anything else can join them on.
 ///
-/// The readings thread ends once the returned receiver is dropped, which is
-/// what stops the poller. The keypress thread is parked inside a blocking
+/// A hook finishing is the third source, and it arrives on a thread of its own
+/// whenever it finishes, so it needs the same door rather than a wait of its
+/// own. The readings thread ends once the returned receiver is dropped, which
+/// is what stops the poller. The keypress thread is parked inside a blocking
 /// terminal read and cannot notice, so it is detached: the process exit
 /// reclaims it, and anything that outlives the dashboard would have to hand it
 /// a way to be woken.
-pub fn events(readings: Receiver<Snapshot>) -> Receiver<Event> {
+pub fn events(readings: Receiver<Snapshot>) -> (Sender<Event>, Receiver<Event>) {
     let (sender, events) = mpsc::channel();
     let keys = sender.clone();
+    let others = sender.clone();
 
     thread::spawn(move || forward(readings.into_iter().map(Event::Reading), &sender));
     thread::spawn(move || forward(keypresses(), &keys));
 
-    events
+    (others, events)
 }
 
 /// Sends everything `source` produces until the loop stops listening.

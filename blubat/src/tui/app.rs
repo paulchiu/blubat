@@ -7,10 +7,9 @@
 
 use std::time::Duration;
 
-use blubat_core::{Device, History, Snapshot, Timestamp};
+use blubat_core::{Config, Device, History, Snapshot, Timestamp};
 
-use super::glyph::Glyphs;
-use super::theme;
+use super::theme::{self, Look};
 use super::view::{Filter, Rows, View};
 
 /// One advertised key: what to press, and what pressing it does.
@@ -22,7 +21,7 @@ pub struct Binding {
 }
 
 /// The dashboard keymap, in the order the footer and the overlay list it.
-pub const KEYMAP: [Binding; 8] = [
+pub const KEYMAP: [Binding; 9] = [
     Binding {
         keys: "q",
         label: "quit",
@@ -52,6 +51,10 @@ pub const KEYMAP: [Binding; 8] = [
         label: "show hidden",
     },
     Binding {
+        keys: "r",
+        label: "reload",
+    },
+    Binding {
         keys: "?",
         label: "help",
     },
@@ -67,9 +70,10 @@ const CLEAR_FILTER: Binding = Binding {
 };
 
 /// What the overlay says beyond the keys themselves.
-pub const NOTES: [&str; 2] = [
+pub const NOTES: [&str; 3] = [
     "enter opens the detail view, which arrives later.",
     "h hides for this session only; a lasting hide arrives later.",
+    "r re-reads the config file; one it cannot read changes nothing.",
 ];
 
 /// The keys the keymap overlay leaves live, since it swallows every other one.
@@ -151,6 +155,8 @@ pub enum Action {
     ClearFilter,
     ToggleHidden,
     ShowHidden,
+    /// Asks the loop to read the config file again, which the reducer cannot.
+    Reload,
     /// Bound and drawn in the keymap, but the detail view arrives later.
     Detail,
 }
@@ -167,9 +173,37 @@ impl Action {
             Key::Char('/') => Some(Action::OpenFilter),
             Key::Char('h') => Some(Action::ToggleHidden),
             Key::Char('H') => Some(Action::ShowHidden),
+            Key::Char('r') => Some(Action::Reload),
             Key::Enter => Some(Action::Detail),
             Key::Escape => Some(Action::ClearFilter),
             _ => None,
+        }
+    }
+}
+
+/// A line the dashboard puts up about itself rather than about a device.
+///
+/// Cleared by the next keypress, since what it reports is what the last one
+/// came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    pub text: String,
+    /// Whether it reports a problem, which is drawn in the alert colour.
+    pub problem: bool,
+}
+
+impl Notice {
+    pub fn said(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            problem: false,
+        }
+    }
+
+    pub fn problem(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            problem: true,
         }
     }
 }
@@ -184,6 +218,10 @@ pub enum Event {
     Reading(Snapshot),
     /// The redraw timer expired at this moment.
     Tick(Timestamp),
+    /// What the loop made of the reload [`Action::Reload`] asked for.
+    Reloaded(Result<Config, String>),
+    /// Something the loop did that the user needs telling about.
+    Note(Notice),
 }
 
 /// Everything the dashboard draws, and nothing else.
@@ -205,13 +243,21 @@ pub struct App {
     pub interval: Duration,
     /// Which devices are shown, and in what order.
     pub view: View,
-    /// The glyphs to draw with, handed in rather than detected here so the
-    /// config file's override has somewhere to land.
-    pub glyphs: Glyphs,
+    /// The colours and glyphs to draw with, resolved from `config` outside the
+    /// reducer since guessing at a terminal's font is not a pure question.
+    pub look: Look,
+    /// The config in force, which the loop judges each reading against.
+    pub config: Config,
+    /// What the dashboard has to say about itself, if anything.
+    pub notice: Option<Notice>,
+    /// Set by `r` and cleared by what the loop reads: the reducer cannot touch
+    /// a file, so the request travels as state and the answer comes back as an
+    /// event.
+    pub reload: bool,
 }
 
 impl App {
-    pub fn new(interval: Duration, now: Timestamp, glyphs: Glyphs) -> Self {
+    pub fn new(interval: Duration, now: Timestamp, look: Look, config: Config) -> Self {
         Self {
             reading: None,
             history: History::default(),
@@ -221,7 +267,10 @@ impl App {
             now,
             interval,
             view: View::default(),
-            glyphs,
+            look,
+            config,
+            notice: None,
+            reload: false,
         }
     }
 
@@ -297,15 +346,58 @@ impl App {
 }
 
 /// The whole state machine: one event in, the next state out.
+///
+/// A keypress clears whatever the dashboard was saying about itself first: a
+/// notice reports what the last key came to, so the next one has read it.
 pub fn update(app: App, event: Event) -> App {
     let app = match event {
-        Event::Key(key) => pressed(app, key),
+        Event::Key(key) => pressed(
+            App {
+                notice: None,
+                ..app
+            },
+            key,
+        ),
         Event::Interrupt => act(app, Action::Quit),
         Event::Reading(reading) => receive(app, reading),
         Event::Tick(now) => App { now, ..app },
+        Event::Reloaded(read) => reloaded(app, read),
+        Event::Note(notice) => App {
+            notice: Some(notice),
+            ..app
+        },
     };
 
     onto_a_row(app)
+}
+
+/// Takes the config the loop read, or keeps the one in force and says why.
+///
+/// The dashboard never exits over a config file. A rejected reload moves
+/// nothing but the line reporting it, so the thresholds, theme, glyphs and
+/// hooks that were working a moment ago carry on working.
+fn reloaded(app: App, read: Result<Config, String>) -> App {
+    let app = App {
+        reload: false,
+        ..app
+    };
+
+    match read {
+        Ok(config) => {
+            let look = app.look.reloaded(&config.theme);
+
+            App {
+                look,
+                config,
+                notice: Some(Notice::said("config reloaded")),
+                ..app
+            }
+        }
+        Err(problem) => App {
+            notice: Some(Notice::problem(problem)),
+            ..app
+        },
+    }
 }
 
 /// A key means what the mode it was pressed in says it means.
@@ -379,6 +471,10 @@ fn act(app: App, action: Action) -> App {
         Action::ClearFilter => cleared(app),
         Action::ToggleHidden => hide_selected(app),
         Action::ShowHidden => viewed(app, |view| view.show_hidden = !view.show_hidden),
+        Action::Reload => App {
+            reload: true,
+            ..app
+        },
         // The detail view arrives later. The key is bound and advertised now so
         // the keymap it appears in is the one that ships.
         Action::Detail => app,
@@ -443,8 +539,10 @@ fn onto_a_row(app: App) -> App {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use blubat_core::{Address, ChargeState, Levels, Source};
+    use blubat_core::{Address, ChargeState, Levels, Source, Theme};
 
+    use super::super::glyph::Glyphs;
+    use super::super::theme::Palette;
     use super::*;
 
     pub const READ_AT: Timestamp = Timestamp::from_unix(1_785_643_199);
@@ -486,7 +584,17 @@ pub(super) mod tests {
     }
 
     pub fn app() -> App {
-        App::new(INTERVAL, READ_AT, Glyphs::ASCII)
+        App::new(
+            INTERVAL,
+            READ_AT,
+            Look::of(&Theme::default(), Glyphs::ASCII),
+            Config::default(),
+        )
+    }
+
+    /// A parsed config, for the reloads that have to land somewhere visible.
+    pub fn config(written: &str) -> Config {
+        Config::parse(written).expect("the test config parses")
     }
 
     /// An app holding a reading, which is the state most tests start from.
@@ -888,6 +996,83 @@ pub(super) mod tests {
 
         assert_eq!(key(app.clone(), Key::Enter), app);
         assert_eq!(Action::of(Key::Enter), Some(Action::Detail));
+    }
+
+    #[test]
+    fn r_asks_the_loop_for_a_reload_from_the_dashboard_alone() {
+        let dashboard = press(loaded(), "r");
+        let filtering = press(loaded(), "/r");
+        let overlay = press(loaded(), "?");
+
+        assert!(dashboard.reload, "the dashboard binds it");
+        assert!(!filtering.reload, "the filter takes it as text");
+        assert_eq!(filtering.view.filter.query, "r");
+        assert_eq!(
+            press(overlay.clone(), "r"),
+            overlay,
+            "and the overlay swallows what it does not advertise"
+        );
+    }
+
+    #[test]
+    fn a_reload_takes_every_value_the_new_file_carries() {
+        let asked = press(loaded(), "r");
+
+        let reloaded = update(
+            asked,
+            Event::Reloaded(Ok(config(
+                "[defaults]\nlow = 30\n\n\
+                 [theme]\nscheme = \"light\"\ncharging_glyph = \"^\"\n\n\
+                 [[hook]]\nevent = \"charged\"\ncommand = \"unplug\"\n",
+            ))),
+        );
+
+        assert!(!reloaded.reload, "the request is answered");
+        assert_eq!(reloaded.config.defaults.low, Some(30), "thresholds");
+        assert_eq!(reloaded.look.palette, Palette::LIGHT, "theme");
+        assert_eq!(reloaded.look.glyphs.charging, "^", "glyphs");
+        assert_eq!(reloaded.config.hooks.len(), 1, "hooks");
+        assert_eq!(reloaded.notice, Some(Notice::said("config reloaded")));
+    }
+
+    #[test]
+    fn a_reload_that_cannot_be_read_leaves_the_config_in_force_alone() {
+        let configured = update(
+            press(loaded(), "r"),
+            Event::Reloaded(Ok(config(
+                "[defaults]\nlow = 30\n\n[theme]\nscheme = \"light\"\n",
+            ))),
+        );
+
+        let rejected = update(
+            press(configured.clone(), "r"),
+            Event::Reloaded(Err("config.toml: expected `=` at line 3".to_string())),
+        );
+
+        assert!(rejected.running, "a typo is not a reason to stop");
+        assert_eq!(rejected.config, configured.config, "still 30");
+        assert_eq!(rejected.look, configured.look, "and still the light scheme");
+        assert!(!rejected.reload);
+        assert_eq!(
+            rejected.notice,
+            Some(Notice::problem("config.toml: expected `=` at line 3"))
+        );
+    }
+
+    #[test]
+    fn a_notice_is_read_once_and_the_next_key_clears_it() {
+        let said = update(loaded(), Event::Note(Notice::problem("a hook exited 1")));
+
+        assert_eq!(
+            said.notice.as_ref().map(|notice| notice.problem),
+            Some(true)
+        );
+        assert_eq!(press(said.clone(), "j").notice, None);
+        assert_eq!(
+            update(said.clone(), Event::Tick(READ_AT)).notice,
+            said.notice,
+            "and a tick alone does not, since nobody has looked"
+        );
     }
 
     #[test]

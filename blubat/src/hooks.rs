@@ -8,9 +8,6 @@
 //! Whether a hook is due at all is the engine's decision, not this module's.
 //! [`dispatch`] asks it, because recording the run is part of allowing it.
 
-// TODO: remove once the poll loop calls these; only tests reach them so far.
-#![allow(dead_code)]
-
 use std::fmt;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -98,17 +95,13 @@ impl Runner {
     }
 
     /// A runner that hands every outcome to `report`, which the dashboard uses
-    /// to put hook results in its event log.
+    /// to put a hook that went wrong on its status line rather than on top of
+    /// the frame it is drawing.
     pub fn reporting(report: impl Fn(Outcome) + Send + Sync + 'static) -> Self {
         Self {
             timeout: Self::DEFAULT_TIMEOUT,
             report: Arc::new(report),
         }
-    }
-
-    /// Replaces the timeout hooks that name none of their own run under.
-    pub fn with_timeout(self, timeout: Duration) -> Self {
-        Self { timeout, ..self }
     }
 }
 
@@ -253,7 +246,7 @@ fn log(outcome: Outcome) {
 /// real runner up.
 #[cfg(test)]
 pub mod fake {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use super::{Hook, Hooks, Raised};
 
@@ -280,6 +273,14 @@ pub mod fake {
                 .lock()
                 .expect("an unpoisoned recorder")
                 .push(hook.command.clone());
+        }
+    }
+
+    /// So a test can read what was started while the code under test owns the
+    /// sink it started them through.
+    impl Hooks for Arc<Recorder> {
+        fn start(&self, hook: &Hook, raised: &Raised) {
+            self.as_ref().start(hook, raised);
         }
     }
 }
@@ -516,10 +517,14 @@ mod tests {
     #[test]
     fn starting_a_hook_hands_it_to_a_thread_rather_than_waiting_for_it() {
         let (sender, outcomes) = mpsc::channel();
-        let runner = Runner::reporting(move |outcome| {
-            let _ = sender.send(outcome);
-        })
-        .with_timeout(Duration::from_millis(100));
+        // Built here rather than through `reporting` so the runner's own
+        // timeout is short enough for a test to wait out.
+        let runner = Runner {
+            timeout: Duration::from_millis(100),
+            report: Arc::new(move |outcome| {
+                let _ = sender.send(outcome);
+            }),
+        };
         let started = Instant::now();
 
         runner.start(

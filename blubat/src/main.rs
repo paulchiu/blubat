@@ -135,10 +135,10 @@ fn run(cli: Cli) -> Result<(), Failure> {
             json,
             number,
         }) => report::status(&reading(), device.as_deref(), Format::of(json, number)),
-        Some(Command::Wait(args)) => wait::run(&args),
+        Some(Command::Wait(args)) => wait::run(&args, &paths(cli.config)?),
         Some(Command::Config { command }) => config::run(&command, &paths(cli.config)?),
         Some(Command::NotifyTest) => notify::run(&paths(cli.config)?),
-        None if io::stdout().is_terminal() => tui::run(),
+        None if io::stdout().is_terminal() => tui::run(&paths(cli.config)?),
         None => offer_the_commands(),
     }
 }

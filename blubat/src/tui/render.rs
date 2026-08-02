@@ -11,9 +11,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Padding, Paragraph, Row, Table, TableState};
 
-use super::app::{App, KEYMAP, Mode, NOTES};
+use super::app::{App, KEYMAP, Mode, NOTES, Notice};
 use super::columns::{self, Column};
-use super::theme;
+use super::theme::{self, Palette};
 use super::view::Rows;
 
 /// Kept in front of every name so rows stay aligned whatever the gutter holds.
@@ -42,8 +42,11 @@ const ALERT_WIDTH: u16 = 14;
 /// visible row.
 pub fn render(frame: &mut Frame, app: &App, table: &mut TableState) {
     let screen = frame.area();
-    let [status, filter, devices, footer] = Layout::vertical([
+    // The notice takes a line only while there is one, so the dashboard keeps
+    // the layout it usually has.
+    let [status, notice, filter, devices, footer] = Layout::vertical([
         Constraint::Length(1),
+        Constraint::Length(u16::from(app.notice.is_some())),
         Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(1),
@@ -51,16 +54,33 @@ pub fn render(frame: &mut Frame, app: &App, table: &mut TableState) {
     .horizontal_margin(1)
     .areas(screen);
 
+    let palette = app.look.palette;
     let rows = app.rows();
 
     render_status(frame, app, status);
+
+    if let Some(said) = &app.notice {
+        frame.render_widget(notice_line(said, palette), notice);
+    }
+
     frame.render_widget(filter_line(app, &rows), filter);
     render_devices(frame, app, &rows, devices, table);
     frame.render_widget(keys_footer(app), footer);
 
     if app.mode == Mode::Keymap {
-        render_keymap(frame, screen);
+        render_keymap(frame, screen, palette);
     }
+}
+
+/// What the dashboard has to say about itself, in the colour of how it went.
+fn notice_line(notice: &Notice, palette: Palette) -> Line<'static> {
+    let colour = if notice.problem {
+        palette.alert
+    } else {
+        palette.accent
+    };
+
+    Line::from(Span::styled(notice.text.clone(), colour))
 }
 
 /// The one line of context above the table, with the alert count on the right.
@@ -74,23 +94,24 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(status_line(app, left.width), left);
 
     if right.width == ALERT_WIDTH {
-        frame.render_widget(alert_line(app.critical()), right);
+        frame.render_widget(alert_line(app.critical(), app.look.palette), right);
     }
 }
 
 fn status_line(app: &App, width: u16) -> Line<'static> {
     const NAME: &str = "blubat";
 
-    let warnings = warnings(app.warnings().len());
+    let palette = app.look.palette;
+    let warnings = warnings(app.warnings().len(), palette);
     let spent = NAME.len() + GAP.len() + warnings.content.chars().count();
     let room = usize::from(width).saturating_sub(spent);
 
     Line::from(vec![
         Span::styled(
             NAME,
-            Style::new().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+            Style::new().fg(palette.accent).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!("{GAP}{}", summary(app, room)), Color::DarkGray),
+        Span::styled(format!("{GAP}{}", summary(app, room)), palette.dim),
         warnings,
     ])
 }
@@ -130,20 +151,22 @@ fn summary(app: &App, room: usize) -> String {
 
 /// Warnings are counted rather than printed: the reading is still usable, and
 /// the count is the cue that the merge behind it is degraded.
-fn warnings(count: usize) -> Span<'static> {
+fn warnings(count: usize, palette: Palette) -> Span<'static> {
     match count {
         0 => Span::raw(""),
-        count => Span::styled(format!("{GAP}{}", counted(count, "warning")), Color::Yellow),
+        count => Span::styled(format!("{GAP}{}", counted(count, "warning")), palette.low),
     }
 }
 
 /// Only connected devices can be critical, so the inactive section never shows here.
-fn alert_line(critical: usize) -> Line<'static> {
+fn alert_line(critical: usize, palette: Palette) -> Line<'static> {
     match critical {
-        0 => Line::from(Span::styled("all ok", Color::DarkGray)).right_aligned(),
-        count => {
-            Line::from(Span::styled(format!("{ALERT}{count} critical"), Color::Red)).right_aligned()
-        }
+        0 => Line::from(Span::styled("all ok", palette.dim)).right_aligned(),
+        count => Line::from(Span::styled(
+            format!("{ALERT}{count} critical"),
+            palette.critical,
+        ))
+        .right_aligned(),
     }
 }
 
@@ -159,18 +182,15 @@ fn filter_line(app: &App, rows: &Rows<'_>) -> Line<'static> {
         return Line::default();
     }
 
+    let palette = app.look.palette;
     let cursor = if typing { CURSOR } else { "" };
-    let colour = if typing {
-        theme::ACCENT
-    } else {
-        Color::DarkGray
-    };
+    let colour = if typing { palette.accent } else { palette.dim };
 
     Line::from(vec![
         Span::styled(format!("/{}{cursor}", filter.query), colour),
         Span::styled(
             format!("{GAP}{}", counted(rows.len(), "match")),
-            Color::DarkGray,
+            palette.dim,
         ),
     ])
 }
@@ -206,6 +226,7 @@ fn table_row(rows: &Rows<'_>, selected: usize) -> usize {
 
 /// The device table: who, how full, and what they are doing.
 fn device_table<'a>(app: &'a App, rows: &Rows<'a>, width: u16) -> Table<'a> {
+    let palette = app.look.palette;
     let columns = columns::fitting(width);
     let header = Row::new(
         columns
@@ -213,7 +234,7 @@ fn device_table<'a>(app: &'a App, rows: &Rows<'a>, width: u16) -> Table<'a> {
             .map(|column| header_cell(*column))
             .collect::<Vec<_>>(),
     )
-    .style(Color::DarkGray);
+    .style(palette.dim);
     let widths = columns
         .iter()
         .map(|column| column.constraint())
@@ -226,7 +247,7 @@ fn device_table<'a>(app: &'a App, rows: &Rows<'a>, width: u16) -> Table<'a> {
         .collect::<Vec<_>>();
 
     if !rows.inactive.is_empty() {
-        table.push(section_row(rows.inactive.len()));
+        table.push(section_row(rows.inactive.len(), palette));
         table.extend(
             rows.inactive
                 .iter()
@@ -237,8 +258,8 @@ fn device_table<'a>(app: &'a App, rows: &Rows<'a>, width: u16) -> Table<'a> {
     Table::new(table, widths)
         .header(header)
         .column_spacing(1)
-        .row_highlight_style(Style::new().bg(theme::SELECTION_BG))
-        .highlight_symbol(Span::styled(MARKER, Style::new().fg(theme::ACCENT)))
+        .row_highlight_style(Style::new().bg(palette.selection))
+        .highlight_symbol(Span::styled(MARKER, Style::new().fg(palette.accent)))
 }
 
 fn header_cell(column: Column) -> Cell<'static> {
@@ -261,10 +282,10 @@ impl Section {
     ///
     /// Disconnected devices render uniformly dim: their level is what macOS
     /// last persisted, so nothing there competes with a live reading.
-    fn tint(self, colour: Color) -> Color {
+    fn tint(self, colour: Color, palette: Palette) -> Color {
         match self {
             Section::Active => colour,
-            Section::Inactive => Color::DarkGray,
+            Section::Inactive => palette.dim,
         }
     }
 }
@@ -275,13 +296,14 @@ fn device_row<'a>(
     columns: &[Column],
     section: Section,
 ) -> Row<'a> {
+    let palette = app.look.palette;
     let critical = section == Section::Active && theme::is_critical(device.active_level());
     let cells = columns
         .iter()
         .map(|column| cell(app, device, *column, section, critical))
         .collect::<Vec<_>>();
 
-    Row::new(cells).style(section.tint(Color::Gray))
+    Row::new(cells).style(section.tint(palette.text, palette))
 }
 
 fn cell<'a>(
@@ -291,20 +313,21 @@ fn cell<'a>(
     section: Section,
     critical: bool,
 ) -> Cell<'a> {
+    let palette = app.look.palette;
     let level = device.levels.lowest();
 
     match column {
-        Column::Name => Cell::from(name(device, section, critical)),
+        Column::Name => Cell::from(name(device, section, critical, palette)),
         Column::Kind => Cell::from(Span::styled(
             device.kind.as_deref().unwrap_or(theme::UNKNOWN),
-            section.tint(Color::DarkGray),
+            section.tint(palette.dim, palette),
         )),
-        Column::Bar => Cell::from(bar(level, section)),
+        Column::Bar => Cell::from(bar(level, section, palette)),
         Column::Level => Cell::from(
             Line::from(Span::styled(
                 theme::percent(level),
                 Style::new()
-                    .fg(section.tint(theme::level_color(level)))
+                    .fg(section.tint(palette.level(level), palette))
                     .add_modifier(Modifier::BOLD),
             ))
             .right_aligned(),
@@ -312,15 +335,22 @@ fn cell<'a>(
         Column::State => {
             let (text, colour) = state(app, device, critical);
 
-            Cell::from(Span::styled(text, section.tint(colour)))
+            Cell::from(Span::styled(text, section.tint(colour, palette)))
         }
         Column::Trend => Cell::from(Span::styled(
             theme::sparkline(&recent_levels(app, device)),
-            section.tint(if critical { Color::Red } else { Color::Gray }),
+            section.tint(
+                if critical {
+                    palette.critical
+                } else {
+                    palette.text
+                },
+                palette,
+            ),
         )),
         Column::LastSeen => Cell::from(Span::styled(
             theme::age(app.now.unix().saturating_sub(device.read_at.unix())),
-            section.tint(Color::DarkGray),
+            section.tint(palette.dim, palette),
         )),
     }
 }
@@ -343,28 +373,28 @@ fn recent_levels(app: &App, device: &Device) -> Vec<u8> {
 }
 
 /// The name, behind the gutter that a critical device puts its mark in.
-fn name(device: &Device, section: Section, critical: bool) -> Line<'_> {
+fn name(device: &Device, section: Section, critical: bool, palette: Palette) -> Line<'_> {
     let marker = if critical {
-        Span::styled(ALERT, Color::Red)
+        Span::styled(ALERT, palette.critical)
     } else {
         Span::raw(GUTTER)
     };
     let colour = if critical {
-        Color::LightRed
+        palette.alert
     } else {
-        section.tint(Color::White)
+        section.tint(palette.strong, palette)
     };
 
     Line::from(vec![marker, Span::styled(device.name.as_str(), colour)])
 }
 
 /// The filled run in the level colour, the trough behind it dim.
-fn bar(level: Option<u8>, section: Section) -> Line<'static> {
+fn bar(level: Option<u8>, section: Section, palette: Palette) -> Line<'static> {
     let (filled, trough) = theme::battery_bar(level);
 
     Line::from(vec![
-        Span::styled(filled, section.tint(theme::level_color(level))),
-        Span::styled(trough, Color::DarkGray),
+        Span::styled(filled, section.tint(palette.level(level), palette)),
+        Span::styled(trough, palette.dim),
     ])
 }
 
@@ -374,27 +404,29 @@ fn bar(level: Option<u8>, section: Section) -> Line<'static> {
 /// disconnected one's level is labelled last seen, since macOS keeps reporting
 /// it with no timestamp long after the device went away.
 fn state(app: &App, device: &Device, critical: bool) -> (String, Color) {
+    let palette = app.look.palette;
+
     if !device.has_battery() {
-        ("unreported".to_string(), Color::DarkGray)
+        ("unreported".to_string(), palette.dim)
     } else if !device.connected {
-        ("last seen".to_string(), Color::DarkGray)
+        ("last seen".to_string(), palette.dim)
     } else if device.charge == ChargeState::Charging {
         (
-            format!("{} charging", app.glyphs.charging),
-            Color::LightGreen,
+            format!("{} charging", app.look.glyphs.charging),
+            palette.charging,
         )
     } else if critical {
-        (device.charge.to_string(), Color::LightRed)
+        (device.charge.to_string(), palette.alert)
     } else {
-        (device.charge.to_string(), Color::Gray)
+        (device.charge.to_string(), palette.text)
     }
 }
 
 /// Announces the disconnected devices, a line clear of the live ones.
-fn section_row<'a>(inactive: usize) -> Row<'a> {
+fn section_row<'a>(inactive: usize, palette: Palette) -> Row<'a> {
     Row::new(vec![Cell::from(Span::styled(
         format!("inactive ({inactive})"),
-        Color::DarkGray,
+        palette.dim,
     ))])
     .top_margin(1)
 }
@@ -411,18 +443,19 @@ fn nothing_to_show(app: &App) -> Paragraph<'static> {
         "every device is hidden; press H to show them"
     };
 
-    Paragraph::new(message).style(Color::DarkGray)
+    Paragraph::new(message).style(app.look.palette.dim)
 }
 
 /// The keys live in the current view, which is what makes the footer contextual.
 fn keys_footer(app: &App) -> Line<'static> {
+    let palette = app.look.palette;
     let spans = app
         .keys()
         .iter()
         .flat_map(|binding| {
             [
-                Span::styled(binding.keys, Color::Gray),
-                Span::styled(format!(" {}  ", binding.label), Color::DarkGray),
+                Span::styled(binding.keys, palette.text),
+                Span::styled(format!(" {}  ", binding.label), palette.dim),
             ]
         })
         .collect::<Vec<_>>();
@@ -431,24 +464,24 @@ fn keys_footer(app: &App) -> Line<'static> {
 }
 
 /// The full keymap, centred over the dashboard rather than replacing it.
-fn render_keymap(frame: &mut Frame, screen: Rect) {
+fn render_keymap(frame: &mut Frame, screen: Rect, palette: Palette) {
     let height = KEYMAP.len() + NOTES.len() + 3;
     let area = centred(screen, 68, u16::try_from(height).unwrap_or(u16::MAX));
 
     frame.render_widget(Clear, area);
-    frame.render_widget(keymap(), area);
+    frame.render_widget(keymap(palette), area);
 }
 
-fn keymap() -> Paragraph<'static> {
+fn keymap(palette: Palette) -> Paragraph<'static> {
     let keys = KEYMAP.iter().map(|binding| {
         Line::from(vec![
-            Span::styled(format!("{:>5}  ", binding.keys), theme::ACCENT),
+            Span::styled(format!("{:>5}  ", binding.keys), palette.accent),
             Span::raw(binding.label),
         ])
     });
     let notes = NOTES
         .iter()
-        .map(|note| Line::from(Span::styled(*note, Color::DarkGray)));
+        .map(|note| Line::from(Span::styled(*note, palette.dim)));
     let lines = keys
         .chain(std::iter::once(Line::default()))
         .chain(notes)
@@ -497,10 +530,20 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::buffer::{Buffer, Cell as Drawn};
 
-    use super::super::app::tests::{READ_AT, app, device, loaded, press, reading, three_devices};
+    use super::super::app::tests::{
+        READ_AT, app, config, device, loaded, press, reading, three_devices,
+    };
     use super::super::app::{Event, Key, update};
-    use super::super::glyph::Glyphs;
     use super::*;
+
+    /// The same dashboard under a `[theme]` table, which is the only thing that
+    /// ever changes what it draws in.
+    fn looking(app: App, theme: &str) -> App {
+        let theme = config(&format!("[theme]\n{theme}\n")).theme;
+        let look = app.look.reloaded(&theme);
+
+        App { look, ..app }
+    }
 
     /// The buffer left behind after drawing each of `apps` in turn.
     ///
@@ -684,7 +727,7 @@ mod tests {
 
 
 
- q quit  j/k move  enter detail  s sort  / filter  h hide  H show hidden  ? help";
+ q quit  j/k move  enter detail  s sort  / filter  h hide  H show hidden  r reload  ? help";
         assert_frame(&dashboard(), 100, 30, expected);
     }
 
@@ -789,21 +832,21 @@ mod tests {
      MX Keys M Mac            keyboard     ████████░░░░  67% on battery  █▇▅▄▂▁ now
 
    inactive (2)
-     AirPods Pro              audio        █████░░░░░░░  45% last seen   ······ 3h ago
-     MX Master 3┌ keys ────────────────────────────────────────────────────────────┐go
-                │     q  quit                                                      │
+     AirPods Pro┌ keys ────────────────────────────────────────────────────────────┐go
+     MX Master 3│     q  quit                                                      │go
                 │   j/k  move                                                      │
                 │ enter  detail                                                    │
                 │     s  sort                                                      │
                 │     /  filter                                                    │
                 │     h  hide                                                      │
                 │     H  show hidden                                               │
+                │     r  reload                                                    │
                 │     ?  help                                                      │
                 │                                                                  │
                 │ enter opens the detail view, which arrives later.                │
                 │ h hides for this session only; a lasting hide arrives later.     │
+                │ r re-reads the config file; one it cannot read changes nothing.  │
                 └──────────────────────────────────────────────────────────────────┘
-
 
 
 
@@ -936,10 +979,7 @@ mod tests {
     #[test]
     fn the_charging_glyph_is_the_one_the_dashboard_was_given() {
         let ascii = dashboard();
-        let nerd_font = App {
-            glyphs: Glyphs::NERD_FONT,
-            ..dashboard()
-        };
+        let nerd_font = looking(dashboard(), "charging_glyph = \"\u{f0e7}\"");
 
         assert!(line_containing(&ascii, "Magic Trackpad").contains("+ charging"));
         assert!(
@@ -1052,28 +1092,96 @@ mod tests {
     fn the_palette_reaches_the_buffer_it_is_drawn_into() {
         let buffer = buffer_of(&[&press(dashboard(), "j")], 100, 30);
         let cell = |needle| cell_of(&buffer, needle);
+        let dark = Palette::DARK;
 
-        assert_eq!(cell("blubat").fg, theme::ACCENT);
+        assert_eq!(cell("blubat").fg, dark.accent);
         assert!(cell("blubat").modifier.contains(Modifier::BOLD));
 
-        assert_eq!(cell("Soundcore").fg, Color::LightRed, "a critical name");
-        assert_eq!(cell("12%").fg, Color::Red, "and the level under it");
+        assert_eq!(cell("Soundcore").fg, dark.alert, "a critical name");
+        assert_eq!(cell("12%").fg, dark.critical, "and the level under it");
         assert!(cell("12%").modifier.contains(Modifier::BOLD));
-        assert_eq!(cell("67%").fg, Color::Green);
+        assert_eq!(cell("67%").fg, dark.ok);
 
         assert_eq!(
             cell("Magic Trackpad").bg,
-            theme::SELECTION_BG,
+            dark.selection,
             "the selected row is tinted rather than inverted"
         );
         assert_eq!(cell("MX Keys").bg, Color::Reset);
 
         assert_eq!(
             cell("AirPods Pro").fg,
-            Color::DarkGray,
+            dark.dim,
             "the inactive section is dim throughout"
         );
-        assert_eq!(cell("45%").fg, Color::DarkGray);
+        assert_eq!(cell("45%").fg, dark.dim);
+    }
+
+    /// The whole point of `[theme]`: a scheme and its overrides have to reach
+    /// the cells rather than a palette nothing draws with.
+    #[test]
+    fn the_configured_scheme_and_its_overrides_reach_the_cells() {
+        let themed = looking(
+            press(dashboard(), "j"),
+            "scheme = \"light\"\naccent = \"#39c5cf\"\ncritical = \"#f47067\"",
+        );
+        let buffer = buffer_of(&[&themed], 100, 30);
+        let cell = |needle| cell_of(&buffer, needle);
+        let overridden = Color::Rgb(0xf4, 0x70, 0x67);
+
+        assert_eq!(
+            cell("blubat").fg,
+            Color::Rgb(0x39, 0xc5, 0xcf),
+            "the accent"
+        );
+        assert_eq!(cell("12%").fg, overridden, "the bottom band of the scale");
+        assert_eq!(
+            cell("Soundcore").fg,
+            overridden,
+            "and the brighter variant paired with it"
+        );
+        assert_eq!(
+            cell("67%").fg,
+            Palette::LIGHT.ok,
+            "unwritten, so the scheme's"
+        );
+        assert_eq!(cell("AirPods Pro").fg, Palette::LIGHT.dim);
+        assert_eq!(cell("Magic Trackpad").bg, Palette::LIGHT.selection);
+    }
+
+    #[test]
+    fn a_notice_takes_a_line_of_its_own_only_while_there_is_one() {
+        let quiet = drawn(&loaded(), 100, 30);
+        let said = update(
+            loaded(),
+            Event::Note(Notice::problem("config.toml: expected `=` at line 3")),
+        );
+
+        assert!(quiet[1].is_empty(), "no line is spent on nothing to say");
+        assert!(
+            line_containing(&said, "expected `=`").contains("config.toml"),
+            "and the problem is on screen rather than on stderr"
+        );
+        assert_eq!(
+            cell_of(&buffer_of(&[&said], 100, 30), "config.toml").fg,
+            Palette::DARK.alert,
+            "in the colour of how it went"
+        );
+        assert_eq!(
+            cell_of(
+                &buffer_of(
+                    &[&update(
+                        loaded(),
+                        Event::Note(Notice::said("config reloaded"))
+                    )],
+                    100,
+                    30
+                ),
+                "config reloaded"
+            )
+            .fg,
+            Palette::DARK.accent
+        );
     }
 
     #[test]
