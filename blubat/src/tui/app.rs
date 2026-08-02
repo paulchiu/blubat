@@ -146,10 +146,10 @@ const DETAIL_ACTIONS: [Action; 5] = [
 /// What the overlay says beyond the keys themselves.
 pub const NOTES: [&str; 5] = [
     "the detail chart is this run only; a restart starts it empty.",
-    "h and i both last: together they are the one table blubat writes.",
+    "h and i last: the one table blubat writes to the config file.",
     "a hidden device is hidden here only, never unpaired from macOS.",
     "r re-reads the config file; one it cannot read changes nothing.",
-    "c opens the config file in $EDITOR and reloads it once you return.",
+    "c opens the config in $EDITOR and reloads it once it closes.",
 ];
 
 /// The keys the keymap overlay leaves live, since it swallows every other one.

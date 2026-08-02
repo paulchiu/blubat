@@ -25,11 +25,10 @@ const POLL: Duration = Duration::from_millis(50);
 ///
 /// [`super::terminal::Session::suspended`] clears this before an editor takes
 /// the real terminal for `c`, and sets it again once the editor hands it back.
-/// The reader only ever calls `crossterm::event::poll`, which watches the
-/// terminal for readiness without consuming anything, while suspended, so a
-/// keystroke meant for the editor is never read out from under it; it is
-/// `crossterm::event::read` that actually takes bytes off the terminal, and
-/// that call is gated on this being open.
+/// A closed gate parks the reader entirely, so nothing touches the terminal
+/// while the editor owns it. The one poll already in flight when the gate
+/// closes can still buffer typeahead on its way through crossterm, a window
+/// of at most one [`POLL`] that ends before the editor is even spawned.
 #[derive(Clone)]
 pub struct Admission {
     open: Arc<(Mutex<bool>, Condvar)>,
@@ -124,9 +123,9 @@ fn forward(source: impl Iterator<Item = Event>, sink: &Sender<Event>) {
 /// loop redraws on its own tick and the next draw picks up the new size, so
 /// nothing needs waking for it.
 ///
-/// Polls rather than reading outright: `poll` only asks whether the terminal
-/// has something waiting, so a suspend that lands between a poll and its read
-/// still leaves whatever arrived for the editor to read instead, unconsumed.
+/// Polls rather than blocking in a read forever, so a closed gate is noticed
+/// within one [`POLL`]; the re-check between a poll and its read keeps the
+/// consuming read from running once a suspend has landed.
 fn keypresses(admission: Admission) -> impl Iterator<Item = Event> {
     std::iter::from_fn(move || {
         loop {
