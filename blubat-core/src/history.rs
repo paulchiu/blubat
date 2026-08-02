@@ -97,7 +97,9 @@ pub struct History {
 }
 
 impl History {
-    /// Samples kept per device, an hour of readings at a two second tick.
+    /// Samples kept per device, which is what bounds the memory a long run
+    /// takes. How much time they stand for follows whatever interval the caller
+    /// polls at, so the window is stated in samples rather than in hours.
     pub const DEFAULT_CAPACITY: usize = 1_800;
 
     /// Keeps at most `capacity` samples per device, and at least one.
@@ -111,17 +113,17 @@ impl History {
     /// Records the live level of every device in `reading`.
     ///
     /// A disconnected device has no active level, so it contributes nothing
-    /// rather than a flat line at whatever macOS last persisted for it. Every
-    /// sample is stamped with the moment of the reading rather than the moment
-    /// its source ran, so the slow tier being reused between calls still leaves
-    /// an evenly spaced series.
+    /// rather than a flat line at whatever macOS last persisted for it. Each
+    /// sample is stamped with the moment its own device was read rather than
+    /// the moment the reading was assembled, which is what keeps a cached slow
+    /// tier level from being counted once per fast tick.
     pub fn record(&mut self, reading: &Snapshot) {
         for device in &reading.devices {
             if let Some(level) = device.active_level() {
                 self.push(
                     &device.address,
                     Sample {
-                        at: reading.read_at,
+                        at: device.read_at,
                         level,
                     },
                 );
@@ -141,8 +143,17 @@ impl History {
         Trend::from_samples(self.samples(address))
     }
 
+    /// Appends a sample taken later than everything already held.
+    ///
+    /// A stamp that does not move the series forward is dropped, so a reading
+    /// carrying a level this device was already sampled at, and a clock that
+    /// steps backwards, both leave the ring ordered oldest first.
     fn push(&mut self, address: &Address, sample: Sample) {
         let samples = self.devices.entry(address.clone()).or_default();
+
+        if samples.back().is_some_and(|newest| newest.at >= sample.at) {
+            return;
+        }
 
         while samples.len() >= self.capacity {
             samples.pop_front();
@@ -163,13 +174,14 @@ mod tests {
     use crate::device::{ChargeState, Device, Levels, Source};
 
     const HOUR: i64 = 3_600;
+    const TRACKPAD: &str = "30-82-16-f2-24-90";
 
     fn address(raw: &str) -> Address {
         Address::parse(raw).expect("valid address")
     }
 
     fn trackpad() -> Address {
-        address("30-82-16-f2-24-90")
+        address(TRACKPAD)
     }
 
     fn sample(second: i64, level: u8) -> Sample {
@@ -190,12 +202,27 @@ mod tests {
         );
     }
 
+    /// A reading whose devices were all read at the moment it was taken, which
+    /// is what the fast tier produces.
     fn reading(at: i64, devices: Vec<Device>) -> Snapshot {
         Snapshot {
             read_at: Timestamp::from_unix(at),
-            devices,
+            devices: devices
+                .into_iter()
+                .map(|device| Device {
+                    read_at: Timestamp::from_unix(at),
+                    ..device
+                })
+                .collect(),
             warnings: Vec::new(),
         }
+    }
+
+    fn levels(history: &History) -> Vec<u8> {
+        history
+            .samples(&trackpad())
+            .map(|sample| sample.level)
+            .collect()
     }
 
     fn device(raw: &str, level: Option<u8>, connected: bool) -> Device {
@@ -331,14 +358,7 @@ mod tests {
             ));
         }
 
-        assert_eq!(
-            history
-                .samples(&trackpad())
-                .map(|sample| sample.level)
-                .collect::<Vec<_>>(),
-            [60, 55, 50],
-            "oldest first"
-        );
+        assert_eq!(levels(&history), [60, 55, 50], "oldest first");
         assert_eq!(
             history
                 .samples(&trackpad())
@@ -369,13 +389,7 @@ mod tests {
             ));
         }
 
-        assert_eq!(
-            history
-                .samples(&trackpad())
-                .map(|sample| sample.level)
-                .collect::<Vec<_>>(),
-            [90, 80, 70]
-        );
+        assert_eq!(levels(&history), [90, 80, 70]);
         assert_rate(history.trend(&trackpad()).expect("a trend").rate, -10.0);
     }
 
@@ -383,19 +397,72 @@ mod tests {
     fn a_capacity_of_none_still_keeps_the_latest_reading() {
         let mut history = History::new(0);
 
-        for level in [100, 90] {
-            history.record(&reading(
-                0,
-                vec![device("30-82-16-f2-24-90", Some(level), true)],
-            ));
+        for (at, level) in [(0, 100), (HOUR, 90)] {
+            history.record(&reading(at, vec![device(TRACKPAD, Some(level), true)]));
+        }
+
+        assert_eq!(levels(&history), [90]);
+    }
+
+    #[test]
+    fn the_default_ring_keeps_the_number_of_samples_it_documents() {
+        let mut history = History::default();
+
+        for at in 0..=(History::DEFAULT_CAPACITY as i64) {
+            history.record(&reading(at, vec![device(TRACKPAD, Some(50), true)]));
         }
 
         assert_eq!(
+            history.samples(&trackpad()).count(),
+            History::DEFAULT_CAPACITY
+        );
+    }
+
+    #[test]
+    fn a_device_reread_at_the_stamp_it_already_carries_is_sampled_once() {
+        let mut history = History::default();
+        let cached = Device {
+            read_at: Timestamp::from_unix(0),
+            ..device(TRACKPAD, Some(80), true)
+        };
+
+        for at in [0, 5, 10, 15] {
+            history.record(&Snapshot {
+                read_at: Timestamp::from_unix(at),
+                devices: vec![cached.clone()],
+                warnings: Vec::new(),
+            });
+        }
+
+        assert_eq!(
+            levels(&history),
+            [80],
+            "a cached level held over is one reading, however often it is reused"
+        );
+        assert_eq!(
+            history.trend(&trackpad()),
+            None,
+            "and one reading is nothing to measure a rate over"
+        );
+    }
+
+    #[test]
+    fn a_reading_older_than_the_last_one_leaves_the_series_oldest_first() {
+        let mut history = History::default();
+
+        history.record(&reading(HOUR, vec![device(TRACKPAD, Some(50), true)]));
+        history.record(&reading(0, vec![device(TRACKPAD, Some(90), true)]));
+        history.record(&reading(2 * HOUR, vec![device(TRACKPAD, Some(40), true)]));
+
+        assert_eq!(
+            levels(&history),
+            [50, 40],
+            "a stamp that steps back is dropped"
+        );
+        assert!(
             history
                 .samples(&trackpad())
-                .map(|sample| sample.level)
-                .collect::<Vec<_>>(),
-            [90]
+                .is_sorted_by_key(|sample| sample.at)
         );
     }
 }

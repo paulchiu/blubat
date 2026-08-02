@@ -366,12 +366,8 @@ mod tests {
 
         receiver.recv().expect("the first reading");
         drop(receiver);
-        thread::sleep(Duration::from_millis(50));
 
-        let after_drop = (
-            fast_reads.load(Ordering::SeqCst),
-            slow_reads.load(Ordering::SeqCst),
-        );
+        let stopped = (settled(&fast_reads), settled(&slow_reads));
         thread::sleep(Duration::from_millis(50));
 
         assert_eq!(
@@ -379,7 +375,23 @@ mod tests {
                 fast_reads.load(Ordering::SeqCst),
                 slow_reads.load(Ordering::SeqCst)
             ),
-            after_drop
+            stopped,
+            "a stopped tier stays stopped"
         );
+    }
+
+    /// The count a tier stops on, waited for rather than timed, so a runner
+    /// that has not scheduled the thread yet delays this rather than failing it.
+    fn settled(reads: &AtomicI64) -> i64 {
+        for _ in 0..500 {
+            let before = reads.load(Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(10));
+
+            if reads.load(Ordering::SeqCst) == before {
+                return before;
+            }
+        }
+
+        panic!("the tier never stopped reading");
     }
 }
