@@ -13,13 +13,18 @@ pub struct Glyphs {
 
 impl Glyphs {
     /// What every terminal can draw, and what blubat falls back to.
+    ///
+    /// `hidden` is three cells here against the Nerd Font glyph's one: unlike
+    /// `charging`, it is drawn inside the Name cell's own clip rather than a
+    /// shared fixed-width gutter, so nothing depends on the two matching.
     pub const ASCII: Self = Self {
         charging: Cow::Borrowed("+"),
         hidden: Cow::Borrowed("[h]"),
     };
 
     /// The Nerd Fonts bolt and eye-slash, both single width so a switch
-    /// between the two glyph sets cannot shift a column on its own.
+    /// between the two glyph sets cannot shift the charging column, which is
+    /// a shared gutter. `hidden` carries no such guarantee; see `ASCII`.
     pub const NERD_FONT: Self = Self {
         charging: Cow::Borrowed("\u{f0e7}"),
         hidden: Cow::Borrowed("\u{f070}"),
@@ -161,6 +166,11 @@ mod tests {
     #[test]
     fn the_eye_slash_is_one_cell_the_same_way() {
         assert_eq!(Glyphs::NERD_FONT.hidden.chars().count(), 1);
+    }
+
+    #[test]
+    fn the_ascii_hidden_marker_is_wider_which_is_fine_inside_the_name_cells_own_clip() {
+        assert_eq!(Glyphs::ASCII.hidden.chars().count(), 3);
     }
 
     #[test]

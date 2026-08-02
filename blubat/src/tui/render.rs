@@ -502,6 +502,8 @@ fn nothing_to_show(app: &App) -> Paragraph<'static> {
         "no Bluetooth devices reported"
     } else if app.view.filter.narrows() {
         "no device matches the filter"
+    } else if app.view.hide_inactive && app.connected().count() == 0 {
+        "every device is inactive; press i to show them"
     } else {
         "every device is hidden; press H to show them"
     };
@@ -1101,6 +1103,24 @@ mod tests {
 
         let all_hidden = press(loaded(), "hhh");
         assert!(screen(&all_hidden).contains("every device is hidden"));
+
+        let all_inactive = update(
+            press(app(), "i"),
+            Event::Reading(reading(
+                three_devices()
+                    .devices
+                    .into_iter()
+                    .map(|device| Device {
+                        connected: false,
+                        ..device
+                    })
+                    .collect(),
+            )),
+        );
+        assert!(
+            screen(&all_inactive).contains("every device is inactive"),
+            "hide_inactive emptying the table is not the same kind of empty as h"
+        );
     }
 
     /// The two claims are separate: one device blubat could not parse is a
