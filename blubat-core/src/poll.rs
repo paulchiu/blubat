@@ -689,13 +689,30 @@ mod tests {
 
     /// The count a tier stops on, waited for rather than timed, so a runner
     /// that has not scheduled the thread yet delays this rather than failing it.
+    /// A single quiet window is not enough evidence that a tier has stopped:
+    /// a thread the runner has merely descheduled for longer than one window
+    /// looks identical to a stopped one, right up until it wakes and takes
+    /// the one legitimate reading it was already partway through. Requiring
+    /// several consecutive quiet windows gives that thread room to finish
+    /// before we conclude the tier has settled.
     fn settled(reads: &AtomicI64) -> i64 {
-        for _ in 0..500 {
-            let before = reads.load(Ordering::SeqCst);
-            thread::sleep(Duration::from_millis(10));
+        const REQUIRED_QUIET_WINDOWS: u32 = 5;
 
-            if reads.load(Ordering::SeqCst) == before {
-                return before;
+        let mut quiet_windows = 0;
+        let mut last = reads.load(Ordering::SeqCst);
+
+        for _ in 0..500 {
+            thread::sleep(Duration::from_millis(10));
+            let now = reads.load(Ordering::SeqCst);
+
+            if now == last {
+                quiet_windows += 1;
+                if quiet_windows == REQUIRED_QUIET_WINDOWS {
+                    return now;
+                }
+            } else {
+                quiet_windows = 0;
+                last = now;
             }
         }
 
