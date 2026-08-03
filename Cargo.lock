@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "blubat"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "assert_cmd",
  "blubat-core",
@@ -185,7 +185,7 @@ dependencies = [
 
 [[package]]
 name = "blubat-core"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "etcetera",
  "objc2-core-foundation",
