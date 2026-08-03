@@ -18,15 +18,6 @@ pub enum Sort {
 }
 
 impl Sort {
-    /// The order `s` cycles to next, back round to the first from the last.
-    pub fn next(self) -> Self {
-        match self {
-            Sort::Level => Sort::Name,
-            Sort::Name => Sort::LastSeen,
-            Sort::LastSeen => Sort::Level,
-        }
-    }
-
     /// How the status line names the order.
     pub fn label(self) -> &'static str {
         match self {
@@ -445,10 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn the_orders_cycle_and_name_themselves() {
-        assert_eq!(Sort::Level.next(), Sort::Name);
-        assert_eq!(Sort::Name.next(), Sort::LastSeen);
-        assert_eq!(Sort::LastSeen.next(), Sort::Level);
+    fn every_order_names_itself_and_level_is_the_default() {
         assert_eq!(Sort::default(), Sort::Level);
 
         for sort in [Sort::Level, Sort::Name, Sort::LastSeen] {

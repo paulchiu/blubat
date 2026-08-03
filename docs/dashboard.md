@@ -18,16 +18,25 @@ other reading. A narrow terminal gives up columns from the right rather than
 breaking the table.
 
 ```
-q      quit                  s  cycle the order: level, name, last seen
+q      quit                  s  open the sort menu: level, name, last seen
 j/k    move the selection    /  filter on name or address, esc clears it
 enter  the detail view       h  hide the selected device, H show hidden again
 i      hide the inactive section, i again shows it
 r      reload the config     c  edit the config file, reloading it on return
-?      the full keymap
+?      the full keymap, titled with the version blubat is running
 ```
 
-`q` and ctrl+c both leave the dashboard; the keymap overlay takes the keyboard
-while it is open, so `?` closes it before anything else responds again.
+`q` and ctrl+c both leave the dashboard; the keymap overlay and the sort menu
+both take the keyboard while they are open, so `esc` closes whichever is up
+before anything else responds again. The device table itself sits in its own
+border, in the same bordered language as the detail view's panels.
+
+`s` opens a menu of the columns the table can be sorted by rather than cycling
+through them: `l` sorts by level, `n` by name, `t` by last seen. Each applies
+its own order and closes the menu straight away; `esc` or `s` again backs out
+without changing anything. There is no direction to choose, since each column
+already sorts the one way that makes sense of it: emptiest level first,
+freshest reading first.
 
 `i` drops the disconnected section off the table for the rest of the run and
 brings it back with the same key; the footer reads `hide inactive` or `show
@@ -37,7 +46,9 @@ so the choice survives a restart the same way a hide does.
 
 ## Detail view
 
-`enter` opens the detail view over the selected device. It answers the
+`enter` opens the detail view over the selected device, named on a plain line
+at the top rather than inside a frame of its own: the panels below it carry
+their own borders, so the view is not a box around a box. It answers the
 questions one table row has no room for, all of which are about time: a chart
 of the levels read this run against the threshold that would raise an event,
 the charge or drain rate behind it, an estimate to full or to empty where the

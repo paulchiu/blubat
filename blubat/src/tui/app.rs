@@ -14,7 +14,7 @@ use blubat_core::{
 
 use super::journal::Journal;
 use super::theme::{self, Look};
-use super::view::{Filter, Rows, View};
+use super::view::{Filter, Rows, Sort, View};
 
 /// One advertised key: what to press, and what pressing it does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,7 +144,8 @@ const DETAIL_ACTIONS: [Action; 5] = [
 ];
 
 /// What the overlay says beyond the keys themselves.
-pub const NOTES: [&str; 5] = [
+pub const NOTES: [&str; 6] = [
+    "s opens a sort menu: l level, n name, t last seen, esc cancels.",
     "the detail chart is this run only; a restart starts it empty.",
     "h and i last: the one table blubat writes to the config file.",
     "a hidden device is hidden here only, never unpaired from macOS.",
@@ -155,7 +156,7 @@ pub const NOTES: [&str; 5] = [
 /// The keys the keymap overlay leaves live, since it swallows every other one.
 const OVERLAY_KEYS: [Binding; 2] = [
     Binding {
-        keys: "?",
+        keys: "esc/?",
         label: "close",
     },
     Binding {
@@ -168,7 +169,42 @@ const OVERLAY_KEYS: [Binding; 2] = [
 ///
 /// The advertised keys and the accepted actions are one list read from either
 /// end, which is what keeps the footer an account of what the overlay does.
-const OVERLAY_ACTIONS: [Action; 2] = [Action::ToggleKeymap, Action::Quit];
+const OVERLAY_ACTIONS: [Action; 3] = [Action::ToggleKeymap, Action::Back, Action::Quit];
+
+/// The keys the sort menu leaves live, since it swallows every other one.
+///
+/// The column keys, unlike the rest of this app's bindings, are never run
+/// through [`Action::of`]: they mean nothing anywhere else, so binding them
+/// globally would let `l` sort the table from underneath the dashboard. See
+/// [`chosen`], which answers them directly instead.
+const SORT_KEYS: [Binding; 5] = [
+    Binding {
+        keys: "l",
+        label: "level",
+    },
+    Binding {
+        keys: "n",
+        label: "name",
+    },
+    Binding {
+        keys: "t",
+        label: "last seen",
+    },
+    Binding {
+        keys: "esc/s",
+        label: "cancel",
+    },
+    Binding {
+        keys: "q",
+        label: "quit",
+    },
+];
+
+/// What the sort menu's own bindings stand for, the same way [`OVERLAY_ACTIONS`]
+/// answers for the overlay: `esc` and `s` both back out to the dashboard
+/// without changing the order, [`Action::Back`] through [`backed`] and
+/// [`Action::ToggleSort`] through [`Mode::sort_menu_toggled`].
+const SORT_ACTIONS: [Action; 3] = [Action::ToggleSort, Action::Back, Action::Quit];
 
 /// The keys that mean something while the filter is being typed.
 ///
@@ -198,6 +234,8 @@ pub enum Mode {
     Filtering,
     /// The keymap overlay covers the dashboard and swallows its keys.
     Keymap,
+    /// The sort menu covers the dashboard, waiting on one column key.
+    Sorting,
     /// One device on its own: its history, its thresholds and what it raised.
     Detail,
 }
@@ -208,6 +246,15 @@ impl Mode {
         match self {
             Mode::Keymap => Mode::Dashboard,
             _ => Mode::Keymap,
+        }
+    }
+
+    /// The sort menu opens over the dashboard and closes onto it the same way,
+    /// so `s` both opens and cancels it exactly as `?` does the overlay.
+    fn sort_menu_toggled(self) -> Self {
+        match self {
+            Mode::Sorting => Mode::Dashboard,
+            _ => Mode::Sorting,
         }
     }
 }
@@ -241,10 +288,13 @@ pub enum Action {
     Down,
     Up,
     ToggleKeymap,
-    CycleSort,
+    /// Opens the sort menu, or cancels it without changing the order: `s`
+    /// both ways, the same as [`Action::ToggleKeymap`] is for `?`.
+    ToggleSort,
     OpenFilter,
     /// Escape, which backs out of whatever the mode on screen is: the detail
-    /// view, or a filter the dashboard is still narrowing by.
+    /// view, the keymap overlay, the sort menu, or a filter the dashboard is
+    /// still narrowing by.
     Back,
     ToggleHidden,
     ShowHidden,
@@ -267,7 +317,7 @@ impl Action {
             Key::Char('j') => Some(Action::Down),
             Key::Char('k') => Some(Action::Up),
             Key::Char('?') => Some(Action::ToggleKeymap),
-            Key::Char('s') => Some(Action::CycleSort),
+            Key::Char('s') => Some(Action::ToggleSort),
             Key::Char('/') => Some(Action::OpenFilter),
             Key::Char('h') => Some(Action::ToggleHidden),
             Key::Char('H') => Some(Action::ShowHidden),
@@ -492,6 +542,7 @@ impl App {
     pub fn keys(&self) -> Vec<Binding> {
         match self.mode {
             Mode::Keymap => OVERLAY_KEYS.to_vec(),
+            Mode::Sorting => SORT_KEYS.to_vec(),
             Mode::Filtering => FILTER_KEYS.to_vec(),
             Mode::Detail => DETAIL_KEYS.to_vec(),
             Mode::Dashboard if self.view.filter.narrows() => dashboard_keys(&self.view)
@@ -619,12 +670,40 @@ fn pressed(app: App, key: Key) -> App {
             app,
             Action::of(key).filter(|action| OVERLAY_ACTIONS.contains(action)),
         ),
+        Mode::Sorting => chosen(app, key),
         Mode::Detail => acted(
             app,
             Action::of(key).filter(|action| DETAIL_ACTIONS.contains(action)),
         ),
         Mode::Dashboard => acted(app, Action::of(key)),
     }
+}
+
+/// The sort menu's own keys: a column applies it and hands the keys back to
+/// the dashboard; everything else it leaves live goes through the ordinary
+/// action dispatch, since `esc`, `s` and `q` already mean something there.
+///
+/// The column keys are not [`Action::of`]'s to give: unlike escape or quit,
+/// `l`, `n` and `t` mean nothing outside this menu, so binding them globally
+/// would let a stray keypress reorder the table from the dashboard itself.
+fn chosen(app: App, key: Key) -> App {
+    match key {
+        Key::Char('l') => sorted_by(app, Sort::Level),
+        Key::Char('n') => sorted_by(app, Sort::Name),
+        Key::Char('t') => sorted_by(app, Sort::LastSeen),
+        _ => acted(
+            app,
+            Action::of(key).filter(|action| SORT_ACTIONS.contains(action)),
+        ),
+    }
+}
+
+/// Applies `sort` and closes the menu, the same way cancelling does but with a
+/// new order in force.
+fn sorted_by(app: App, sort: Sort) -> App {
+    let app = onto_the_dashboard(app);
+
+    viewed(app, |view| view.sort = sort)
 }
 
 /// The state after `action`, unchanged where the mode binds nothing to the key.
@@ -674,7 +753,10 @@ fn act(app: App, action: Action) -> App {
             mode: app.mode.keymap_toggled(),
             ..app
         },
-        Action::CycleSort => viewed(app, |view| view.sort = view.sort.next()),
+        Action::ToggleSort => App {
+            mode: app.mode.sort_menu_toggled(),
+            ..app
+        },
         Action::OpenFilter => App {
             mode: Mode::Filtering,
             ..app
@@ -711,13 +793,14 @@ fn detailed(app: App) -> App {
     }
 }
 
-/// Backs out of the detail view, or drops the filter under the dashboard.
+/// Backs out of the detail view, the keymap overlay, the sort menu, or drops
+/// the filter under the dashboard.
 ///
-/// Escape means "leave what is on screen" in both, which is why one action
-/// covers them: what is on screen is what the mode already says.
+/// Escape means "leave what is on screen" in all of them, which is why one
+/// action covers them: what is on screen is what the mode already says.
 fn backed(app: App) -> App {
     match app.mode {
-        Mode::Detail => onto_the_dashboard(app),
+        Mode::Detail | Mode::Keymap | Mode::Sorting => onto_the_dashboard(app),
         _ => cleared(app),
     }
 }
@@ -892,7 +975,10 @@ pub(super) mod tests {
         app.rows().all().map(|device| device.name.clone()).collect()
     }
 
-    /// One state per set of keys the footer can carry.
+    /// One state per set of keys the footer can carry, for the invariants
+    /// below that expect every advertised key to round-trip through
+    /// [`Action::of`]. The sort menu's column keys never do, by design: see
+    /// [`chosen`], so it is exercised by its own tests instead of these.
     fn every_view() -> Vec<App> {
         vec![
             loaded(),
@@ -905,7 +991,7 @@ pub(super) mod tests {
 
     /// Every key a person can reach, bound or not.
     fn every_key() -> Vec<Key> {
-        "qjksh H/?ricxz1"
+        "qjksh H/?ricxz1lnt"
             .chars()
             .map(Key::Char)
             .chain([Key::Enter, Key::Escape, Key::Backspace])
@@ -1003,7 +1089,6 @@ pub(super) mod tests {
             "the dashboard keys do nothing underneath the overlay"
         );
         assert_eq!(key(open.clone(), Key::Enter), open);
-        assert_eq!(key(open.clone(), Key::Escape), open);
 
         assert_eq!(
             press(open.clone(), "?").mode,
@@ -1011,6 +1096,17 @@ pub(super) mod tests {
             "? closes it"
         );
         assert!(!press(open, "q").running, "and q still quits");
+    }
+
+    #[test]
+    fn esc_closes_the_overlay_the_same_way_toggling_it_does() {
+        let open = press(loaded(), "?");
+
+        assert_eq!(
+            key(open.clone(), Key::Escape),
+            key(open, Key::Char('?')),
+            "esc and ? both close it onto the same dashboard"
+        );
     }
 
     #[test]
@@ -1099,7 +1195,11 @@ pub(super) mod tests {
         // The detail view opens on the middle row, so both j and k in
         // DETAIL_KEYS have somewhere to move from: opening on the first would
         // leave k a no-op there and read as swallowed rather than bound.
-        for app in [press(loaded(), "?"), key(press(loaded(), "j"), Key::Enter)] {
+        for app in [
+            press(loaded(), "?"),
+            press(loaded(), "s"),
+            key(press(loaded(), "j"), Key::Enter),
+        ] {
             let advertised = advertised_in(&app);
 
             for key in every_key() {
@@ -1130,21 +1230,61 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn s_cycles_the_order_the_table_is_listed_in() {
-        let by_level = loaded();
+    fn s_opens_a_menu_of_the_columns_the_table_can_be_sorted_by() {
+        let opened = press(loaded(), "s");
 
-        assert_eq!(by_level.view.sort.label(), "level");
-        assert_eq!(press(by_level.clone(), "s").view.sort.label(), "name");
-        assert_eq!(press(by_level.clone(), "ss").view.sort.label(), "last seen");
+        assert_eq!(opened.mode, Mode::Sorting);
         assert_eq!(
-            press(by_level.clone(), "sss").view.sort,
-            by_level.view.sort,
-            "three presses come back round"
+            opened.view.sort.label(),
+            "level",
+            "unchanged until a column is chosen"
         );
         assert_eq!(
-            names(&press(by_level, "s")),
-            ["Magic Trackpad", "MX Keys M Mac", "Soundcore Liberty"]
+            press(opened, "s").mode,
+            Mode::Dashboard,
+            "s again cancels it"
         );
+    }
+
+    #[test]
+    fn a_column_key_in_the_sort_menu_applies_that_order_and_closes_it() {
+        let by = |keys: &str| press(loaded(), keys);
+
+        for (keys, label) in [("sl", "level"), ("sn", "name"), ("st", "last seen")] {
+            let chosen = by(keys);
+
+            assert_eq!(chosen.mode, Mode::Dashboard, "{keys} applies and closes");
+            assert_eq!(chosen.view.sort.label(), label, "{keys}");
+        }
+
+        assert_eq!(
+            names(&by("sn")),
+            ["Magic Trackpad", "MX Keys M Mac", "Soundcore Liberty"],
+            "the table is listed in the order just chosen"
+        );
+    }
+
+    #[test]
+    fn esc_leaves_the_sort_menu_without_changing_the_order() {
+        let by_level = loaded();
+        let opened = press(by_level.clone(), "s");
+
+        let cancelled = key(opened, Key::Escape);
+
+        assert_eq!(cancelled.mode, Mode::Dashboard);
+        assert_eq!(cancelled.view.sort, by_level.view.sort);
+    }
+
+    #[test]
+    fn the_sort_menu_swallows_the_keys_it_does_not_advertise() {
+        let opened = press(loaded(), "s");
+
+        assert_eq!(
+            press(opened.clone(), "jkh/Hi?r"),
+            opened,
+            "the dashboard keys do nothing underneath the menu"
+        );
+        assert!(!press(opened, "q").running, "and q still quits");
     }
 
     #[test]
