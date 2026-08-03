@@ -78,7 +78,10 @@ advertises, then the built-in 20, 10, 100 and 1.
 
 `[poll] foreground_interval` sets the dashboard's tick. Left unwritten, the
 dashboard reads every 5s instead: it is on screen and being read as it
-changes, and the fast tier is a single digit millisecond IOKit call.
+changes, and the fast tier is a single digit millisecond IOKit call. A change
+to any `[poll]` key, `profiler_timeout` included, reaches the running poller
+on `r` or `c`'s reload the same as everything else in the file; see
+[docs/dashboard.md](dashboard.md#reloading) for how soon each tier notices.
 
 `[dashboard] hidden` and `[dashboard] hide_inactive` are maintained from the
 dashboard as well as by hand, and both live in the one table: `h` appends the

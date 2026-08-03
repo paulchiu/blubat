@@ -13,7 +13,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-blubat-core = { path = "../blubat-core", version = "0.8.1" }
+blubat-core = { path = "../blubat-core", version = "0.8.2" }
 clap = { workspace = true }
 libc = { workspace = true }
 ratatui = { workspace = true }
