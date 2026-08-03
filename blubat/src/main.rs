@@ -153,12 +153,16 @@ fn run(cli: Cli) -> Result<(), Failure> {
     let files = || paths(cli.config.clone(), cli.state_dir.clone());
 
     match cli.command {
-        Some(Command::List { json, all }) => report::list(&reading(), json, all),
+        Some(Command::List { json, all }) => report::list(&reading(&files()?), json, all),
         Some(Command::Status {
             device,
             json,
             number,
-        }) => report::status(&reading(), device.as_deref(), Format::of(json, number)),
+        }) => report::status(
+            &reading(&files()?),
+            device.as_deref(),
+            Format::of(json, number),
+        ),
         Some(Command::Wait(args)) => wait::run(&args, &files()?),
         Some(Command::Config { command }) => config::run(&command, &files()?),
         Some(Command::Daemon { command }) => daemon::run(&command, &files()?),
@@ -200,8 +204,10 @@ fn offer_the_commands() -> Result<(), Failure> {
 /// that owns the screen can place them. This one only owes stdout a clean value.
 /// A degraded reading is said there too rather than in `--json`, which is a
 /// compatibility surface carrying devices rather than anything about the read.
-fn reading() -> Snapshot {
-    let snapshot = blubat_core::snapshot();
+/// `paths` is only ever read from here: a Bose battery level reaches this
+/// reading through `readings_file()`, a file, never a Bluetooth call of its own.
+fn reading(paths: &Paths) -> Snapshot {
+    let snapshot = blubat_core::snapshot(&paths.readings_file());
 
     if snapshot.degraded {
         eprintln!("blubat: warning: a source could not be read, so this is its last good answer");
