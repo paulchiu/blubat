@@ -18,6 +18,11 @@ Nothing installs it for you. blubat never writes that plist on a first run or
 an upgrade, and `daemon uninstall` boots the agent out and removes the file
 again.
 
+A Homebrew install is pinned to the stable `<prefix>/bin/blubat` shim rather
+than the versioned Cellar path underneath it, so `brew upgrade` deleting that
+version does not orphan the agent. Anyone who installed before this was added
+fixes it once by rerunning `blubat daemon install`.
+
 A Bose headset's battery level only ever comes from this daemon: the TUI and
 every one-shot command never touch Bluetooth for it, so a machine with the
 daemon not running or not yet installed simply shows a supported Bose as

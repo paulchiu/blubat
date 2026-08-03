@@ -329,7 +329,41 @@ fn home() -> Result<PathBuf, Failure> {
 fn executable() -> Result<PathBuf, Failure> {
     std::env::current_exe()
         .map(|path| path.canonicalize().unwrap_or(path))
+        .map(|path| stable(&path, |shim| shim.exists()))
         .map_err(|error| Failure::Error(format!("cannot find this blubat: {error}")))
+}
+
+/// The path launchd should be given for a resolved executable, pinned to the
+/// Homebrew prefix shim when the resolved path is a Cellar install.
+///
+/// `current_exe` resolves fully, so a Homebrew install lands on the versioned
+/// Cellar path rather than the shim in `<prefix>/bin` a user actually invoked.
+/// `brew upgrade` deletes that versioned directory outright, so a plist naming
+/// it starts failing with a missing binary on every upgrade until the user
+/// reruns `daemon install`. The shim is what brew re-links on every upgrade, so
+/// naming that instead is what survives one. `exists` is asked rather than
+/// assumed so a Cellar layout with no shim (a broken or partial install) is
+/// left recording the path that is actually there.
+fn stable(resolved: &Path, exists: impl Fn(&Path) -> bool) -> PathBuf {
+    cellar_shim(resolved)
+        .filter(|shim| exists(shim))
+        .unwrap_or_else(|| resolved.to_path_buf())
+}
+
+/// The Homebrew prefix shim for a path shaped like a Cellar install:
+/// `<prefix>/Cellar/<formula>/<version>/bin/<name>` becomes
+/// `<prefix>/bin/<name>`. Anything not shaped exactly like that, including a
+/// path that merely mentions "Cellar" somewhere in it, answers `None`.
+fn cellar_shim(resolved: &Path) -> Option<PathBuf> {
+    let name = resolved.file_name()?;
+    let bin = resolved.parent()?;
+    let version = bin.parent()?;
+    let formula = version.parent()?;
+    let cellar = formula.parent()?;
+
+    (bin.file_name()? == "bin" && cellar.file_name()? == "Cellar")
+        .then(|| cellar.parent().map(|prefix| prefix.join("bin").join(name)))
+        .flatten()
 }
 
 fn write_plist(path: &Path, contents: &str) -> Result<(), Failure> {
@@ -702,5 +736,43 @@ mod tests {
         let scratch = Scratch::new();
 
         assert!(removed(&plist_in(&scratch)).is_ok());
+    }
+
+    #[test]
+    fn a_cellar_path_maps_to_the_prefix_shim_when_the_shim_exists() {
+        let resolved = Path::new("/opt/homebrew/Cellar/blubat/0.7.0/bin/blubat");
+
+        let stable = stable(resolved, |shim| {
+            shim == Path::new("/opt/homebrew/bin/blubat")
+        });
+
+        assert_eq!(stable, Path::new("/opt/homebrew/bin/blubat"));
+    }
+
+    #[test]
+    fn a_cellar_path_stays_itself_when_the_shim_does_not_exist() {
+        let resolved = Path::new("/opt/homebrew/Cellar/blubat/0.7.0/bin/blubat");
+
+        let stable = stable(resolved, |_| false);
+
+        assert_eq!(stable, resolved);
+    }
+
+    #[test]
+    fn a_non_cellar_path_is_untouched() {
+        let resolved = Path::new("/Users/blubat/.cargo/bin/blubat");
+
+        let stable = stable(resolved, |_| true);
+
+        assert_eq!(stable, resolved);
+    }
+
+    #[test]
+    fn a_path_that_merely_contains_cellar_but_not_the_full_layout_is_untouched() {
+        let resolved = Path::new("/Users/blubat/projects/Cellar/target/blubat");
+
+        let stable = stable(resolved, |_| true);
+
+        assert_eq!(stable, resolved);
     }
 }
