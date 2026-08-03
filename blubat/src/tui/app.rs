@@ -318,8 +318,10 @@ pub enum Event {
     Reading(Snapshot),
     /// The redraw timer expired at this moment.
     Tick(Timestamp),
-    /// What the loop made of the reload [`Action::Reload`] asked for.
-    Reloaded(Result<Config, String>),
+    /// What the loop made of the reload [`Action::Reload`] asked for: the
+    /// config it read plus the fast interval it retiered the poller to,
+    /// which is what keeps [`App::interval`] and the running poller in step.
+    Reloaded(Result<(Config, Duration), String>),
     /// What came of writing the dashboard table [`Action::ToggleHidden`] or
     /// [`Action::ToggleInactive`] changed.
     Saved(Result<(), String>),
@@ -540,15 +542,22 @@ pub fn update(app: App, event: Event) -> App {
 /// `h` and `i` write them there: the file is where the dashboard table lives,
 /// so a hand edit is picked up by the key that re-reads it rather than needing
 /// a restart.
-fn reloaded(mut app: App, read: Result<Config, String>) -> App {
+///
+/// The fast interval travels beside the config rather than being read back
+/// off it, since the dashboard's own interval is not always the file's
+/// `foreground_interval` verbatim: the loop already worked that out to retier
+/// the poller, and this is the same value rather than a second copy of that
+/// rule.
+fn reloaded(mut app: App, read: Result<(Config, Duration), String>) -> App {
     app.reload = false;
 
     match read {
-        Ok(config) => {
+        Ok((config, interval)) => {
             app.look = app.look.reloaded(&config.theme);
             app.view.hidden = config.dashboard.hidden.clone();
             app.view.hide_inactive = config.dashboard.hide_inactive;
             app.config = config;
+            app.interval = interval;
             app.notice = Some(Notice::said("config reloaded"));
         }
         Err(problem) => app.notice = Some(Notice::problem(problem)),
@@ -1473,7 +1482,10 @@ pub(super) mod tests {
     fn reloading_takes_the_hidden_devices_the_file_now_holds() {
         let reloaded = update(
             press(loaded(), "h"),
-            Event::Reloaded(Ok(config("[dashboard]\nhidden = [\"Soundcore\"]\n"))),
+            Event::Reloaded(Ok((
+                config("[dashboard]\nhidden = [\"Soundcore\"]\n"),
+                INTERVAL,
+            ))),
         );
 
         assert_eq!(
@@ -1487,7 +1499,10 @@ pub(super) mod tests {
     fn reloading_takes_the_hide_inactive_the_file_now_holds() {
         let reloaded = update(
             press(loaded(), "i"),
-            Event::Reloaded(Ok(config("[dashboard]\nhide_inactive = true\n"))),
+            Event::Reloaded(Ok((
+                config("[dashboard]\nhide_inactive = true\n"),
+                INTERVAL,
+            ))),
         );
 
         assert!(
@@ -1711,13 +1726,17 @@ pub(super) mod tests {
     #[test]
     fn a_reload_takes_every_value_the_new_file_carries() {
         let asked = press(loaded(), "r");
+        let retiered = Duration::from_secs(90);
 
         let reloaded = update(
             asked,
-            Event::Reloaded(Ok(config(
-                "[defaults]\nlow = 30\n\n\
-                 [theme]\nscheme = \"light\"\ncharging_glyph = \"^\"\n\n\
-                 [[hook]]\nevent = \"charged\"\ncommand = \"unplug\"\n",
+            Event::Reloaded(Ok((
+                config(
+                    "[defaults]\nlow = 30\n\n\
+                     [theme]\nscheme = \"light\"\ncharging_glyph = \"^\"\n\n\
+                     [[hook]]\nevent = \"charged\"\ncommand = \"unplug\"\n",
+                ),
+                retiered,
             ))),
         );
 
@@ -1727,14 +1746,19 @@ pub(super) mod tests {
         assert_eq!(reloaded.look.glyphs.charging, "^", "glyphs");
         assert_eq!(reloaded.config.hooks.len(), 1, "hooks");
         assert_eq!(reloaded.notice, Some(Notice::said("config reloaded")));
+        assert_eq!(
+            reloaded.interval, retiered,
+            "the countdown follows the interval the loop retiered the poller to"
+        );
     }
 
     #[test]
     fn a_reload_that_cannot_be_read_leaves_the_config_in_force_alone() {
         let configured = update(
             press(loaded(), "r"),
-            Event::Reloaded(Ok(config(
-                "[defaults]\nlow = 30\n\n[theme]\nscheme = \"light\"\n",
+            Event::Reloaded(Ok((
+                config("[defaults]\nlow = 30\n\n[theme]\nscheme = \"light\"\n"),
+                Duration::from_secs(90),
             ))),
         );
 
@@ -1746,6 +1770,10 @@ pub(super) mod tests {
         assert!(rejected.running, "a typo is not a reason to stop");
         assert_eq!(rejected.config, configured.config, "still 30");
         assert_eq!(rejected.look, configured.look, "and still the light scheme");
+        assert_eq!(
+            rejected.interval, configured.interval,
+            "and still the interval the last good reload retiered the poller to"
+        );
         assert!(!rejected.reload);
         assert_eq!(
             rejected.notice,

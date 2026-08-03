@@ -46,9 +46,7 @@ impl Default for Tiers {
 pub fn snapshot(readings_file: &Path) -> Snapshot {
     let read_at = Timestamp::now();
     let timeout = Tiers::default().timeout;
-    let cached = read_slow(&Cached::default(), read_at, |at, warnings| {
-        profiler::read(at, timeout, warnings)
-    });
+    let cached = read_slow(&Cached::default(), read_at, timeout, profiler::read);
     let reading = read_fast(read_at, iokit::read, &cached);
 
     bmap::merge(reading, &bmap::load(readings_file))
@@ -70,15 +68,50 @@ pub fn snapshot(readings_file: &Path) -> Snapshot {
 /// Every reading is also merged with whatever the daemon's BMAP sweep has
 /// most recently left in `readings_file`, re-read on every fast tick so a
 /// sweep landing between ticks is picked up on the very next one.
+///
+/// The tiers run for as long as the process does: nothing here changes them
+/// after the fact. [`poll_retierable`] is the constructor for a caller, such
+/// as the dashboard, whose `[poll]` section can change while it is running.
 pub fn poll(tiers: Tiers, readings_file: &Path) -> Receiver<Snapshot> {
+    poll_retierable(tiers, readings_file).0
+}
+
+/// Like [`poll`], but also hands back a [`Retier`] a caller can use to change
+/// the running tiers without restarting either thread or the returned channel.
+pub fn poll_retierable(tiers: Tiers, readings_file: &Path) -> (Receiver<Snapshot>, Retier) {
     poll_with(
         tiers,
         iokit::read,
-        move |at, warnings| profiler::read(at, tiers.timeout, warnings),
+        profiler::read,
         Timestamp::now,
         presence::watch(),
         readings_file.to_path_buf(),
     )
+}
+
+/// Where a change to `[poll]` is sent so the running tiers pick it up, each
+/// from its own next wakeup, without a restart.
+///
+/// One value reaches both tiers because each reads its own share of it: the
+/// fast tier its interval, the slow tier its interval and the profiler
+/// timeout. A single receiver shared between them would only ever hand a
+/// given update to whichever tier happened to ask for it first, so each gets
+/// a sender of its own instead.
+#[derive(Clone)]
+pub struct Retier {
+    fast: Sender<Tiers>,
+    slow: Sender<Tiers>,
+}
+
+impl Retier {
+    /// Picked up within one fast interval on the fast tier, and within one
+    /// slow interval (or the early read a nudge already asked for) on the
+    /// slow tier. A dropped receiver on either side is not an error here: a
+    /// tier that has already ended has nothing left to retier.
+    pub fn set(&self, tiers: Tiers) {
+        let _ = self.fast.send(tiers);
+        let _ = self.slow.send(tiers);
+    }
 }
 
 fn poll_with<F, S, C>(
@@ -88,42 +121,52 @@ fn poll_with<F, S, C>(
     clock: C,
     nudges: Receiver<()>,
     readings_file: PathBuf,
-) -> Receiver<Snapshot>
+) -> (Receiver<Snapshot>, Retier)
 where
     F: Fn(Timestamp, &mut Vec<String>) -> Vec<Device> + Send + 'static,
-    S: Fn(Timestamp, &mut Vec<String>) -> Result<Vec<Device>> + Send + 'static,
+    S: Fn(Timestamp, Duration, &mut Vec<String>) -> Result<Vec<Device>> + Send + 'static,
     C: Fn() -> Timestamp + Clone + Send + 'static,
 {
     let (snapshots, readings) = mpsc::channel();
     let (refreshed, cached) = mpsc::channel();
     let (polling, wanted) = mpsc::channel();
+    let (retier_fast, retiered_fast) = mpsc::channel();
+    let (retier_slow, retiered_slow) = mpsc::channel();
     let slow_clock = clock.clone();
 
-    thread::spawn(move || slow_tier(tiers.slow, slow, slow_clock, &refreshed, &wanted));
+    thread::spawn(move || slow_tier(tiers, slow, slow_clock, &refreshed, &wanted, &retiered_slow));
     thread::spawn(move || {
         let wires = FastWires {
             snapshots: &snapshots,
             cached: &cached,
             polling,
             nudges: &nudges,
+            retier: &retiered_fast,
         };
 
-        fast_tier(tiers.fast, fast, clock, wires, &readings_file)
+        fast_tier(tiers, fast, clock, wires, &readings_file)
     });
 
-    readings
+    (
+        readings,
+        Retier {
+            fast: retier_fast,
+            slow: retier_slow,
+        },
+    )
 }
 
 /// The channels one fast tier is wired to the rest of [`poll_with`] through.
 ///
-/// Grouped into one value rather than four parameters, since they travel
+/// Grouped into one value rather than five parameters, since they travel
 /// everywhere [`fast_tier`] does and nothing in it treats one apart from the
-/// other three.
+/// other four.
 struct FastWires<'a> {
     snapshots: &'a Sender<Snapshot>,
     cached: &'a Receiver<Cached>,
     polling: Sender<()>,
     nudges: &'a Receiver<()>,
+    retier: &'a Receiver<Tiers>,
 }
 
 /// The last `system_profiler` reading, reused until the slow tier replaces it.
@@ -144,11 +187,12 @@ struct Cached {
 fn read_slow(
     held: &Cached,
     read_at: Timestamp,
-    read: impl Fn(Timestamp, &mut Vec<String>) -> Result<Vec<Device>>,
+    timeout: Duration,
+    read: impl Fn(Timestamp, Duration, &mut Vec<String>) -> Result<Vec<Device>>,
 ) -> Cached {
     let mut warnings = Vec::new();
 
-    match read(read_at, &mut warnings) {
+    match read(read_at, timeout, &mut warnings) {
         Ok(devices) => Cached {
             devices,
             warnings,
@@ -191,18 +235,25 @@ const EARLY_FLOOR: Duration = Duration::from_secs(5);
 /// Waiting on `wanted` is how this tier sleeps, how the fast tier asks it for
 /// an early read, and how it learns the fast tier has ended, so a shutdown does
 /// not wait out an interval measured in minutes.
+///
+/// `tiers` starts as whatever the caller polled with and is replaced by
+/// whatever [`Retier::set`] has most recently sent, picked up at the top of
+/// every loop: a change lands once the wait this tier is already in ends,
+/// rather than cutting that wait short.
 fn slow_tier(
-    interval: Duration,
-    read: impl Fn(Timestamp, &mut Vec<String>) -> Result<Vec<Device>>,
+    mut tiers: Tiers,
+    read: impl Fn(Timestamp, Duration, &mut Vec<String>) -> Result<Vec<Device>>,
     clock: impl Fn() -> Timestamp,
     refreshed: &Sender<Cached>,
     wanted: &Receiver<()>,
+    retier: &Receiver<Tiers>,
 ) {
     let mut held = Cached::default();
     let mut early = false;
 
     loop {
-        held = read_slow(&held, clock(), &read);
+        tiers = retier.try_iter().last().unwrap_or(tiers);
+        held = read_slow(&held, clock(), tiers.timeout, &read);
 
         if refreshed.send(held.clone()).is_err() {
             break;
@@ -212,7 +263,7 @@ fn slow_tier(
             wanted.try_iter().for_each(drop);
         }
 
-        match wanted.recv_timeout(interval) {
+        match wanted.recv_timeout(tiers.slow) {
             Ok(()) => early = true,
             Err(RecvTimeoutError::Timeout) => early = false,
             Err(RecvTimeoutError::Disconnected) => break,
@@ -229,8 +280,13 @@ fn slow_tier(
 /// what stops that tier. `readings_file` is re-read on every tick rather than
 /// cached, since it is small and only the daemon's own BMAP sweep, on its own
 /// much slower cadence, ever changes it.
+///
+/// `tiers` starts as whatever the caller polled with and is replaced by
+/// whatever [`Retier::set`] has most recently sent, picked up at the top of
+/// every loop: since this tier waits out at most one interval before coming
+/// back around, a new one is never more than one tick away from taking effect.
 fn fast_tier(
-    interval: Duration,
+    mut tiers: Tiers,
     read: impl Fn(Timestamp, &mut Vec<String>) -> Vec<Device>,
     clock: impl Fn() -> Timestamp,
     wires: FastWires<'_>,
@@ -239,6 +295,7 @@ fn fast_tier(
     let mut latest = Cached::default();
 
     loop {
+        tiers = wires.retier.try_iter().last().unwrap_or(tiers);
         latest = wires.cached.try_iter().last().unwrap_or(latest);
 
         let reading = read_fast(clock(), &read, &latest);
@@ -246,7 +303,7 @@ fn fast_tier(
         if wires.snapshots.send(reading).is_err() {
             break;
         }
-        if waited(wires.nudges, interval) == Wake::Nudged {
+        if waited(wires.nudges, tiers.fast) == Wake::Nudged {
             let _ = wires.polling.send(());
         }
     }
@@ -355,8 +412,9 @@ mod tests {
     /// A slow source that counts its reads, since reuse is the point of the tier.
     fn counting_slow(
         reads: Arc<AtomicI64>,
-    ) -> impl Fn(Timestamp, &mut Vec<String>) -> Result<Vec<Device>> + Send + 'static {
-        move |_, _| {
+    ) -> impl Fn(Timestamp, Duration, &mut Vec<String>) -> Result<Vec<Device>> + Send + 'static
+    {
+        move |_, _, _| {
             reads.fetch_add(1, Ordering::SeqCst);
             Ok(vec![keyboard()])
         }
@@ -371,11 +429,13 @@ mod tests {
     }
 
     /// A first slow reading, with nothing held over from before it.
-    fn first(read: impl Fn(Timestamp, &mut Vec<String>) -> Result<Vec<Device>>) -> Cached {
-        read_slow(&Cached::default(), READ_AT, read)
+    fn first(
+        read: impl Fn(Timestamp, Duration, &mut Vec<String>) -> Result<Vec<Device>>,
+    ) -> Cached {
+        read_slow(&Cached::default(), READ_AT, Tiers::default().timeout, read)
     }
 
-    fn failing(_: Timestamp, _: &mut Vec<String>) -> Result<Vec<Device>> {
+    fn failing(_: Timestamp, _: Duration, _: &mut Vec<String>) -> Result<Vec<Device>> {
         Err(Error::Command("system_profiler exited with 1".to_string()))
     }
 
@@ -393,14 +453,14 @@ mod tests {
             READ_AT,
         );
         crate::save_bmap_readings(&readings_file, &[bose]).expect("writes");
-        let receiver = poll_with(
+        let (receiver, _retier) = poll_with(
             Tiers {
                 fast: Duration::from_millis(1),
                 slow: Duration::from_secs(3_600),
                 ..Tiers::default()
             },
             |_, _| Vec::new(),
-            |_, _| Ok(Vec::new()),
+            |_, _, _| Ok(Vec::new()),
             frozen(),
             unnudged(),
             readings_file.clone(),
@@ -417,7 +477,7 @@ mod tests {
 
     #[test]
     fn both_sources_merge_into_one_reading() {
-        let cached = first(|_, _| Ok(vec![keyboard()]));
+        let cached = first(|_, _, _| Ok(vec![keyboard()]));
         let reading = read_fast(READ_AT, |_, _| vec![trackpad()], &cached);
 
         assert_eq!(reading.devices.len(), 2);
@@ -440,9 +500,11 @@ mod tests {
 
     #[test]
     fn a_failure_keeps_the_last_good_slow_devices_rather_than_dropping_them() {
-        let good = first(|_, _| Ok(vec![keyboard()]));
-        let degraded = read_slow(&good, READ_AT, failing);
-        let recovered = read_slow(&degraded, READ_AT, |_, _| Ok(vec![keyboard()]));
+        let good = first(|_, _, _| Ok(vec![keyboard()]));
+        let degraded = read_slow(&good, READ_AT, Tiers::default().timeout, failing);
+        let recovered = read_slow(&degraded, READ_AT, Tiers::default().timeout, |_, _, _| {
+            Ok(vec![keyboard()])
+        });
 
         let reading = read_fast(READ_AT, |_, _| vec![trackpad()], &degraded);
 
@@ -460,7 +522,7 @@ mod tests {
 
     #[test]
     fn a_cached_warning_travels_on_every_reading_it_applies_to() {
-        let cached = first(|_, warnings| {
+        let cached = first(|_, _, warnings| {
             warnings.push("skipped a malformed device".to_string());
             Ok(Vec::new())
         });
@@ -474,7 +536,7 @@ mod tests {
 
     #[test]
     fn what_a_source_reports_this_tick_is_added_to_the_cached_warnings() {
-        let cached = first(|_, warnings| {
+        let cached = first(|_, _, warnings| {
             warnings.push("from the slow source".to_string());
             Ok(Vec::new())
         });
@@ -496,14 +558,14 @@ mod tests {
     #[test]
     fn the_fast_tier_reads_immediately_and_then_on_every_interval() {
         let reads = Arc::new(AtomicI64::new(0));
-        let receiver = poll_with(
+        let (receiver, _retier) = poll_with(
             Tiers {
                 fast: Duration::from_millis(1),
                 slow: Duration::from_secs(60),
                 ..Tiers::default()
             },
             counting_fast(Arc::clone(&reads)),
-            |_, _| Ok(Vec::new()),
+            |_, _, _| Ok(Vec::new()),
             frozen(),
             unnudged(),
             no_readings(),
@@ -515,7 +577,7 @@ mod tests {
     #[test]
     fn the_slow_tier_is_read_once_and_reused_across_fast_ticks() {
         let slow_reads = Arc::new(AtomicI64::new(0));
-        let receiver = poll_with(
+        let (receiver, _retier) = poll_with(
             Tiers {
                 fast: Duration::from_millis(1),
                 slow: Duration::from_secs(60),
@@ -549,7 +611,7 @@ mod tests {
         let fast_reads = Arc::new(AtomicI64::new(0));
         let slow_reads = Arc::new(AtomicI64::new(0));
         let (nudge, nudges) = mpsc::channel();
-        let receiver = poll_with(
+        let (receiver, _retier) = poll_with(
             Tiers {
                 fast: Duration::from_secs(3_600),
                 slow: Duration::from_secs(3_600),
@@ -585,7 +647,7 @@ mod tests {
     fn a_flapping_link_does_not_turn_into_a_stream_of_slow_reads() {
         let slow_reads = Arc::new(AtomicI64::new(0));
         let (nudge, nudges) = mpsc::channel();
-        let receiver = poll_with(
+        let (receiver, _retier) = poll_with(
             Tiers {
                 fast: Duration::from_secs(3_600),
                 slow: Duration::from_secs(3_600),
@@ -616,14 +678,14 @@ mod tests {
     fn a_silent_nudge_source_leaves_the_tiers_on_their_intervals() {
         let reads = Arc::new(AtomicI64::new(0));
         let (_silent, nudges) = mpsc::channel();
-        let receiver = poll_with(
+        let (receiver, _retier) = poll_with(
             Tiers {
                 fast: Duration::from_millis(1),
                 slow: Duration::from_secs(60),
                 ..Tiers::default()
             },
             counting_fast(Arc::clone(&reads)),
-            |_, _| Ok(Vec::new()),
+            |_, _, _| Ok(Vec::new()),
             frozen(),
             nudges,
             no_readings(),
@@ -635,14 +697,14 @@ mod tests {
     #[test]
     fn a_hung_slow_source_never_delays_a_fast_reading() {
         let (_blocked, never) = mpsc::channel::<()>();
-        let receiver = poll_with(
+        let (receiver, _retier) = poll_with(
             Tiers {
                 fast: Duration::from_millis(1),
                 slow: Duration::from_millis(1),
                 ..Tiers::default()
             },
             counting_fast(Arc::new(AtomicI64::new(0))),
-            move |_, _| {
+            move |_, _, _| {
                 let _ = never.recv();
                 Ok(vec![keyboard()])
             },
@@ -654,11 +716,170 @@ mod tests {
         assert_eq!(stamps(&receiver, 3), [0, 1, 2]);
     }
 
+    /// A slow source that stamps the timeout it was last called with, in
+    /// milliseconds, since a retier changing it is exactly what a reload asks
+    /// for.
+    fn timeout_stamping_slow(
+        seen: Arc<AtomicI64>,
+    ) -> impl Fn(Timestamp, Duration, &mut Vec<String>) -> Result<Vec<Device>> + Send + 'static
+    {
+        move |_, timeout, _| {
+            seen.store(
+                i64::try_from(timeout.as_millis()).unwrap_or(i64::MAX),
+                Ordering::SeqCst,
+            );
+
+            Ok(vec![keyboard()])
+        }
+    }
+
+    #[test]
+    fn a_retier_message_shortens_the_fast_tier_cadence_from_its_next_wakeup() {
+        let reads = Arc::new(AtomicI64::new(0));
+        let (nudge, nudges) = mpsc::channel();
+        let (receiver, retier) = poll_with(
+            Tiers {
+                fast: Duration::from_secs(3_600),
+                slow: Duration::from_secs(3_600),
+                ..Tiers::default()
+            },
+            counting_fast(Arc::clone(&reads)),
+            |_, _, _| Ok(Vec::new()),
+            frozen(),
+            nudges,
+            no_readings(),
+        );
+
+        receiver.recv().expect("the first reading");
+        retier.set(Tiers {
+            fast: Duration::from_millis(1),
+            ..Tiers::default()
+        });
+        // A nudge, so the change is picked up now rather than an hour from now.
+        nudge.send(()).expect("the poller is listening");
+        receiver.recv().expect("the nudge's own reading");
+
+        assert!(
+            (0..500).any(|_| {
+                thread::sleep(Duration::from_millis(10));
+                reads.load(Ordering::SeqCst) > 5
+            }),
+            "the millisecond interval the retier sent is in force, not the hour it started on"
+        );
+    }
+
+    #[test]
+    fn a_retier_message_shortens_the_slow_tier_interval_from_its_next_wakeup() {
+        let slow_reads = Arc::new(AtomicI64::new(0));
+        let (receiver, retier) = poll_with(
+            Tiers {
+                fast: Duration::from_millis(1),
+                slow: Duration::from_millis(100),
+                ..Tiers::default()
+            },
+            |_, _| vec![trackpad()],
+            counting_slow(Arc::clone(&slow_reads)),
+            frozen(),
+            unnudged(),
+            no_readings(),
+        );
+
+        receiver.recv().expect("the first reading");
+        retier.set(Tiers {
+            slow: Duration::from_millis(1),
+            ..Tiers::default()
+        });
+
+        assert!(
+            (0..500).any(|_| {
+                thread::sleep(Duration::from_millis(10));
+                slow_reads.load(Ordering::SeqCst) > 2
+            }),
+            "the tier finishes the wait it was already in and then reads on \
+             the interval the retier sent"
+        );
+    }
+
+    #[test]
+    fn a_retier_message_changes_the_profiler_timeout_the_slow_tier_reads_with() {
+        let seen_timeout = Arc::new(AtomicI64::new(-1));
+        let (receiver, retier) = poll_with(
+            Tiers {
+                fast: Duration::from_millis(1),
+                slow: Duration::from_millis(50),
+                timeout: Duration::from_secs(10),
+            },
+            |_, _| vec![trackpad()],
+            timeout_stamping_slow(Arc::clone(&seen_timeout)),
+            frozen(),
+            unnudged(),
+            no_readings(),
+        );
+
+        receiver.recv().expect("the first reading");
+        // The fast tier's own first reading does not wait on the slow tier's,
+        // so its first stamp is awaited rather than asserted straight away.
+        assert!(
+            (0..500).any(|_| {
+                thread::sleep(Duration::from_millis(10));
+                seen_timeout.load(Ordering::SeqCst) == 10_000
+            }),
+            "the timeout it started with"
+        );
+
+        retier.set(Tiers {
+            fast: Duration::from_millis(1),
+            slow: Duration::from_millis(1),
+            timeout: Duration::from_secs(3),
+        });
+
+        assert!(
+            (0..500).any(|_| {
+                thread::sleep(Duration::from_millis(10));
+                seen_timeout.load(Ordering::SeqCst) == 3_000
+            }),
+            "the reloaded timeout reaches the source, not the one poll_with started with"
+        );
+    }
+
+    #[test]
+    fn a_dropped_retier_leaves_the_tiers_running_on_whatever_they_last_had() {
+        let fast_reads = Arc::new(AtomicI64::new(0));
+        let slow_reads = Arc::new(AtomicI64::new(0));
+        let (receiver, retier) = poll_with(
+            Tiers {
+                fast: Duration::from_millis(1),
+                slow: Duration::from_millis(1),
+                ..Tiers::default()
+            },
+            counting_fast(Arc::clone(&fast_reads)),
+            counting_slow(Arc::clone(&slow_reads)),
+            frozen(),
+            unnudged(),
+            no_readings(),
+        );
+
+        drop(retier);
+
+        assert_eq!(
+            stamps(&receiver, 3),
+            [0, 1, 2],
+            "still ticking with nobody left to retier it"
+        );
+        assert!(
+            (0..500).any(|_| {
+                thread::sleep(Duration::from_millis(10));
+                slow_reads.load(Ordering::SeqCst) >= 1
+            }),
+            "the slow tier kept reading too"
+        );
+    }
+
     #[test]
     fn dropping_the_receiver_stops_both_tiers() {
         let fast_reads = Arc::new(AtomicI64::new(0));
         let slow_reads = Arc::new(AtomicI64::new(0));
-        let receiver = poll_with(
+        let (receiver, _retier) = poll_with(
             Tiers {
                 fast: Duration::from_millis(1),
                 slow: Duration::from_millis(1),
