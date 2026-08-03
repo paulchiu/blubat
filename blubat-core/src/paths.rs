@@ -15,6 +15,7 @@ use crate::error::{Error, Result};
 const APP: &str = "blubat";
 const CONFIG_FILE: &str = "config.toml";
 const STATE_FILE: &str = "state.toml";
+const READINGS_FILE: &str = "readings.toml";
 const WATCHES: &str = "watches";
 const TUI_LOCK: &str = "tui.lock";
 const DAEMON_LOCK: &str = "daemon.lock";
@@ -86,6 +87,12 @@ impl Paths {
         self.state_dir.join(STATE_FILE)
     }
 
+    /// The BMAP handoff: readings the daemon's last sweep took, for every
+    /// frontend to merge in as a data source of its own.
+    pub fn readings_file(&self) -> PathBuf {
+        self.state_dir.join(READINGS_FILE)
+    }
+
     /// The one-shot watches `blubat wait` drops for a running daemon.
     pub fn watch_dir(&self) -> PathBuf {
         self.state_dir.join(WATCHES)
@@ -143,6 +150,10 @@ mod tests {
             PathBuf::from("/home/blubat/.local/state/blubat/state.toml")
         );
         assert_eq!(
+            paths.readings_file(),
+            PathBuf::from("/home/blubat/.local/state/blubat/readings.toml")
+        );
+        assert_eq!(
             paths.watch_dir(),
             PathBuf::from("/home/blubat/.local/state/blubat/watches")
         );
@@ -159,6 +170,7 @@ mod tests {
 
         for path in [
             paths.state_file(),
+            paths.readings_file(),
             paths.watch_dir(),
             paths.tui_lock(),
             paths.daemon_lock(),
@@ -204,6 +216,7 @@ mod tests {
         for path in [
             paths.config_file().to_path_buf(),
             paths.state_file(),
+            paths.readings_file(),
             paths.watch_dir(),
             paths.tui_lock(),
             paths.daemon_lock(),
@@ -237,6 +250,7 @@ mod tests {
         );
         for path in [
             paths.state_file(),
+            paths.readings_file(),
             paths.watch_dir(),
             paths.tui_lock(),
             paths.daemon_lock(),

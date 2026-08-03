@@ -12,7 +12,7 @@
 //! being printed, leaving a frontend that owns the screen free to place it.
 //!
 //! ```no_run
-//! let reading = blubat_core::snapshot();
+//! let reading = blubat_core::snapshot(std::path::Path::new("/dev/null"));
 //!
 //! for device in reading.with_battery() {
 //!     println!("{} {:?}", device.name, device.levels.lowest());
@@ -21,6 +21,7 @@
 
 mod address;
 mod atomic;
+mod bmap;
 mod config;
 mod device;
 mod duration;
@@ -40,6 +41,10 @@ mod timestamp;
 mod watch;
 
 pub use address::Address;
+pub use bmap::{
+    BATTERY_QUERY as BMAP_QUERY, FrameReader as BmapFrameReader, Reading as BmapReading,
+    candidates as bmap_candidates, load as load_bmap_readings, save as save_bmap_readings,
+};
 pub use config::{
     Advertised, AdvertisedThresholds, Config, Dashboard, Defaults, DeviceRule, Hook, Notifications,
     Poll, Sort, Thresholds,

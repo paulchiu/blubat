@@ -59,6 +59,8 @@ mod tests {
             name: "Paul\u{2019}s Magic Trackpad".to_string(),
             kind: Some("Magic Trackpad".to_string()),
             transport: Some("Bluetooth".to_string()),
+            vendor_id: None,
+            product_id: None,
             levels: Levels {
                 main: Some(85),
                 ..Levels::default()

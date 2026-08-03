@@ -52,6 +52,8 @@ fn reading(level: u8, second: i64) -> Snapshot {
             name: "Paul\u{2019}s Magic Trackpad".to_string(),
             kind: None,
             transport: None,
+            vendor_id: None,
+            product_id: None,
             levels: Levels {
                 main: Some(level),
                 ..Levels::default()

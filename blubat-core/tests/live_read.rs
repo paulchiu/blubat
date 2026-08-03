@@ -8,7 +8,7 @@ use blubat_core::{ChargeState, Source};
 #[test]
 #[ignore = "needs a real machine with paired Bluetooth devices"]
 fn reads_a_device_with_a_battery_from_at_least_one_source() {
-    let reading = blubat_core::snapshot();
+    let reading = blubat_core::snapshot(std::path::Path::new("/nonexistent/readings.toml"));
 
     let with_battery: Vec<_> = reading.with_battery().collect();
     assert!(
@@ -35,7 +35,7 @@ fn reads_a_device_with_a_battery_from_at_least_one_source() {
 #[test]
 #[ignore = "needs a real machine with paired Bluetooth devices"]
 fn every_address_is_unique_after_the_merge() {
-    let reading = blubat_core::snapshot();
+    let reading = blubat_core::snapshot(std::path::Path::new("/nonexistent/readings.toml"));
 
     let mut addresses: Vec<&str> = reading
         .devices

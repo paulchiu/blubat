@@ -156,6 +156,8 @@ fn device(
             .and_then(Value::as_str)
             .map(str::to_string),
         transport: None,
+        vendor_id: hex_u16(properties, "device_vendorID"),
+        product_id: hex_u16(properties, "device_productID"),
         levels: Levels {
             main: level(properties, name, "device_batteryLevelMain", warnings),
             left: level(properties, name, "device_batteryLevelLeft", warnings),
@@ -189,6 +191,19 @@ fn level(properties: &Value, name: &str, key: &str, warnings: &mut Vec<String>) 
     }
 
     level
+}
+
+/// Reads a `"0x…"` hex id such as `device_vendorID`, absent for anything
+/// that is not one: a device with no such key, and one whose value this
+/// schema changed under, are handled the same way as a missing key already
+/// is elsewhere in this parse.
+fn hex_u16(properties: &Value, key: &str) -> Option<u16> {
+    properties
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .and_then(|text| text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")))
+        .and_then(|digits| u16::from_str_radix(digits, 16).ok())
 }
 
 #[cfg(test)]
@@ -287,6 +302,49 @@ mod tests {
         assert_eq!(trackpad.levels, Levels::default());
         assert!(!trackpad.has_battery(), "IOKit supplies this one");
         assert_eq!(trackpad.kind.as_deref(), Some("Magic Trackpad"));
+    }
+
+    #[test]
+    fn a_hex_id_missing_its_prefix_or_otherwise_unusable_is_absent_rather_than_a_panic() {
+        let value = |raw: serde_json::Value| serde_json::json!({ "device_vendorID": raw });
+
+        for raw in ["009E", "0xGGGG", "", "0x"] {
+            assert_eq!(
+                hex_u16(&value(serde_json::json!(raw)), "device_vendorID"),
+                None
+            );
+        }
+        assert_eq!(
+            hex_u16(&value(serde_json::json!(158)), "device_vendorID"),
+            None
+        );
+        assert_eq!(hex_u16(&serde_json::json!({}), "device_vendorID"), None);
+    }
+
+    #[test]
+    fn a_hex_id_reads_with_either_case_prefix_and_trims_stray_space() {
+        let value = |raw: &str| serde_json::json!({ "device_vendorID": raw });
+
+        assert_eq!(hex_u16(&value("0x009E"), "device_vendorID"), Some(0x009E));
+        assert_eq!(hex_u16(&value("0X009e"), "device_vendorID"), Some(0x009E));
+        assert_eq!(hex_u16(&value(" 0x4075 "), "device_vendorID"), Some(0x4075));
+    }
+
+    #[test]
+    fn a_bose_headsets_vendor_and_product_id_are_retained() {
+        let bose = named(REAL, "Bose QC Headphones");
+
+        assert_eq!(bose.vendor_id, Some(0x009E));
+        assert_eq!(bose.product_id, Some(0x4075));
+        assert!(!bose.connected, "found in device_not_connected");
+    }
+
+    #[test]
+    fn a_device_reporting_neither_id_has_neither() {
+        let keyboard = named(REAL, "Keychron B1 Pro");
+
+        assert_eq!(keyboard.vendor_id, None);
+        assert_eq!(keyboard.product_id, None);
     }
 
     #[test]
