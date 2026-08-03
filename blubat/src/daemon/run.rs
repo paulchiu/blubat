@@ -23,6 +23,7 @@ use crate::hooks::Outcome;
 use crate::notify::{Desktop, Notifier};
 use crate::{Failure, lock};
 
+use super::bmap;
 use super::watches::Watches;
 
 /// Everything the loop keeps between readings.
@@ -67,7 +68,21 @@ pub fn serve(paths: &Paths) -> Result<(), Failure> {
         ),
     );
 
-    for reading in blubat_core::poll(config.poll.daemon_tiers()) {
+    let mut bmap_swept_at = None;
+
+    for reading in blubat_core::poll(config.poll.daemon_tiers(), &paths.readings_file()) {
+        if bmap::due(
+            &mut bmap_swept_at,
+            reading.read_at,
+            config.poll.profiler_interval,
+        ) {
+            bmap::spawn_sweep(
+                reading.devices.clone(),
+                paths.readings_file(),
+                config.poll.profiler_timeout,
+            );
+        }
+
         for line in resident.tick(&reading, &config) {
             log(&mut out, &line);
         }
@@ -182,6 +197,8 @@ mod tests {
                 name: TRACKPAD.to_string(),
                 kind: None,
                 transport: None,
+                vendor_id: None,
+                product_id: None,
                 levels: Levels {
                     main: level,
                     ..Levels::default()
