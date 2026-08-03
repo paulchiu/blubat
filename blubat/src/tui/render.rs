@@ -75,7 +75,7 @@ pub fn render(frame: &mut Frame, app: &App, table: &mut TableState) {
 
     frame.render_widget(filter_line(app, &rows), filter);
     render_devices(frame, app, &rows, devices, table);
-    frame.render_widget(keys_footer(app), footer);
+    frame.render_widget(keys_footer(app, footer.width), footer);
 
     if app.mode == Mode::Keymap {
         render_keymap(frame, screen, palette, &app.view);
@@ -230,14 +230,30 @@ fn render_devices(
     area: Rect,
     table: &mut TableState,
 ) {
+    let block = devices_block(app.look.palette);
+    let inner_width = block.inner(area).width;
+
     if rows.is_empty() {
-        frame.render_widget(nothing_to_show(app), area);
+        frame.render_widget(nothing_to_show(app).block(block), area);
         return;
     }
 
     table.select(Some(table_row(rows, app.selected)));
 
-    frame.render_stateful_widget(device_table(app, rows, area.width), area, table);
+    frame.render_stateful_widget(
+        device_table(app, rows, inner_width).block(block),
+        area,
+        table,
+    );
+}
+
+/// The frame around the device table, so the dashboard reads in the same
+/// bordered language the detail view's panels do rather than a table floating
+/// loose over the status line.
+fn devices_block(palette: Palette) -> Block<'static> {
+    Block::bordered()
+        .border_style(Style::new().fg(palette.dim))
+        .title(Span::styled(" devices ", palette.accent))
 }
 
 /// Where the selected device sits among the table's rows.
@@ -511,21 +527,87 @@ fn nothing_to_show(app: &App) -> Paragraph<'static> {
     Paragraph::new(message).style(app.look.palette.dim)
 }
 
-/// The keys live in the current view, which is what makes the footer contextual.
-pub(super) fn keys_footer(app: &App) -> Line<'static> {
+/// Marks that bindings were left off the end of a footer too narrow for all
+/// of them, ascii so it never costs a cell more than it says it does.
+const FOOTER_ELLIPSIS: &str = "...  ";
+
+/// The keys live in the current view, which is what makes the footer
+/// contextual, fitted to `width` so a narrow terminal never buries `? help`
+/// off the right edge the way a plain, unbounded line would.
+///
+/// Help stays pinned at the end whenever the mode binds it: it is drawn last
+/// but budgeted first, so it is the one binding a narrow terminal never loses.
+/// Everything else fills what is left, whole bindings only, with an ellipsis
+/// standing in for what did not fit.
+pub(super) fn keys_footer(app: &App, width: u16) -> Line<'static> {
     let palette = app.look.palette;
-    let spans = app
-        .keys()
+    let bindings = app.keys();
+    let help = bindings.iter().find(|binding| binding.keys == "?").copied();
+    let rest: Vec<Binding> = bindings
+        .into_iter()
+        .filter(|binding| Some(*binding) != help)
+        .collect();
+
+    let budget = usize::from(width).saturating_sub(help.map_or(0, footer_width));
+    let (fitting, dropped) = fitted(&rest, budget);
+
+    let spans = fitting
         .iter()
-        .flat_map(|binding| {
-            [
-                Span::styled(binding.keys, palette.text),
-                Span::styled(format!(" {}  ", binding.label), palette.dim),
-            ]
-        })
+        .flat_map(|binding| footer_spans(*binding, palette))
+        .chain(dropped.then(|| Span::styled(FOOTER_ELLIPSIS, palette.dim)))
+        .chain(
+            help.iter()
+                .flat_map(|binding| footer_spans(*binding, palette)),
+        )
         .collect::<Vec<_>>();
 
     Line::from(spans)
+}
+
+/// One binding as the footer draws it: the keys, then the label dimmed behind
+/// the two spaces that separate it from the next one.
+fn footer_spans(binding: Binding, palette: Palette) -> [Span<'static>; 2] {
+    [
+        Span::styled(binding.keys, palette.text),
+        Span::styled(format!(" {}  ", binding.label), palette.dim),
+    ]
+}
+
+/// The cells one binding costs in the footer, spacing included.
+fn footer_width(binding: Binding) -> usize {
+    binding.keys.chars().count() + 1 + binding.label.chars().count() + 2
+}
+
+/// The longest run of `bindings`, in order, that fits in `budget` cells, and
+/// whether anything had to be left off the end to get there.
+///
+/// A binding is kept whole or not at all: cutting one mid label would read as
+/// a different, shorter key. When something does not fit, the room an
+/// ellipsis needs is set aside up front, so the marker itself never crowds
+/// out the bindings it is there to explain.
+fn fitted(bindings: &[Binding], budget: usize) -> (Vec<Binding>, bool) {
+    let whole: usize = bindings.iter().copied().map(footer_width).sum();
+
+    if whole <= budget {
+        return (bindings.to_vec(), false);
+    }
+
+    let budget = budget.saturating_sub(FOOTER_ELLIPSIS.chars().count());
+    let mut spent = 0;
+    let mut kept = Vec::new();
+
+    for binding in bindings.iter().copied() {
+        let cost = footer_width(binding);
+
+        if spent + cost > budget {
+            break;
+        }
+
+        spent += cost;
+        kept.push(binding);
+    }
+
+    (kept, true)
 }
 
 /// The full keymap, centred over the dashboard rather than replacing it.
@@ -570,7 +652,7 @@ fn keymap(palette: Palette, dashboard: &[Binding]) -> Paragraph<'static> {
 
     Paragraph::new(lines).block(
         Block::bordered()
-            .title(" keys ")
+            .title(format!(" blubat v{} keys ", env!("CARGO_PKG_VERSION")))
             .padding(Padding::horizontal(1)),
     )
 }
@@ -871,33 +953,33 @@ mod tests {
     fn the_dashboard_draws_the_frame_it_is_specified_to_draw() {
         let expected = " blubat   3 active   sort level   poll 5s   next 5s                                                                  ▲ 1 critical
 
-     Device                   Type         Battery         % State       Trend  Last seen
- ▎ ▲ Soundcore Liberty        audio        █░░░░░░░░░░░   8% on battery  █▇▅▄▂▁ now
-     Magic Trackpad           trackpad     ███░░░░░░░░░  23% + charging  █▇▅▄▂▁ now
-     MX Keys M Mac            keyboard     ████████░░░░  67% on battery  █▇▅▄▂▁ now
-
-   inactive (2)
-     AirPods Pro              audio        █████░░░░░░░  45% stale       ······ 3h ago
-     MX Master 3S             mouse        ░░░░░░░░░░░░   -- unreported  ······ 2d ago
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ ┌ devices ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+ │    Device                   Type         Battery         % State       Trend  Last seen                                      │
+ │▎ ▲ Soundcore Liberty        audio        █░░░░░░░░░░░   8% on battery  █▇▅▄▂▁ now                                            │
+ │    Magic Trackpad           trackpad     ███░░░░░░░░░  23% + charging  █▇▅▄▂▁ now                                            │
+ │    MX Keys M Mac            keyboard     ████████░░░░  67% on battery  █▇▅▄▂▁ now                                            │
+ │                                                                                                                              │
+ │  inactive (2)                                                                                                                │
+ │    AirPods Pro              audio        █████░░░░░░░  45% stale       ······ 3h ago                                         │
+ │    MX Master 3S             mouse        ░░░░░░░░░░░░   -- unreported  ······ 2d ago                                         │
+ │                                                                                                                              │
+ │                                                                                                                              │
+ │                                                                                                                              │
+ │                                                                                                                              │
+ │                                                                                                                              │
+ │                                                                                                                              │
+ │                                                                                                                              │
+ │                                                                                                                              │
+ │                                                                                                                              │
+ │                                                                                                                              │
+ │                                                                                                                              │
+ │                                                                                                                              │
+ │                                                                                                                              │
+ │                                                                                                                              │
+ │                                                                                                                              │
+ │                                                                                                                              │
+ │                                                                                                                              │
+ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
  q quit  j/k move  enter detail  s sort  / filter  h hide  H show hidden  i hide inactive  r reload  c edit config  ? help";
         assert_frame(&dashboard(), 130, 30, expected);
     }
@@ -906,24 +988,24 @@ mod tests {
     fn a_narrow_terminal_drops_columns_rather_than_the_reading() {
         let expected = " blubat   3 active   sort level   poll 5s      ▲ 1 critical
 
-     Device                   Battery         % State
- ▎ ▲ Soundcore Liberty        █░░░░░░░░░░░   8% on battery
-     Magic Trackpad           ███░░░░░░░░░  23% + charging
-     MX Keys M Mac            ████████░░░░  67% on battery
-
-   inactive (2)
-     AirPods Pro              █████░░░░░░░  45% stale
-     MX Master 3S             ░░░░░░░░░░░░   -- unreported
-
-
-
-
-
-
-
-
-
- q quit  j/k move  enter detail  s sort  / filter  h hide";
+ ┌ devices ───────────────────────────────────────────────┐
+ │    Device                 Battery         % State      │
+ │▎ ▲ Soundcore Liberty      █░░░░░░░░░░░   8% on battery │
+ │    Magic Trackpad         ███░░░░░░░░░  23% + charging │
+ │    MX Keys M Mac          ████████░░░░  67% on battery │
+ │                                                        │
+ │  inactive (2)                                          │
+ │    AirPods Pro            █████░░░░░░░  45% stale      │
+ │    MX Master 3S           ░░░░░░░░░░░░   -- unreported │
+ │                                                        │
+ │                                                        │
+ │                                                        │
+ │                                                        │
+ │                                                        │
+ │                                                        │
+ │                                                        │
+ └────────────────────────────────────────────────────────┘
+ q quit  j/k move  enter detail  s sort  ...  ? help";
         assert_frame(&dashboard(), 60, 20, expected);
     }
 
@@ -965,7 +1047,7 @@ mod tests {
             "the countdown moves on a tick alone"
         );
         assert!(
-            line_containing(&press(app, "s"), "blubat").contains("sort name"),
+            line_containing(&press(app, "sn"), "blubat").contains("sort name"),
             "and follows the order the table is in"
         );
     }
@@ -992,6 +1074,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_footer_keeps_help_pinned_and_marks_dropped_bindings_with_an_ellipsis() {
+        let wide = drawn(&loaded(), 130, 30)
+            .last()
+            .cloned()
+            .expect("a footer row");
+        assert!(wide.contains("? help"));
+        assert!(
+            !wide.contains("..."),
+            "everything fits, so nothing is dropped"
+        );
+
+        let narrow = drawn(&loaded(), 60, 30)
+            .last()
+            .cloned()
+            .expect("a footer row");
+        assert!(
+            narrow.contains("? help"),
+            "help stays visible even once bindings are dropped: {narrow}"
+        );
+        assert!(narrow.contains("..."), "and says so: {narrow}");
+        assert!(
+            narrow.ends_with("? help"),
+            "help is pinned at the end of the line: {narrow}"
+        );
+    }
+
+    #[test]
+    fn the_devices_table_sits_in_its_own_border() {
+        assert!(screen(&dashboard()).contains("┌ devices"));
+    }
+
+    #[test]
+    fn the_overlay_names_the_running_version() {
+        let open = update(loaded(), Event::Key(Key::Char('?')));
+
+        assert!(
+            screen(&open).contains(&format!("blubat v{}", env!("CARGO_PKG_VERSION"))),
+            "{}",
+            screen(&open)
+        );
+    }
+
     /// The overlay covers what is under it, which only a whole frame can say:
     /// the box, its border, the keys of both views it lists and the dashboard
     /// rows it hides are one assertion rather than four substrings on a screen
@@ -1000,34 +1125,34 @@ mod tests {
     fn the_keymap_overlay_covers_the_dashboard_and_lists_both_views_keys() {
         let expected = " blubat   3 active   sort level   poll 5s   next 5s                                    ▲ 1 critical
 
-     Device                   Type         Battery         % State       Trend  Last seen
- ▎ ▲ Soundcore L┌ keys ────────────────────────────────────────────────────────────┐
-     Magic Track│         q  quit                                                  │
-     MX Keys M M│       j/k  move                                                  │
-                │     enter  detail                                                │
-   inactive (2) │         s  sort                                                  │
-     AirPods Pro│         /  filter                                                │go
-     MX Master 3│         h  hide                                                  │go
-                │         H  show hidden                                           │
-                │         i  hide inactive                                         │
-                │         r  reload                                                │
-                │         c  edit config                                           │
-                │         ?  help                                                  │
-                │                                                                  │
-                │   in the detail view                                             │
-                │ esc/enter  back                                                  │
-                │       j/k  next/previous                                         │
-                │         q  quit                                                  │
-                │                                                                  │
-                │ the detail chart is this run only; a restart starts it empty.    │
-                │ h and i last: the one table blubat writes to the config file.    │
-                │ a hidden device is hidden here only, never unpaired from macOS.  │
-                │ r re-reads the config file; one it cannot read changes nothing.  │
-                │ c opens the config in $EDITOR and reloads it once it closes.     │
-                └──────────────────────────────────────────────────────────────────┘
-
-
- ? close  q quit";
+ ┌ devices ───────────────────────────────────────────────────────────────────────────────────────┐
+ │    Device    ┌ blubat v0.8.1 keys ──────────────────────────────────────────────┐t seen        │
+ │▎ ▲ Soundcore │         q  quit                                                  │              │
+ │    Magic Trac│       j/k  move                                                  │              │
+ │    MX Keys M │     enter  detail                                                │              │
+ │              │         s  sort                                                  │              │
+ │  inactive (2)│         /  filter                                                │              │
+ │    AirPods Pr│         h  hide                                                  │ago           │
+ │    MX Master │         H  show hidden                                           │ago           │
+ │              │         i  hide inactive                                         │              │
+ │              │         r  reload                                                │              │
+ │              │         c  edit config                                           │              │
+ │              │         ?  help                                                  │              │
+ │              │                                                                  │              │
+ │              │   in the detail view                                             │              │
+ │              │ esc/enter  back                                                  │              │
+ │              │       j/k  next/previous                                         │              │
+ │              │         q  quit                                                  │              │
+ │              │                                                                  │              │
+ │              │ s opens a sort menu: l level, n name, t last seen, esc cancels.  │              │
+ │              │ the detail chart is this run only; a restart starts it empty.    │              │
+ │              │ h and i last: the one table blubat writes to the config file.    │              │
+ │              │ a hidden device is hidden here only, never unpaired from macOS.  │              │
+ │              │ r re-reads the config file; one it cannot read changes nothing.  │              │
+ │              │ c opens the config in $EDITOR and reloads it once it closes.     │              │
+ │              └──────────────────────────────────────────────────────────────────┘              │
+ └────────────────────────────────────────────────────────────────────────────────────────────────┘
+ esc/? close  q quit";
         assert_frame(
             &update(dashboard(), Event::Key(Key::Char('?'))),
             100,
@@ -1460,37 +1585,48 @@ mod tests {
     /// this view is that all of it is on screen at once.
     #[test]
     fn the_detail_view_draws_the_frame_it_is_specified_to_draw() {
-        let expected = "╭ blubat | Paul’s Magic Trackpad ──────────────────────────────────────────────────────────────────╮
-│╭ power ─────────────────────────────────────────────────────────────────────────────────────────╮│
-││ 23%  █████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  charging, est. 9h 38m to full                     ││
-││connected  ·  iokit  ·  last reading now                                                        ││
-│╰────────────────────────────────────────────────────────────────────────────────────────────────╯│
-│╭ battery, last 2h ─────────────────────────────────────────────╮╭ stats ────────────────────────╮│
-││100  │                                                         ││charge rate              8.0%/h││
-││     │                                                         ││trend                    rising││
-││     │                                                         ││to full                  9h 38m││
-││     │                                                         ││                               ││
-││     │                                                         ││low                         20%││
-││     │                                                         ││critical                    10%││
-││50   │                                                         ││charged at                 100%││
-││     │                                                         ││                               ││
-││     │                                                         ││address       30-82-16-f2-24-90││
-││     │••••••••••••••••••••••••••••••••⢀⣀⣀⣀⣀⣀⣀⡠⠤⠤⠤⠤⠤⠤⠔⠒⠒⠒⠒⠒⠒⠊⠉⠉⠉││source                    iokit││
-││     │    ⣀⣀⣀⣀⣀⣀⣀⠤⠤⠤⠤⠤⠤⠤⠒⠒⠒⠒⠒⠒⠒⠉⠉⠉⠉⠉⠉⠉⠁                        ││type                   trackpad││
-││0    │⠉⠉⠉⠉                                                     ││samples                       9││
-││     └─────────────────────────────────────────────────────────││                               ││
-││2h ago                                                      now││                               ││
-│╰───────────────────────────────────────────────────────────────╯╰───────────────────────────────╯│
-│╭ recent events ─────────────────────────────────────────────────────────────────────────────────╮│
-││30m ago   critical_battery  at 9%, threshold 20%                                                ││
-││1h ago    low_battery       at 19%, threshold 20%                                               ││
-││                                                                                                ││
-││                                                                                                ││
-││                                                                                                ││
-│╰────────────────────────────────────────────────────────────────────────────────────────────────╯│
-│esc/enter back  j/k next/previous  q quit                                                         │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────╯";
+        let expected = " blubat | Paul’s Magic Trackpad
+ ╭ power ─────────────────────────────────────────────────────────────────────────────────────────╮
+ │ 23%  █████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  charging, est. 9h 38m to full                     │
+ │connected  ·  iokit  ·  last reading now                                                        │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────╯
+ ╭ battery, last 2h ─────────────────────────────────────────────╮╭ stats ────────────────────────╮
+ │100  │                                                         ││charge rate              8.0%/h│
+ │     │                                                         ││trend                    rising│
+ │     │                                                         ││to full                  9h 38m│
+ │     │                                                         ││                               │
+ │     │                                                         ││low                         20%│
+ │     │                                                         ││critical                    10%│
+ │50   │                                                         ││charged at                 100%│
+ │     │                                                         ││                               │
+ │     │                                                         ││address       30-82-16-f2-24-90│
+ │     │                                                     ⢀⣀⣀⣀││source                    iokit│
+ │     │•••••••••••••••••••••••••⣀⣀⣀⣀⣀⣀⣀⡠⠤⠤⠤⠤⠤⠤⠔⠒⠒⠒⠒⠒⠒⠊⠉⠉⠉⠉⠉⠉⠁•••││type                   trackpad│
+ │     │⣀⣀⣀⣀⠤⠤⠤⠤⠤⠤⠤⠒⠒⠒⠒⠒⠒⠒⠉⠉⠉⠉⠉⠉⠉                                ││samples                       9│
+ │0    │                                                         ││                               │
+ │     └─────────────────────────────────────────────────────────││                               │
+ │2h ago                                                      now││                               │
+ ╰───────────────────────────────────────────────────────────────╯╰───────────────────────────────╯
+ ╭ recent events ─────────────────────────────────────────────────────────────────────────────────╮
+ │30m ago   critical_battery  at 9%, threshold 20%                                                │
+ │1h ago    low_battery       at 19%, threshold 20%                                               │
+ │                                                                                                │
+ │                                                                                                │
+ │                                                                                                │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────╯
+ esc/enter back  j/k next/previous  q quit";
         assert_frame(&detail(), 100, 30, expected);
+    }
+
+    #[test]
+    fn the_detail_view_carries_no_outer_frame_around_its_panels() {
+        let header = drawn(&detail(), 100, 30)[0].clone();
+
+        assert!(header.contains("blubat | Paul"), "{header}");
+        assert!(
+            !header.contains('╭') && !header.contains('│'),
+            "no outer frame characters on the header line: {header}"
+        );
     }
 
     /// Each battery a device reports gets a row of its own, under the one level

@@ -43,27 +43,40 @@ const BAR_SHARE: usize = 4;
 const BAR_CEILING: usize = 48;
 
 /// Draws `device` over the whole screen, in place of the dashboard.
+///
+/// No frame of its own around the whole view: the panels below carry their
+/// own borders, and a device name on a plain line reads lighter than a box
+/// around a box.
 pub fn render(frame: &mut Frame, app: &App, device: &Device, area: Rect) {
     let palette = app.look.palette;
-    let outer = panel(&format!(" blubat | {} ", device.name), palette);
-    let inner = outer.inner(area);
-    frame.render_widget(outer, area);
 
-    let [power, middle, events, footer] = Layout::vertical([
+    let [header, power, middle, events, footer] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(power_height(device.levels)),
         Constraint::Min(0),
         Constraint::Length(EVENTS_HEIGHT),
         Constraint::Length(1),
     ])
-    .areas(inner);
+    .horizontal_margin(1)
+    .areas(area);
     let [chart, stats] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(STATS_WIDTH)]).areas(middle);
 
+    frame.render_widget(header_line(device, palette), header);
     render_power(frame, app, device, power);
     render_chart(frame, app, device, chart);
     render_stats(frame, app, device, stats);
     render_events(frame, app, device, events);
-    frame.render_widget(render::keys_footer(app), footer);
+    frame.render_widget(render::keys_footer(app, footer.width), footer);
+}
+
+/// Which device this is, in place of the title the removed outer frame used
+/// to carry.
+fn header_line(device: &Device, palette: Palette) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("blubat | {}", device.name),
+        Style::new().fg(palette.accent).add_modifier(Modifier::BOLD),
+    ))
 }
 
 /// A rounded panel with an accented title, which is this view's chrome.
