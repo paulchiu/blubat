@@ -74,13 +74,15 @@ edit` gives on the command line.
 
 `r` re-reads `~/.config/blubat/config.toml` in place: thresholds, notification
 toggles, hooks, the colour scheme and the charging glyph all take the new
-values without a restart. `[poll]` is the exception, since the poller is
-already running on the intervals it was started with, so a changed
-`foreground_interval` or `profiler_interval` waits for a restart. A file that
-will not parse is reported on a line of its own and changes nothing, so the
-config that was working a moment ago keeps working and the dashboard never
-exits over a typo. The same line carries a hook that went wrong, which is why
-hook output goes nowhere near stdout.
+values without a restart. `[poll]` takes effect live too: a changed
+`foreground_interval`, `profiler_interval` or `profiler_timeout` reaches the
+running poller rather than waiting for a restart, though the fast tier is at
+most one of its own ticks away from noticing and the slow tier picks the
+change up once the interval it is already waiting out ends. A file that will
+not parse is reported on a line of its own and changes nothing, so the config
+that was working a moment ago keeps working and the dashboard never exits over
+a typo. The same line carries a hook that went wrong, which is why hook output
+goes nowhere near stdout.
 
 A row is painted red below the same `critical` threshold the events are raised
 by, so the count on the status line and the banners agree by construction: a

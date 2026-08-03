@@ -59,7 +59,7 @@ pub use history::{Direction, History, Sample, Trend};
 pub use iokit::advertised;
 pub use json::Reading;
 pub use paths::Paths;
-pub use poll::{Tiers, poll, snapshot};
+pub use poll::{Retier, Tiers, poll, poll_retierable, snapshot};
 pub use snapshot::Snapshot;
 pub use theme::{Rgb, Scheme, Theme};
 pub use timestamp::Timestamp;

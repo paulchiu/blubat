@@ -65,9 +65,9 @@ pub fn run(paths: &Paths) -> Result<(), Failure> {
     // and the load right after reports a real problem on its own either way.
     let _ = crate::config::annotate(paths.config_file());
     let (config, unreadable) = load(paths);
-    let tiers = tiers(&config.poll);
-    let (notes, events, admission) =
-        events::events(blubat_core::poll(tiers, &paths.readings_file()));
+    let starting_tiers = tiers(&config.poll);
+    let (readings, retier) = blubat_core::poll_retierable(starting_tiers, &paths.readings_file());
+    let (notes, events, admission) = events::events(readings);
     let (effects, stale_state) = Effects::live(paths, reporter(notes));
     // Nothing can take the lock from a dashboard holding it, so this answer
     // stands for the whole session.
@@ -78,7 +78,7 @@ pub fn run(paths: &Paths) -> Result<(), Failure> {
         notice: notice([unreadable, stale_state, unlocked]),
         advertised: effects.advertised().clone(),
         ..App::new(
-            tiers.fast,
+            starting_tiers.fast,
             Timestamp::now(),
             Look::of(&config.theme, Glyphs::detected()),
             config,
@@ -120,7 +120,17 @@ pub fn run(paths: &Paths) -> Result<(), Failure> {
             );
         }
         if app.reload {
-            app = update(app, Event::Reloaded(effects.reload()));
+            // A successful reload retiers the running poller so `[poll]`
+            // takes effect without a restart, and carries the new fast
+            // interval on to the reducer so the countdown it draws matches.
+            let read = effects.reload().map(|config| {
+                let retiered = tiers(&config.poll);
+                retier.set(retiered);
+
+                (config, retiered.fast)
+            });
+
+            app = update(app, Event::Reloaded(read));
         }
         if let Some(field) = app.save_dashboard {
             // Only the field `h` or `i` actually changed travels to the write,
