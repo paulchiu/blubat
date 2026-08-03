@@ -131,27 +131,72 @@ fn battery_level(frame: &[u8]) -> Option<u8> {
 
 /// One battery reading the daemon took over RFCOMM, as `readings.toml`
 /// holds it.
+///
+/// `connected` is the device's own live state at `read_at`, not merely
+/// whether this reading is fresh: a sweep that answers always carries
+/// `true`, and one that carries a reading forward from an earlier sweep
+/// (see [`carry_forward`]) copies whatever the daemon's own device list most
+/// recently reported for that address, so a headset that has actually gone
+/// away is shown as last seen rather than as connected with a stale level.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Reading {
     pub address: Address,
     pub name: String,
     pub level: u8,
+    pub connected: bool,
     pub read_at: Timestamp,
     pub source: Source,
 }
 
 impl Reading {
-    /// A reading of `level` for the named device, always attributed to this source.
+    /// A reading of `level` for the named device that answered this sweep,
+    /// always attributed to this source and always connected: a device that
+    /// did not answer never reaches this constructor.
     pub fn new(address: Address, name: impl Into<String>, level: u8, read_at: Timestamp) -> Self {
         Self {
             address,
             name: name.into(),
             level,
+            connected: true,
             read_at,
             source: Source::Bmap,
         }
     }
+}
+
+/// Folds a sweep's fresh readings into what was already on disk.
+///
+/// A reading this sweep refreshed always wins. One it did not is carried
+/// forward unchanged rather than dropped, the way [`crate::poll::read_slow`]
+/// holds the last good `system_profiler` devices over a failed read: a
+/// device merely missed this sweep (a transient RFCOMM failure, a timeout)
+/// keeps aging in place toward `stale_after` instead of disappearing from
+/// the file outright. Its `connected` flag is refreshed from `devices`
+/// when that address is still known there, so a device `devices` reports as
+/// actually gone is shown as last seen immediately rather than waiting out
+/// the stale window; an address `devices` no longer mentions at all keeps
+/// whatever `connected` it last carried.
+pub fn carry_forward(
+    previous: Vec<Reading>,
+    fresh: Vec<Reading>,
+    devices: &[Device],
+) -> Vec<Reading> {
+    let mut merged: Vec<Reading> = previous
+        .into_iter()
+        .filter(|old| !fresh.iter().any(|new| new.address == old.address))
+        .map(|old| {
+            let connected = devices
+                .iter()
+                .find(|device| device.address == old.address)
+                .map_or(old.connected, |device| device.connected);
+
+            Reading { connected, ..old }
+        })
+        .collect();
+
+    merged.extend(fresh);
+    merged
 }
 
 /// The handoff file: every reading the daemon's last BMAP sweep produced.
@@ -219,7 +264,7 @@ pub(crate) fn merge(mut snapshot: Snapshot, readings: &[Reading]) -> Snapshot {
             },
             charge: ChargeState::Unknown,
             source: Source::Bmap,
-            connected: true,
+            connected: reading.connected,
             read_at: reading.read_at,
         };
 
@@ -436,6 +481,68 @@ mod tests {
         fs::create_dir_all(&scratch.0).expect("a scratch directory");
         fs::write(scratch.readings_file(), "not toml at all {{").expect("a written file");
         assert_eq!(load(&scratch.readings_file()), []);
+    }
+
+    #[test]
+    fn a_device_missed_this_sweep_keeps_its_previous_reading_rather_than_vanishing() {
+        let still_connected = candidate(Some(0x009E), Some(0x4075), true);
+
+        let merged = carry_forward(vec![reading(76)], Vec::new(), &[still_connected]);
+
+        assert_eq!(
+            merged,
+            [reading(76)],
+            "a still connected device merely missed this sweep, not gone"
+        );
+    }
+
+    #[test]
+    fn a_fresh_reading_replaces_the_previous_one_for_the_same_address() {
+        let merged = carry_forward(vec![reading(76)], vec![reading(80)], &[]);
+
+        assert_eq!(merged, [reading(80)]);
+    }
+
+    #[test]
+    fn a_device_devices_reports_as_actually_gone_is_carried_forward_as_disconnected() {
+        let gone = candidate(Some(0x009E), Some(0x4075), false);
+
+        let merged = carry_forward(vec![reading(76)], Vec::new(), &[gone]);
+
+        assert_eq!(
+            merged,
+            [Reading {
+                connected: false,
+                ..reading(76)
+            }],
+            "the level and read_at stay, but connected reflects the live device list"
+        );
+    }
+
+    #[test]
+    fn an_address_devices_no_longer_mentions_at_all_keeps_its_last_known_connected_state() {
+        let merged = carry_forward(vec![reading(76)], Vec::new(), &[]);
+
+        assert_eq!(
+            merged,
+            [reading(76)],
+            "no fresher information than what the reading already carried"
+        );
+    }
+
+    #[test]
+    fn a_reading_for_a_disconnected_device_merges_as_last_seen_rather_than_connected() {
+        let last_seen = Reading {
+            connected: false,
+            ..reading(76)
+        };
+
+        let merged = merge(snapshot(Vec::new()), &[last_seen]);
+
+        assert!(
+            !merged.devices[0].connected,
+            "a disconnected reading must not merge in as connected"
+        );
     }
 
     #[test]

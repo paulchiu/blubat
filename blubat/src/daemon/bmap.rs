@@ -26,7 +26,10 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use blubat_core::{Address, BmapFrameReader, BmapReading, Device, Timestamp, bmap_candidates};
+use blubat_core::{
+    Address, BmapFrameReader, BmapReading, Device, Timestamp, bmap_candidates,
+    carry_forward_bmap_readings,
+};
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -210,16 +213,47 @@ pub(crate) fn due(last: &mut Option<Timestamp>, now: Timestamp, interval: Durati
     fire
 }
 
-/// Runs one sweep on a thread of its own and saves whatever it finds.
+/// One sweep, folded into whatever the previous one left on disk.
+///
+/// `sweep` itself only ever answers for the devices it reached this time; a
+/// device it missed (a transient RFCOMM failure, a timeout, a disconnect)
+/// keeps its last known reading rather than vanishing, via
+/// [`blubat_core::carry_forward_bmap_readings`]. Split out from
+/// [`spawn_sweep`] so this folding is exercised directly against a fake
+/// channel across two sequential sweeps, without a thread or a real file.
+pub(crate) fn swept(
+    channel: &dyn Channel,
+    devices: &[Device],
+    read_at: Timestamp,
+    timeout: Duration,
+    previous: Vec<BmapReading>,
+) -> Vec<BmapReading> {
+    let fresh = sweep(channel, devices, read_at, timeout);
+
+    carry_forward_bmap_readings(previous, fresh, devices)
+}
+
+/// Runs one sweep on a thread of its own and saves whatever it and the
+/// previous sweep together account for.
 ///
 /// Detached rather than awaited: the sync RFCOMM open this walks through
 /// must run somewhere it cannot wedge the daemon's own tick loop, the same
-/// isolation the slow tier already gives `system_profiler`. A save that
-/// fails is as silent as an empty sweep; the next sweep's readings simply
-/// replace whatever is on disk.
+/// isolation the slow tier already gives `system_profiler`. That isolation
+/// only bounds how long the *poller* can be stalled, though: unlike
+/// `system_profiler`, which the slow tier can kill outright on a timeout,
+/// there is no forced-termination primitive for a synchronous IOBluetooth
+/// call, so a device whose open call itself wedges (rather than merely
+/// timing out on the response wait `Channel::battery` already bounds) leaks
+/// this one thread until it finally returns. Accepted rather than worked
+/// around: a genuine wedge is rare enough, and a leaked thread costly enough
+/// to avoid manufacturing, that killing an in-flight Objective-C call from
+/// the outside is not worth the risk it would add. A save that fails is as
+/// silent as an empty sweep; the next sweep folds in over whatever is on
+/// disk either way.
 pub(crate) fn spawn_sweep(devices: Vec<Device>, readings_file: PathBuf, timeout: Duration) {
     thread::spawn(move || {
-        let readings = sweep(&IoBluetooth, &devices, Timestamp::now(), timeout);
+        let previous = blubat_core::load_bmap_readings(&readings_file);
+        let readings = swept(&IoBluetooth, &devices, Timestamp::now(), timeout, previous);
         let _ = blubat_core::save_bmap_readings(&readings_file, &readings);
     });
 }
@@ -321,6 +355,62 @@ mod tests {
         );
 
         assert_eq!(readings, []);
+    }
+
+    #[test]
+    fn a_miss_on_the_second_sweep_carries_the_first_sweeps_reading_forward() {
+        let still_connected = bose(Some(0x009E), Some(0x4075));
+        let first = swept(
+            &Fake::answering(vec![Some(76)]),
+            std::slice::from_ref(&still_connected),
+            READ_AT,
+            Duration::ZERO,
+            Vec::new(),
+        );
+
+        let second = swept(
+            &Fake::answering(vec![None]),
+            &[still_connected],
+            Timestamp::from_unix(READ_AT.unix() + 300),
+            Duration::ZERO,
+            first.clone(),
+        );
+
+        assert_eq!(
+            second, first,
+            "a still connected device missed this sweep, so its last reading is unchanged"
+        );
+    }
+
+    #[test]
+    fn a_device_that_actually_disconnected_between_sweeps_is_carried_forward_as_last_seen() {
+        let connected = bose(Some(0x009E), Some(0x4075));
+        let first = swept(
+            &Fake::answering(vec![Some(76)]),
+            &[connected],
+            READ_AT,
+            Duration::ZERO,
+            Vec::new(),
+        );
+
+        let disconnected = Device {
+            connected: false,
+            ..bose(Some(0x009E), Some(0x4075))
+        };
+        let second = swept(
+            &Fake::default(),
+            &[disconnected],
+            Timestamp::from_unix(READ_AT.unix() + 300),
+            Duration::ZERO,
+            first,
+        );
+
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].level, 76, "the last known level stays");
+        assert!(
+            !second[0].connected,
+            "gone from the device list means last seen, not connected"
+        );
     }
 
     #[test]

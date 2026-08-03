@@ -43,7 +43,8 @@ mod watch;
 pub use address::Address;
 pub use bmap::{
     BATTERY_QUERY as BMAP_QUERY, FrameReader as BmapFrameReader, Reading as BmapReading,
-    candidates as bmap_candidates, load as load_bmap_readings, save as save_bmap_readings,
+    candidates as bmap_candidates, carry_forward as carry_forward_bmap_readings,
+    load as load_bmap_readings, save as save_bmap_readings,
 };
 pub use config::{
     Advertised, AdvertisedThresholds, Config, Dashboard, Defaults, DeviceRule, Hook, Notifications,
