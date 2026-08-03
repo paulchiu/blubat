@@ -18,6 +18,20 @@ Nothing installs it for you. blubat never writes that plist on a first run or
 an upgrade, and `daemon uninstall` boots the agent out and removes the file
 again.
 
+A Bose headset's battery level only ever comes from this daemon: the TUI and
+every one-shot command never touch Bluetooth for it, so a machine with the
+daemon not running or not yet installed simply shows a supported Bose as
+`unreported`, the same as an unsupported one. Reading it needs
+[BMAP](architecture.md#a-third-source-bmap-daemon-only) over RFCOMM, which
+needs macOS's Bluetooth permission, and macOS attributes that permission to
+whichever process is responsible: under launchd that is this binary itself,
+and the `NSBluetoothAlwaysUsageDescription` `build.rs` embeds in it is what
+lets TCC create the row for blubat under System Settings → Privacy &
+Security → Bluetooth on first sweep rather than aborting the process. That
+row has to be granted once, the same as any other app's; running `blubat`
+bare in a terminal never asks for it, because the terminal, not blubat, would
+be the process TCC held responsible.
+
 The plist names the config file and the state directory the install resolved
 rather than leaving the daemon to work them out again: launchd starts an agent
 with almost no environment, so a daemon resolving its own would land
