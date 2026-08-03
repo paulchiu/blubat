@@ -1121,12 +1121,19 @@ mod tests {
     /// the box, its border, the keys of both views it lists and the dashboard
     /// rows it hides are one assertion rather than four substrings on a screen
     /// that already contains them.
+    ///
+    /// The title row is the one part of this frame the release bump rewrites,
+    /// so it is pinned by shape rather than by literal: the version slot is
+    /// filled from the same env the render reads, with the dash fill taking
+    /// up whatever width the version does not.
     #[test]
     fn the_keymap_overlay_covers_the_dashboard_and_lists_both_views_keys() {
+        let title = format!(" blubat v{} keys ", env!("CARGO_PKG_VERSION"));
+        let top = format!("┌{title}{}┐", "─".repeat(66 - title.chars().count()));
         let expected = " blubat   3 active   sort level   poll 5s   next 5s                                    ▲ 1 critical
 
  ┌ devices ───────────────────────────────────────────────────────────────────────────────────────┐
- │    Device    ┌ blubat v0.8.1 keys ──────────────────────────────────────────────┐t seen        │
+ │    Device    [overlay top]t seen        │
  │▎ ▲ Soundcore │         q  quit                                                  │              │
  │    Magic Trac│       j/k  move                                                  │              │
  │    MX Keys M │     enter  detail                                                │              │
@@ -1157,7 +1164,7 @@ mod tests {
             &update(dashboard(), Event::Key(Key::Char('?'))),
             100,
             30,
-            expected,
+            &expected.replace("[overlay top]", &top),
         );
     }
 
