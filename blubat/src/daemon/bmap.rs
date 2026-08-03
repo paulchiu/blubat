@@ -11,9 +11,23 @@
 //! responsible process, so TCC kills blubat with SIGABRT whatever its own
 //! Info.plist says, which is why the TUI, `list`, `status` and `wait` must
 //! never reach this module. Nothing outside `daemon` names [`IoBluetooth`]
-//! or [`spawn_sweep`], and that privacy is the whole enforcement: there is
-//! no flag that turns this source off, because there is no other path that
+//! or [`execute`], and that privacy is the whole enforcement: there is no
+//! flag that turns this source off, because there is no other path that
 //! reaches it.
+//!
+//! A stack sample of the running daemon confirmed that
+//! `openRFCOMMChannelSync` only ever completes on the process's actual main
+//! thread: IOBluetooth queues the delegate callbacks that finish the call
+//! onto whichever run loop the calling thread owns, and a call made from
+//! any other thread waits on a run loop nothing ever pumps, wedged for
+//! good. [`execute`] is what turns the daemon's main thread into that
+//! pumped run loop: it is the whole executor for BMAP, taking one
+//! [`SweepRequest`] at a time from [`super::run::serve`]'s poll loop, which
+//! runs on a worker thread of its own for exactly this reason. A wedged
+//! open therefore delays only later sweeps, since the worker keeps polling
+//! and merely stops offering new requests while the executor is still busy
+//! with an earlier one; it can never stall a reading the way blocking the
+//! poller itself would.
 //!
 //! The actual channel is reached through [`Channel`], the same seam
 //! [`super::launchd::Launchctl`] and [`crate::tui::editor::Editor`] already
@@ -23,7 +37,7 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::thread;
+use std::sync::mpsc::{Receiver, SyncSender};
 use std::time::{Duration, Instant};
 
 use blubat_core::{
@@ -219,7 +233,7 @@ pub(crate) fn due(last: &mut Option<Timestamp>, now: Timestamp, interval: Durati
 /// device it missed (a transient RFCOMM failure, a timeout, a disconnect)
 /// keeps its last known reading rather than vanishing, via
 /// [`blubat_core::carry_forward_bmap_readings`]. Split out from
-/// [`spawn_sweep`] so this folding is exercised directly against a fake
+/// [`execute`] so this folding is exercised directly against a fake
 /// channel across two sequential sweeps, without a thread or a real file.
 pub(crate) fn swept(
     channel: &dyn Channel,
@@ -233,29 +247,53 @@ pub(crate) fn swept(
     carry_forward_bmap_readings(previous, fresh, devices)
 }
 
-/// Runs one sweep on a thread of its own and saves whatever it and the
-/// previous sweep together account for.
+/// One sweep the poll loop wants run: the devices to check, the file to
+/// fold the result into, and how long to wait for the response frame.
 ///
-/// Detached rather than awaited: the sync RFCOMM open this walks through
-/// must run somewhere it cannot wedge the daemon's own tick loop, the same
-/// isolation the slow tier already gives `system_profiler`. That isolation
-/// only bounds how long the *poller* can be stalled, though: unlike
-/// `system_profiler`, which the slow tier can kill outright on a timeout,
-/// there is no forced-termination primitive for a synchronous IOBluetooth
-/// call, so a device whose open call itself wedges (rather than merely
-/// timing out on the response wait `Channel::battery` already bounds) leaks
-/// this one thread until it finally returns. Accepted rather than worked
-/// around: a genuine wedge is rare enough, and a leaked thread costly enough
-/// to avoid manufacturing, that killing an in-flight Objective-C call from
-/// the outside is not worth the risk it would add. A save that fails is as
-/// silent as an empty sweep; the next sweep folds in over whatever is on
-/// disk either way.
-pub(crate) fn spawn_sweep(devices: Vec<Device>, readings_file: PathBuf, timeout: Duration) {
-    thread::spawn(move || {
-        let previous = blubat_core::load_bmap_readings(&readings_file);
-        let readings = swept(&IoBluetooth, &devices, Timestamp::now(), timeout, previous);
-        let _ = blubat_core::save_bmap_readings(&readings_file, &readings);
-    });
+/// Plain and owned rather than borrowed, since it crosses from the worker
+/// thread that finds it due to the main thread that actually runs it.
+pub(crate) struct SweepRequest {
+    pub(crate) devices: Vec<Device>,
+    pub(crate) readings_file: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+/// Offers one sweep to [`execute`], dropping it silently rather than
+/// waiting if the previous one has not been taken yet.
+///
+/// `sweeps` is a channel of capacity one, so a request still sitting in it
+/// means the executor is still mid attempt on the one before. That is the
+/// same one-attempt-no-retry discipline every other BMAP failure keeps:
+/// this sweep is simply skipped rather than queued behind the last one, so
+/// the backlog can never grow past a single pending request.
+pub(crate) fn offer(sweeps: &SyncSender<SweepRequest>, request: SweepRequest) {
+    let _ = sweeps.try_send(request);
+}
+
+/// The daemon's main thread, for as long as it runs: takes one
+/// [`SweepRequest`] at a time and saves whatever it and the previous sweep
+/// together account for.
+///
+/// This has to be the main thread and nothing else, because IOBluetooth
+/// only completes a synchronous RFCOMM open through that thread's own run
+/// loop; see the module doc for the live finding that established this.
+/// The loop ends on its own once every [`SyncSender`] offering requests has
+/// gone, which is the poll loop's worker thread finishing or dying, and
+/// `serve` joins that thread immediately after to recover its result. A
+/// save that fails is as silent as an empty sweep; the next sweep folds in
+/// over whatever is on disk either way.
+pub(crate) fn execute(channel: &dyn Channel, requests: Receiver<SweepRequest>) {
+    for request in requests {
+        let previous = blubat_core::load_bmap_readings(&request.readings_file);
+        let readings = swept(
+            channel,
+            &request.devices,
+            Timestamp::now(),
+            request.timeout,
+            previous,
+        );
+        let _ = blubat_core::save_bmap_readings(&request.readings_file, &readings);
+    }
 }
 
 #[cfg(test)]
@@ -271,6 +309,14 @@ mod tests {
 
     fn address(raw: &str) -> Address {
         Address::parse(raw).expect("valid address")
+    }
+
+    fn sweep_request(devices: Vec<Device>) -> SweepRequest {
+        SweepRequest {
+            devices,
+            readings_file: PathBuf::from("/dev/null"),
+            timeout: Duration::ZERO,
+        }
     }
 
     fn bose(vendor_id: Option<u16>, product_id: Option<u16>) -> Device {
@@ -477,5 +523,20 @@ mod tests {
             interval
         ));
         assert_eq!(last, Some(Timestamp::from_unix(READ_AT.unix() + 300)));
+    }
+
+    #[test]
+    fn an_offer_made_while_the_previous_one_is_still_waiting_is_dropped_not_queued() {
+        let (sweeps, requests) = std::sync::mpsc::sync_channel(1);
+        let waiting = bose(Some(0x009E), Some(0x4075));
+
+        offer(&sweeps, sweep_request(vec![waiting]));
+        offer(&sweeps, sweep_request(Vec::new()));
+
+        assert_eq!(
+            requests.try_iter().count(),
+            1,
+            "the channel's capacity of one already held a request, so the second offer found no room"
+        );
     }
 }
