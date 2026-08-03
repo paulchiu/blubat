@@ -103,6 +103,8 @@ mod tests {
             name: name.to_string(),
             kind: None,
             transport: None,
+            vendor_id: None,
+            product_id: None,
             levels: Levels::default(),
             charge: ChargeState::Unknown,
             source,

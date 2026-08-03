@@ -1,18 +1,21 @@
 use std::fmt;
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::address::Address;
 use crate::timestamp::Timestamp;
 
 /// Which macOS source produced a reading.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Source {
     #[serde(rename = "iokit")]
     IoKit,
     #[serde(rename = "system_profiler")]
     SystemProfiler,
+    /// The daemon's own RFCOMM read of a Bose headset's BMAP battery level.
+    #[serde(rename = "bmap")]
+    Bmap,
 }
 
 impl fmt::Display for Source {
@@ -20,6 +23,7 @@ impl fmt::Display for Source {
         f.write_str(match self {
             Source::IoKit => "iokit",
             Source::SystemProfiler => "system_profiler",
+            Source::Bmap => "bmap",
         })
     }
 }
@@ -140,6 +144,15 @@ pub struct Device {
     /// Link the IOKit node reports, such as `Bluetooth`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transport: Option<String>,
+    /// The Bluetooth vendor id `system_profiler` reports, such as `0x009E`
+    /// for Bose. IOKit's registry does not surface this, so it is present
+    /// only for a device this source has read; the BMAP source keys its
+    /// candidate selection off this and [`Device::product_id`] together.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vendor_id: Option<u16>,
+    /// The Bluetooth product id alongside [`Device::vendor_id`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_id: Option<u16>,
     pub levels: Levels,
     pub charge: ChargeState,
     pub source: Source,
@@ -196,6 +209,8 @@ mod tests {
             name: name.to_string(),
             kind: None,
             transport: None,
+            vendor_id: None,
+            product_id: None,
             levels: Levels::default(),
             charge: ChargeState::Unknown,
             source: Source::SystemProfiler,
@@ -362,9 +377,14 @@ mod tests {
     fn source_names_match_the_documented_json_values() {
         assert_eq!(Source::IoKit.to_string(), "iokit");
         assert_eq!(Source::SystemProfiler.to_string(), "system_profiler");
+        assert_eq!(Source::Bmap.to_string(), "bmap");
         assert_eq!(
             serde_json::to_string(&Source::SystemProfiler).expect("serialisable"),
             "\"system_profiler\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Source::Bmap).expect("serialisable"),
+            "\"bmap\""
         );
     }
 

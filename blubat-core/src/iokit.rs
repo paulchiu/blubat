@@ -150,6 +150,11 @@ fn device(
             .get("Transport")
             .and_then(Property::text)
             .map(str::to_string),
+        // This registry class covers Apple HID peripherals only, none of
+        // which is a BMAP candidate, so nothing here reads a vendor or
+        // product id.
+        vendor_id: None,
+        product_id: None,
         levels: Levels {
             main: u8::try_from(percent).ok().filter(|&level| level <= 100),
             ..Levels::default()

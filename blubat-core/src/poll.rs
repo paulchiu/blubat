@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
@@ -6,7 +7,7 @@ use crate::device::Device;
 use crate::error::Result;
 use crate::snapshot::{Snapshot, merge};
 use crate::timestamp::Timestamp;
-use crate::{iokit, presence, profiler};
+use crate::{bmap, iokit, presence, profiler};
 
 /// How often each tier reads its source, and how long the slow one may take.
 ///
@@ -34,19 +35,23 @@ impl Default for Tiers {
     }
 }
 
-/// Takes one merged reading from both sources.
+/// Takes one merged reading from both sources, plus whatever the daemon's
+/// BMAP sweep last left in `readings_file`.
 ///
 /// The one-shot path, on the default timeout: there is no earlier reading for
 /// a degraded one to fall back on here, so a failing slow source leaves the
-/// IOKit devices and the warning that says why.
-pub fn snapshot() -> Snapshot {
+/// IOKit devices and the warning that says why. `readings_file` need not
+/// exist: a machine with no daemon running merges nothing and reads exactly
+/// as it always has.
+pub fn snapshot(readings_file: &Path) -> Snapshot {
     let read_at = Timestamp::now();
     let timeout = Tiers::default().timeout;
     let cached = read_slow(&Cached::default(), read_at, |at, warnings| {
         profiler::read(at, timeout, warnings)
     });
+    let reading = read_fast(read_at, iokit::read, &cached);
 
-    read_fast(read_at, iokit::read, &cached)
+    bmap::merge(reading, &bmap::load(readings_file))
 }
 
 /// Polls both tiers on their own threads and delivers merged snapshots.
@@ -61,13 +66,18 @@ pub fn snapshot() -> Snapshot {
 /// that is the moment a held reading is most misleading. The fast tier reads
 /// on every nudge; the slow one reads once and then sits out [`EARLY_FLOOR`],
 /// since a flapping link must not turn into a stream of expensive calls.
-pub fn poll(tiers: Tiers) -> Receiver<Snapshot> {
+///
+/// Every reading is also merged with whatever the daemon's BMAP sweep has
+/// most recently left in `readings_file`, re-read on every fast tick so a
+/// sweep landing between ticks is picked up on the very next one.
+pub fn poll(tiers: Tiers, readings_file: &Path) -> Receiver<Snapshot> {
     poll_with(
         tiers,
         iokit::read,
         move |at, warnings| profiler::read(at, tiers.timeout, warnings),
         Timestamp::now,
         presence::watch(),
+        readings_file.to_path_buf(),
     )
 }
 
@@ -77,6 +87,7 @@ fn poll_with<F, S, C>(
     slow: S,
     clock: C,
     nudges: Receiver<()>,
+    readings_file: PathBuf,
 ) -> Receiver<Snapshot>
 where
     F: Fn(Timestamp, &mut Vec<String>) -> Vec<Device> + Send + 'static,
@@ -90,12 +101,29 @@ where
 
     thread::spawn(move || slow_tier(tiers.slow, slow, slow_clock, &refreshed, &wanted));
     thread::spawn(move || {
-        fast_tier(
-            tiers.fast, fast, clock, &snapshots, &cached, polling, &nudges,
-        )
+        let wires = FastWires {
+            snapshots: &snapshots,
+            cached: &cached,
+            polling,
+            nudges: &nudges,
+        };
+
+        fast_tier(tiers.fast, fast, clock, wires, &readings_file)
     });
 
     readings
+}
+
+/// The channels one fast tier is wired to the rest of [`poll_with`] through.
+///
+/// Grouped into one value rather than four parameters, since they travel
+/// everywhere [`fast_tier`] does and nothing in it treats one apart from the
+/// other three.
+struct FastWires<'a> {
+    snapshots: &'a Sender<Snapshot>,
+    cached: &'a Receiver<Cached>,
+    polling: Sender<()>,
+    nudges: &'a Receiver<()>,
 }
 
 /// The last `system_profiler` reading, reused until the slow tier replaces it.
@@ -198,26 +226,28 @@ fn slow_tier(
 /// the first readings carry IOKit alone and fill in once a slow reading lands.
 /// A nudge cuts the tick short here and is passed on to the slow tier, whose
 /// answer lands on the tick after it. Dropping `polling` as this loop ends is
-/// what stops that tier.
+/// what stops that tier. `readings_file` is re-read on every tick rather than
+/// cached, since it is small and only the daemon's own BMAP sweep, on its own
+/// much slower cadence, ever changes it.
 fn fast_tier(
     interval: Duration,
     read: impl Fn(Timestamp, &mut Vec<String>) -> Vec<Device>,
     clock: impl Fn() -> Timestamp,
-    snapshots: &Sender<Snapshot>,
-    cached: &Receiver<Cached>,
-    polling: Sender<()>,
-    nudges: &Receiver<()>,
+    wires: FastWires<'_>,
+    readings_file: &Path,
 ) {
     let mut latest = Cached::default();
 
     loop {
-        latest = cached.try_iter().last().unwrap_or(latest);
+        latest = wires.cached.try_iter().last().unwrap_or(latest);
 
-        if snapshots.send(read_fast(clock(), &read, &latest)).is_err() {
+        let reading = read_fast(clock(), &read, &latest);
+        let reading = bmap::merge(reading, &bmap::load(readings_file));
+        if wires.snapshots.send(reading).is_err() {
             break;
         }
-        if waited(nudges, interval) == Wake::Nudged {
-            let _ = polling.send(());
+        if waited(wires.nudges, interval) == Wake::Nudged {
+            let _ = wires.polling.send(());
         }
     }
 }
@@ -270,6 +300,8 @@ mod tests {
             name: name.to_string(),
             kind: None,
             transport: None,
+            vendor_id: None,
+            product_id: None,
             levels: Levels {
                 main: Some(85),
                 ..Levels::default()
@@ -297,6 +329,15 @@ mod tests {
     /// IOKit refused a notification port.
     fn unnudged() -> Receiver<()> {
         mpsc::channel().1
+    }
+
+    /// A readings file that was never written, which is a machine with no
+    /// BMAP daemon sweeping: nothing here should be merged in.
+    fn no_readings() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "blubat-poll-tests-no-readings-{}.toml",
+            std::process::id()
+        ))
     }
 
     /// A fast source that stamps each device with the number of reads before it.
@@ -336,6 +377,42 @@ mod tests {
 
     fn failing(_: Timestamp, _: &mut Vec<String>) -> Result<Vec<Device>> {
         Err(Error::Command("system_profiler exited with 1".to_string()))
+    }
+
+    #[test]
+    fn a_bmap_reading_on_disk_is_merged_into_a_tick_that_never_saw_it_come_from_a_source() {
+        let readings_file = std::env::temp_dir().join(format!(
+            "blubat-poll-tests-bmap-{}-{}.toml",
+            std::process::id(),
+            line!()
+        ));
+        let bose = crate::BmapReading::new(
+            Address::parse("bc-87-fa-18-b0-b7").expect("valid address"),
+            "Bose QC Headphones",
+            77,
+            READ_AT,
+        );
+        crate::save_bmap_readings(&readings_file, &[bose]).expect("writes");
+        let receiver = poll_with(
+            Tiers {
+                fast: Duration::from_millis(1),
+                slow: Duration::from_secs(3_600),
+                ..Tiers::default()
+            },
+            |_, _| Vec::new(),
+            |_, _| Ok(Vec::new()),
+            frozen(),
+            unnudged(),
+            readings_file.clone(),
+        );
+
+        let reading = receiver.recv().expect("the first reading");
+
+        assert_eq!(reading.devices.len(), 1);
+        assert_eq!(reading.devices[0].name, "Bose QC Headphones");
+        assert_eq!(reading.devices[0].levels.main, Some(77));
+
+        let _ = std::fs::remove_file(&readings_file);
     }
 
     #[test]
@@ -429,6 +506,7 @@ mod tests {
             |_, _| Ok(Vec::new()),
             frozen(),
             unnudged(),
+            no_readings(),
         );
 
         assert_eq!(stamps(&receiver, 3), [0, 1, 2]);
@@ -447,6 +525,7 @@ mod tests {
             counting_slow(Arc::clone(&slow_reads)),
             frozen(),
             unnudged(),
+            no_readings(),
         );
 
         let merged = receiver
@@ -480,6 +559,7 @@ mod tests {
             counting_slow(Arc::clone(&slow_reads)),
             frozen(),
             nudges,
+            no_readings(),
         );
 
         receiver.recv().expect("the first reading");
@@ -515,6 +595,7 @@ mod tests {
             counting_slow(Arc::clone(&slow_reads)),
             frozen(),
             nudges,
+            no_readings(),
         );
 
         receiver.recv().expect("the first reading");
@@ -545,6 +626,7 @@ mod tests {
             |_, _| Ok(Vec::new()),
             frozen(),
             nudges,
+            no_readings(),
         );
 
         assert_eq!(stamps(&receiver, 3), [0, 1, 2]);
@@ -566,6 +648,7 @@ mod tests {
             },
             frozen(),
             unnudged(),
+            no_readings(),
         );
 
         assert_eq!(stamps(&receiver, 3), [0, 1, 2]);
@@ -585,6 +668,7 @@ mod tests {
             counting_slow(Arc::clone(&slow_reads)),
             frozen(),
             unnudged(),
+            no_readings(),
         );
 
         receiver.recv().expect("the first reading");

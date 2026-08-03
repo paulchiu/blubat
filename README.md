@@ -1,7 +1,8 @@
 # blubat
 
 blubat reports the battery level of Bluetooth peripherals on macOS by gathering
-data from IOKit and `system_profiler`.
+data from IOKit and `system_profiler`, plus a background daemon that reads a
+supported Bose headset's level directly over Bluetooth (BMAP).
 
 Supported output formats are:
 

@@ -34,7 +34,7 @@ pub struct Args {
 /// caller has already answered. The banner that ends one is the config's, since
 /// nothing else decides what a blubat notification sounds like.
 pub fn run(args: &Args, paths: &Paths) -> Result<(), Failure> {
-    handled(args, paths, reading)
+    handled(args, paths, || reading(paths))
 }
 
 /// The same over whichever reader, which is the half a test drives without a
@@ -205,6 +205,8 @@ mod tests {
                 name: name.to_string(),
                 kind: None,
                 transport: None,
+                vendor_id: None,
+                product_id: None,
                 levels,
                 charge: ChargeState::Charging,
                 source: Source::IoKit,

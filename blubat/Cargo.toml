@@ -22,6 +22,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml_edit = { workspace = true }
 mac-notification-sys = { workspace = true }
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true }
+objc2-core-foundation = { workspace = true }
+objc2-io-bluetooth = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

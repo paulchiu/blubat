@@ -66,7 +66,8 @@ pub fn run(paths: &Paths) -> Result<(), Failure> {
     let _ = crate::config::annotate(paths.config_file());
     let (config, unreadable) = load(paths);
     let tiers = tiers(&config.poll);
-    let (notes, events, admission) = events::events(blubat_core::poll(tiers));
+    let (notes, events, admission) =
+        events::events(blubat_core::poll(tiers, &paths.readings_file()));
     let (effects, stale_state) = Effects::live(paths, reporter(notes));
     // Nothing can take the lock from a dashboard holding it, so this answer
     // stands for the whole session.

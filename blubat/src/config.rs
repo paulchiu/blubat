@@ -46,7 +46,7 @@ pub fn run(command: &Command, paths: &Paths) -> Result<(), Failure> {
             Ok(())
         }
         Command::Edit => edit(path, &editor(|name| std::env::var(name).ok())?),
-        Command::Validate => validate(path, &mut io::stdout(), || reading().devices),
+        Command::Validate => validate(path, &mut io::stdout(), || reading(paths).devices),
     }
 }
 
@@ -327,6 +327,8 @@ mod tests {
             name: "Paul\u{2019}s Magic Trackpad".to_string(),
             kind: None,
             transport: None,
+            vendor_id: None,
+            product_id: None,
             levels: Levels {
                 main: Some(42),
                 ..Levels::default()
