@@ -26,6 +26,57 @@ impl Sort {
             Sort::LastSeen => "last seen",
         }
     }
+
+    /// The direction a column opens in the first time it is chosen: the one
+    /// way each column already made sense before there was a second way to
+    /// see it.
+    pub fn natural(self) -> Direction {
+        match self {
+            Sort::Level | Sort::Name => Direction::Ascending,
+            Sort::LastSeen => Direction::Descending,
+        }
+    }
+}
+
+/// `[dashboard] sort` names a column; the direction it opens on is always
+/// that column's own natural one, so the file never has to carry a second key.
+impl From<blubat_core::Sort> for Sort {
+    fn from(sort: blubat_core::Sort) -> Self {
+        match sort {
+            blubat_core::Sort::Level => Sort::Level,
+            blubat_core::Sort::Name => Sort::Name,
+            blubat_core::Sort::LastSeen => Sort::LastSeen,
+        }
+    }
+}
+
+/// Which way a sorted column orders its rows.
+///
+/// Kept beside [`Sort`] rather than folded into it, since a column and the
+/// direction it is read in are two different questions: which one is active
+/// never changes what "ascending" means for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Ascending,
+    Descending,
+}
+
+impl Direction {
+    /// The other way, which choosing the active column again switches to.
+    pub fn reversed(self) -> Self {
+        match self {
+            Direction::Ascending => Direction::Descending,
+            Direction::Descending => Direction::Ascending,
+        }
+    }
+
+    /// The glyph the header carries for the column this direction belongs to.
+    pub fn arrow(self) -> &'static str {
+        match self {
+            Direction::Ascending => "\u{2191}",
+            Direction::Descending => "\u{2193}",
+        }
+    }
 }
 
 /// The incremental filter: whatever has been typed into it so far.
@@ -49,9 +100,13 @@ impl Filter {
 }
 
 /// Everything the dashboard shows that is not a reading.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct View {
     pub sort: Sort,
+    /// Which way `sort` reads. Never `Sort`'s own concern: choosing a column
+    /// again is what flips it, and that lives in [`View::choose_sort`] rather
+    /// than in the order itself.
+    pub direction: Direction,
     pub filter: Filter,
     /// `[dashboard] hidden` as the config file holds it, in file order: the
     /// same substring matches `--device` takes, and what `h` writes back.
@@ -62,6 +117,21 @@ pub struct View {
     pub hide_inactive: bool,
 }
 
+impl Default for View {
+    /// A view opens on its default sort at that column's own natural
+    /// direction, the same as choosing any other column for the first time.
+    fn default() -> Self {
+        Self {
+            sort: Sort::default(),
+            direction: Sort::default().natural(),
+            filter: Filter::default(),
+            hidden: Vec::new(),
+            show_hidden: false,
+            hide_inactive: false,
+        }
+    }
+}
+
 impl View {
     /// The view a config file's `[dashboard]` table opens the dashboard on.
     pub fn hiding(hidden: &[String], hide_inactive: bool) -> Self {
@@ -70,6 +140,24 @@ impl View {
             hide_inactive,
             ..Self::default()
         }
+    }
+
+    /// Applies `sort`, the same key the sort menu binds it to: the active
+    /// column reverses in place, and any other column opens at its own
+    /// natural direction rather than carrying the last column's over.
+    pub fn choose_sort(&mut self, sort: Sort) {
+        self.direction = if self.sort == sort {
+            self.direction.reversed()
+        } else {
+            sort.natural()
+        };
+        self.sort = sort;
+    }
+
+    /// How the status line names the order in force, direction included, so
+    /// it stays legible even where the sorted column itself is off screen.
+    pub fn sort_label(&self) -> String {
+        format!("{} {}", self.sort.label(), self.direction.arrow())
     }
 
     /// Whether a device is on screen at all, before it is placed in a section.
@@ -121,11 +209,11 @@ impl<'a> Rows<'a> {
             .partition::<Vec<_>, _>(|device| device.connected);
 
         Self {
-            active: sorted(active, view.sort),
+            active: sorted(active, view.sort, view.direction),
             inactive: if view.hide_inactive {
                 Vec::new()
             } else {
-                sorted(inactive, view.sort)
+                sorted(inactive, view.sort, view.direction)
             },
         }
     }
@@ -153,19 +241,40 @@ impl<'a> Rows<'a> {
 /// The merge hands its devices over sorted by name and address, and every sort
 /// here is stable, so any two devices at the same level or the same age keep
 /// that order rather than swapping between frames.
-fn sorted(mut devices: Vec<&Device>, sort: Sort) -> Vec<&Device> {
-    match sort {
-        // An unread level sorts last: it is not a full battery, and it is not
-        // an empty one either.
-        Sort::Level => devices.sort_by_key(|device| {
-            let level = device.levels.lowest();
-            (level.is_none(), level)
-        }),
-        Sort::Name => devices.sort_by_key(|device| device.name.to_lowercase()),
-        Sort::LastSeen => devices.sort_by_key(|device| std::cmp::Reverse(device.read_at)),
+fn sorted(mut devices: Vec<&Device>, sort: Sort, direction: Direction) -> Vec<&Device> {
+    use Direction::{Ascending, Descending};
+    use std::cmp::Reverse;
+
+    match (sort, direction) {
+        // An unread level sorts last either way: it is not a full battery,
+        // and it is not an empty one either, so reversing what the level
+        // means never moves it off the end.
+        (Sort::Level, Ascending) => devices.sort_by_key(|device| level_key(device)),
+        (Sort::Level, Descending) => {
+            devices.sort_by_key(|device| {
+                let (unread, level) = level_key(device);
+                (unread, Reverse(level))
+            });
+        }
+        (Sort::Name, Ascending) => devices.sort_by_key(|device| device.name.to_lowercase()),
+        (Sort::Name, Descending) => {
+            devices.sort_by_key(|device| Reverse(device.name.to_lowercase()));
+        }
+        // Freshest first is `Descending`: the natural order for a timestamp
+        // is oldest to newest, and freshest first reads against that.
+        (Sort::LastSeen, Descending) => devices.sort_by_key(|device| Reverse(device.read_at)),
+        (Sort::LastSeen, Ascending) => devices.sort_by_key(|device| device.read_at),
     }
 
     devices
+}
+
+/// A level to sort by, with the absent case pushed to one side so it never
+/// competes with a real reading whichever way the rest are ordered.
+fn level_key(device: &Device) -> (bool, Option<u8>) {
+    let level = device.levels.lowest();
+
+    (level.is_none(), level)
 }
 
 #[cfg(test)]
@@ -247,18 +356,20 @@ mod tests {
         assert_eq!(rows.get(4), None);
     }
 
+    /// A view opened straight on `sort`, at its own natural direction, the
+    /// same as choosing it fresh from the sort menu would.
+    fn sorted_view(sort: Sort) -> View {
+        View {
+            sort,
+            direction: sort.natural(),
+            ..View::default()
+        }
+    }
+
     #[test]
     fn each_order_lists_the_devices_its_own_way() {
         let devices = devices();
-        let by = |sort| {
-            shown(
-                &devices,
-                &View {
-                    sort,
-                    ..View::default()
-                },
-            )
-        };
+        let by = |sort| shown(&devices, &sorted_view(sort));
 
         assert_eq!(
             by(Sort::Level),
@@ -292,13 +403,7 @@ mod tests {
         ];
 
         assert_eq!(
-            shown(
-                &devices,
-                &View {
-                    sort: Sort::LastSeen,
-                    ..View::default()
-                }
-            ),
+            shown(&devices, &sorted_view(Sort::LastSeen)),
             ["Fresh", "Stale"]
         );
     }
@@ -312,17 +417,92 @@ mod tests {
 
         for sort in [Sort::Level, Sort::Name, Sort::LastSeen] {
             assert_eq!(
-                shown(
-                    &devices,
-                    &View {
-                        sort,
-                        ..View::default()
-                    }
-                ),
+                shown(&devices, &sorted_view(sort)),
                 ["Alpha", "Beta"],
                 "{sort:?}"
             );
         }
+    }
+
+    #[test]
+    fn choosing_the_active_column_again_reverses_the_rows() {
+        let devices = devices();
+        let mut view = sorted_view(Sort::Level);
+
+        assert_eq!(
+            shown(&devices, &view),
+            [
+                "MX Keys M Mac",
+                "Magic Trackpad",
+                "Soundcore Liberty",
+                "AirPods Pro"
+            ],
+            "emptiest first is where level opens"
+        );
+
+        view.choose_sort(Sort::Level);
+        assert_eq!(
+            shown(&devices, &view),
+            [
+                "Magic Trackpad",
+                "MX Keys M Mac",
+                "Soundcore Liberty",
+                "AirPods Pro"
+            ],
+            "the same key again reverses it, the unread device still last"
+        );
+    }
+
+    #[test]
+    fn choosing_a_different_column_resets_it_to_its_own_natural_direction() {
+        let mut view = sorted_view(Sort::Level);
+        view.choose_sort(Sort::Level);
+        assert_eq!(
+            view.direction,
+            Direction::Descending,
+            "level is reversed first"
+        );
+
+        view.choose_sort(Sort::Name);
+        assert_eq!(view.sort, Sort::Name);
+        assert_eq!(
+            view.direction,
+            Sort::Name.natural(),
+            "a different column opens at its own natural order, not level's"
+        );
+    }
+
+    #[test]
+    fn every_column_opens_at_the_direction_that_makes_sense_of_it() {
+        assert_eq!(
+            Sort::Level.natural(),
+            Direction::Ascending,
+            "emptiest first"
+        );
+        assert_eq!(Sort::Name.natural(), Direction::Ascending, "A to Z");
+        assert_eq!(
+            Sort::LastSeen.natural(),
+            Direction::Descending,
+            "freshest first"
+        );
+    }
+
+    #[test]
+    fn an_unread_level_stays_last_whichever_way_level_is_read() {
+        let devices = vec![
+            device("Full", "aa-aa-aa-aa-aa-aa", Some(90)),
+            device("Unread", "bb-bb-bb-bb-bb-bb", None),
+            device("Empty", "cc-cc-cc-cc-cc-cc", Some(1)),
+        ];
+
+        assert_eq!(
+            shown(&devices, &sorted_view(Sort::Level)),
+            ["Empty", "Full", "Unread"]
+        );
+
+        let mut reversed = sorted_view(Sort::Level);
+        reversed.choose_sort(Sort::Level);
+        assert_eq!(shown(&devices, &reversed), ["Full", "Empty", "Unread"]);
     }
 
     #[test]

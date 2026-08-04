@@ -32,11 +32,12 @@ before anything else responds again. The device table itself sits in its own
 border, in the same bordered language as the detail view's panels.
 
 `s` opens a menu of the columns the table can be sorted by rather than cycling
-through them: `l` sorts by level, `n` by name, `t` by last seen. Each applies
-its own order and closes the menu straight away; `esc` or `s` again backs out
-without changing anything. There is no direction to choose, since each column
-already sorts the one way that makes sense of it: emptiest level first,
-freshest reading first.
+through them: `l` sorts by level, `n` by name, `t` by last seen. Each opens
+its column at the direction that makes sense of it first: emptiest level
+first, name A to Z, freshest reading first. Choosing the same column again
+flips the direction instead of reapplying it, and the header of the sorted
+column carries an arrow saying which way it is currently read. `esc` or `s`
+again backs out of the menu without changing anything.
 
 `i` drops the disconnected section off the table for the rest of the run and
 brings it back with the same key; the footer reads `hide inactive` or `show
