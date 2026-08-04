@@ -16,7 +16,7 @@ use super::columns::{self, Column};
 use super::detail;
 use super::glyph::Glyphs;
 use super::theme::{self, Palette};
-use super::view::{Rows, View};
+use super::view::{Direction, Rows, Sort, View};
 
 /// Kept in front of every name so rows stay aligned whatever the gutter holds.
 const GUTTER: &str = "  ";
@@ -142,7 +142,7 @@ fn summary(app: &App, room: usize) -> String {
         |next| {
             vec![
                 format!("{} active", app.connected().count()),
-                format!("sort {}", app.view.sort.label()),
+                format!("sort {}", app.view.sort_label()),
                 poll.clone(),
                 format!("next {}", seconds(next)),
             ]
@@ -275,7 +275,7 @@ fn device_table<'a>(app: &'a App, rows: &Rows<'a>, width: u16) -> Table<'a> {
     let header = Row::new(
         columns
             .iter()
-            .map(|column| header_cell(*column))
+            .map(|column| header_cell(*column, app.view.sort, app.view.direction))
             .collect::<Vec<_>>(),
     )
     .style(palette.dim);
@@ -306,11 +306,27 @@ fn device_table<'a>(app: &'a App, rows: &Rows<'a>, width: u16) -> Table<'a> {
         .highlight_symbol(Span::styled(MARKER, Style::new().fg(palette.accent)))
 }
 
-fn header_cell(column: Column) -> Cell<'static> {
+/// The column `sort` is currently ordering the table by, the one header that
+/// carries `direction`'s arrow.
+fn sorted_column(sort: Sort) -> Column {
+    match sort {
+        Sort::Level => Column::Level,
+        Sort::Name => Column::Name,
+        Sort::LastSeen => Column::LastSeen,
+    }
+}
+
+fn header_cell(column: Column, sort: Sort, direction: Direction) -> Cell<'static> {
+    let text = if sorted_column(sort) == column {
+        format!("{} {}", column.header(), direction.arrow())
+    } else {
+        column.header().to_string()
+    };
+
     match column {
-        Column::Name => Cell::from(format!("{GUTTER}{}", column.header())),
-        Column::Level => Cell::from(Line::from(column.header()).right_aligned()),
-        other => Cell::from(other.header()),
+        Column::Name => Cell::from(format!("{GUTTER}{text}")),
+        Column::Level => Cell::from(Line::from(text).right_aligned()),
+        _ => Cell::from(text),
     }
 }
 
@@ -951,10 +967,10 @@ mod tests {
 
     #[test]
     fn the_dashboard_draws_the_frame_it_is_specified_to_draw() {
-        let expected = " blubat   3 active   sort level   poll 5s   next 5s                                                                  ▲ 1 critical
+        let expected = " blubat   3 active   sort level ↑   poll 5s   next 5s                                                                ▲ 1 critical
 
  ┌ devices ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
- │    Device                   Type         Battery         % State       Trend  Last seen                                      │
+ │    Device                   Type         Battery       % ↑ State       Trend  Last seen                                      │
  │▎ ▲ Soundcore Liberty        audio        █░░░░░░░░░░░   8% on battery  █▇▅▄▂▁ now                                            │
  │    Magic Trackpad           trackpad     ███░░░░░░░░░  23% + charging  █▇▅▄▂▁ now                                            │
  │    MX Keys M Mac            keyboard     ████████░░░░  67% on battery  █▇▅▄▂▁ now                                            │
@@ -986,10 +1002,10 @@ mod tests {
 
     #[test]
     fn a_narrow_terminal_drops_columns_rather_than_the_reading() {
-        let expected = " blubat   3 active   sort level   poll 5s      ▲ 1 critical
+        let expected = " blubat   3 active   sort level ↑   poll 5s    ▲ 1 critical
 
  ┌ devices ───────────────────────────────────────────────┐
- │    Device                 Battery         % State      │
+ │    Device                 Battery       % ↑ State      │
  │▎ ▲ Soundcore Liberty      █░░░░░░░░░░░   8% on battery │
  │    Magic Trackpad         ███░░░░░░░░░  23% + charging │
  │    MX Keys M Mac          ████████░░░░  67% on battery │
@@ -1049,6 +1065,41 @@ mod tests {
         assert!(
             line_containing(&press(app, "sn"), "blubat").contains("sort name"),
             "and follows the order the table is in"
+        );
+    }
+
+    #[test]
+    fn the_status_line_names_the_direction_the_table_is_sorted_by() {
+        let ascending = loaded();
+        assert!(
+            line_containing(&ascending, "blubat").contains("sort level \u{2191}"),
+            "level opens ascending"
+        );
+
+        let descending = press(ascending, "sl");
+        assert!(
+            line_containing(&descending, "blubat").contains("sort level \u{2193}"),
+            "the same key again reverses it, and the status line says so"
+        );
+    }
+
+    #[test]
+    fn the_sorted_columns_header_carries_the_arrow_and_no_other_header_does() {
+        let by_level = loaded();
+        let header = line_containing(&by_level, "Device");
+
+        assert!(header.contains("% \u{2191}"), "{header}");
+        assert!(!header.contains("Device \u{2191}"), "{header}");
+        assert!(!header.contains("Last seen \u{2191}"), "{header}");
+        assert!(!header.contains("Last seen \u{2193}"), "{header}");
+
+        let by_name = press(by_level, "sn");
+        let header = line_containing(&by_name, "Device");
+
+        assert!(header.contains("Device \u{2191}"), "{header}");
+        assert!(
+            !header.contains("% \u{2191}") && !header.contains("% \u{2193}"),
+            "{header}"
         );
     }
 
@@ -1130,7 +1181,7 @@ mod tests {
     fn the_keymap_overlay_covers_the_dashboard_and_lists_both_views_keys() {
         let title = format!(" blubat v{} keys ", env!("CARGO_PKG_VERSION"));
         let top = format!("┌{title}{}┐", "─".repeat(66 - title.chars().count()));
-        let expected = " blubat   3 active   sort level   poll 5s   next 5s                                    ▲ 1 critical
+        let expected = " blubat   3 active   sort level ↑   poll 5s   next 5s                                  ▲ 1 critical
 
  ┌ devices ───────────────────────────────────────────────────────────────────────────────────────┐
  │    Device    [overlay top]t seen        │

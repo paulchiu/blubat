@@ -430,7 +430,12 @@ pub struct App {
 }
 
 impl App {
+    /// `[dashboard] sort` names the column the dashboard opens sorted by,
+    /// always at that column's own natural direction: a session's own
+    /// reversals are runtime state, not something the file has a key for.
     pub fn new(interval: Duration, now: Timestamp, look: Look, config: Config) -> Self {
+        let sort = Sort::from(config.dashboard.sort);
+
         Self {
             reading: None,
             history: History::default(),
@@ -440,7 +445,11 @@ impl App {
             running: true,
             now,
             interval,
-            view: View::hiding(&config.dashboard.hidden, config.dashboard.hide_inactive),
+            view: View {
+                sort,
+                direction: sort.natural(),
+                ..View::hiding(&config.dashboard.hidden, config.dashboard.hide_inactive)
+            },
             look,
             config,
             advertised: AdvertisedThresholds::new(),
@@ -699,11 +708,12 @@ fn chosen(app: App, key: Key) -> App {
 }
 
 /// Applies `sort` and closes the menu, the same way cancelling does but with a
-/// new order in force.
+/// new order in force: [`View::choose_sort`] is what decides whether that
+/// order is a reversal or a fresh column at its own natural direction.
 fn sorted_by(app: App, sort: Sort) -> App {
     let app = onto_the_dashboard(app);
 
-    viewed(app, |view| view.sort = sort)
+    viewed(app, |view| view.choose_sort(sort))
 }
 
 /// The state after `action`, unchanged where the mode binds nothing to the key.
@@ -899,6 +909,7 @@ pub(super) mod tests {
 
     use super::super::glyph::Glyphs;
     use super::super::theme::Palette;
+    use super::super::view::Direction;
     use super::*;
 
     pub const READ_AT: Timestamp = Timestamp::from_unix(1_785_643_199);
@@ -1247,32 +1258,74 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn a_column_key_in_the_sort_menu_applies_that_order_and_closes_it() {
-        let by = |keys: &str| press(loaded(), keys);
+    fn a_column_key_in_the_sort_menu_applies_that_order_at_its_natural_direction() {
+        // Level is already the default, so each case is pressed from a
+        // column other than its own: a fresh choice, never a reversal of one
+        // already active.
+        let away_from_level = press(loaded(), "sn");
 
-        for (keys, label) in [("sl", "level"), ("sn", "name"), ("st", "last seen")] {
-            let chosen = by(keys);
+        for (base, keys, label, direction) in [
+            (away_from_level, "sl", "level", Direction::Ascending),
+            (loaded(), "sn", "name", Direction::Ascending),
+            (loaded(), "st", "last seen", Direction::Descending),
+        ] {
+            let chosen = press(base, keys);
 
             assert_eq!(chosen.mode, Mode::Dashboard, "{keys} applies and closes");
             assert_eq!(chosen.view.sort.label(), label, "{keys}");
+            assert_eq!(chosen.view.direction, direction, "{keys}");
         }
 
         assert_eq!(
-            names(&by("sn")),
+            names(&press(loaded(), "sn")),
             ["Magic Trackpad", "MX Keys M Mac", "Soundcore Liberty"],
             "the table is listed in the order just chosen"
         );
     }
 
     #[test]
-    fn esc_leaves_the_sort_menu_without_changing_the_order() {
-        let by_level = loaded();
-        let opened = press(by_level.clone(), "s");
+    fn pressing_the_active_columns_key_again_reverses_it_instead_of_resetting_it() {
+        // Level is the default already, so a fresh switch away and back is
+        // what puts it at its natural direction before this reverses it.
+        let ascending = press(loaded(), "snsl");
+        let descending = press(ascending.clone(), "sl");
+
+        assert_eq!(descending.mode, Mode::Dashboard, "still applies and closes");
+        assert_eq!(descending.view.sort, ascending.view.sort, "the same column");
+        assert_eq!(ascending.view.direction, Direction::Ascending);
+        assert_eq!(descending.view.direction, Direction::Descending);
+        assert_eq!(
+            names(&descending),
+            ["Magic Trackpad", "MX Keys M Mac", "Soundcore Liberty"],
+            "fullest first once level is reversed"
+        );
+    }
+
+    #[test]
+    fn pressing_a_different_columns_key_resets_the_direction_to_its_own_natural_order() {
+        // Level is already active by default, so this one press reverses it.
+        let reversed = press(loaded(), "sl");
+        assert_eq!(reversed.view.direction, Direction::Descending);
+
+        let switched = press(reversed, "sn");
+        assert_eq!(switched.view.sort.label(), "name");
+        assert_eq!(
+            switched.view.direction,
+            Direction::Ascending,
+            "name opens on its own natural order rather than carrying level's reversal over"
+        );
+    }
+
+    #[test]
+    fn esc_leaves_the_sort_menu_without_changing_the_order_or_its_direction() {
+        let by_level_reversed = press(loaded(), "sl");
+        let opened = press(by_level_reversed.clone(), "s");
 
         let cancelled = key(opened, Key::Escape);
 
         assert_eq!(cancelled.mode, Mode::Dashboard);
-        assert_eq!(cancelled.view.sort, by_level.view.sort);
+        assert_eq!(cancelled.view.sort, by_level_reversed.view.sort);
+        assert_eq!(cancelled.view.direction, by_level_reversed.view.direction);
     }
 
     #[test]
@@ -1545,6 +1598,23 @@ pub(super) mod tests {
         );
 
         assert!(opened.view.hide_inactive);
+    }
+
+    #[test]
+    fn the_dashboard_opens_sorted_by_the_column_the_config_file_names() {
+        let opened = App::new(
+            INTERVAL,
+            READ_AT,
+            Look::of(&Theme::default(), Glyphs::ASCII),
+            config("[dashboard]\nsort = \"name\"\n"),
+        );
+
+        assert_eq!(opened.view.sort.label(), "name");
+        assert_eq!(
+            opened.view.direction,
+            Direction::Ascending,
+            "the file names a column, never a direction: it opens at name's own"
+        );
     }
 
     #[test]
