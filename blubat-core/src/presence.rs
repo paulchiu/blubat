@@ -11,7 +11,7 @@
 //! ordinary tick.
 
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::Sender;
 use std::thread;
 
 use objc2_core_foundation::{CFDictionary, CFRetained, CFRunLoop, kCFRunLoopDefaultMode};
@@ -23,17 +23,16 @@ use objc2_io_kit::{
 
 use crate::iokit::SERVICE_CLASS;
 
-/// Starts watching, and hands back the channel a poll tier waits on.
+/// Starts watching, sending each change onto `nudged`.
 ///
-/// The watcher runs a blocked run loop on a thread of its own, and ends itself
-/// on the first change after the poller has gone away. Where IOKit refuses a
-/// notification port the channel is simply never fed, which leaves the poller
-/// on its plain intervals rather than failing it.
-pub(crate) fn watch() -> Receiver<()> {
-    let (nudged, nudges) = mpsc::channel();
+/// The caller owns the channel, since a poll tier's own manual refresh sends
+/// on the very same one: to either side, a person asking and IOKit reporting
+/// are the same nudge. The watcher runs a blocked run loop on a thread of its
+/// own, and ends itself on the first change after the poller has gone away.
+/// Where IOKit refuses a notification port `nudged` is simply never fed,
+/// which leaves the poller on its plain intervals rather than failing it.
+pub(crate) fn watch(nudged: Sender<()>) {
     thread::spawn(move || listen(&nudged));
-
-    nudges
 }
 
 /// Arms both notifications and runs the loop that delivers them.
@@ -136,7 +135,7 @@ fn empty(iterator: io_iterator_t) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc::RecvTimeoutError;
+    use std::sync::mpsc::{self, RecvTimeoutError};
     use std::time::Duration;
 
     use super::*;
@@ -147,7 +146,8 @@ mod tests {
     #[test]
     #[ignore = "needs a real machine and a device to connect or disconnect"]
     fn a_real_device_change_arrives_as_a_nudge() {
-        let nudges = watch();
+        let (nudged, nudges) = mpsc::channel();
+        watch(nudged);
 
         assert_eq!(
             nudges.recv_timeout(Duration::from_secs(30)),

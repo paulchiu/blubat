@@ -132,6 +132,14 @@ pub fn run(paths: &Paths) -> Result<(), Failure> {
 
             app = update(app, Event::Reloaded(read));
         }
+        if app.refresh {
+            // Unlike a reload there is no result to fold back: the fresh
+            // reading arrives on the ordinary reading channel and updates
+            // the dashboard on its own.
+            retier.refresh();
+
+            app = update(app, Event::Refreshed);
+        }
         if let Some(field) = app.save_dashboard {
             // Only the field `h` or `i` actually changed travels to the write,
             // so it never carries the other's possibly stale in-memory value

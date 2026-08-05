@@ -77,30 +77,41 @@ pub fn poll(tiers: Tiers, readings_file: &Path) -> Receiver<Snapshot> {
 }
 
 /// Like [`poll`], but also hands back a [`Retier`] a caller can use to change
-/// the running tiers without restarting either thread or the returned channel.
+/// the running tiers without restarting either thread or the returned
+/// channel, or to ask both tiers for an immediate read without waiting on
+/// either.
 pub fn poll_retierable(tiers: Tiers, readings_file: &Path) -> (Receiver<Snapshot>, Retier) {
+    let (nudge, nudges) = mpsc::channel();
+    presence::watch(nudge.clone());
+
     poll_with(
         tiers,
         iokit::read,
         profiler::read,
         Timestamp::now,
-        presence::watch(),
+        nudge,
+        nudges,
         readings_file.to_path_buf(),
     )
 }
 
 /// Where a change to `[poll]` is sent so the running tiers pick it up, each
-/// from its own next wakeup, without a restart.
+/// from its own next wakeup, without a restart, and where a caller can ask
+/// for the same immediate read a device arriving or leaving already gets.
 ///
 /// One value reaches both tiers because each reads its own share of it: the
 /// fast tier its interval, the slow tier its interval and the profiler
 /// timeout. A single receiver shared between them would only ever hand a
 /// given update to whichever tier happened to ask for it first, so each gets
-/// a sender of its own instead.
+/// a sender of its own instead. The nudge sender is the same channel
+/// `presence::watch` feeds, so [`Retier::refresh`] and a real device arriving
+/// or leaving are indistinguishable to either tier, the slow tier's floor
+/// between early reads included.
 #[derive(Clone)]
 pub struct Retier {
     fast: Sender<Tiers>,
     slow: Sender<Tiers>,
+    nudge: Sender<()>,
 }
 
 impl Retier {
@@ -112,6 +123,14 @@ impl Retier {
         let _ = self.fast.send(tiers);
         let _ = self.slow.send(tiers);
     }
+
+    /// Cuts the fast tier's current wait short and asks the slow tier for an
+    /// early read, without changing either tier's interval. A dropped
+    /// receiver is not an error here for the same reason [`Retier::set`]'s
+    /// is not: a poller that has already ended has nothing left to refresh.
+    pub fn refresh(&self) {
+        let _ = self.nudge.send(());
+    }
 }
 
 fn poll_with<F, S, C>(
@@ -119,6 +138,7 @@ fn poll_with<F, S, C>(
     fast: F,
     slow: S,
     clock: C,
+    nudge: Sender<()>,
     nudges: Receiver<()>,
     readings_file: PathBuf,
 ) -> (Receiver<Snapshot>, Retier)
@@ -152,6 +172,7 @@ where
         Retier {
             fast: retier_fast,
             slow: retier_slow,
+            nudge,
         },
     )
 }
@@ -382,10 +403,10 @@ mod tests {
         || READ_AT
     }
 
-    /// A nudge channel whose far end is already gone, which is a machine where
-    /// IOKit refused a notification port.
-    fn unnudged() -> Receiver<()> {
-        mpsc::channel().1
+    /// A fresh nudge channel nothing sends on, standing in for a poller
+    /// nobody has asked to retier or refresh yet.
+    fn unnudged() -> (Sender<()>, Receiver<()>) {
+        mpsc::channel()
     }
 
     /// A readings file that was never written, which is a machine with no
@@ -453,6 +474,7 @@ mod tests {
             READ_AT,
         );
         crate::save_bmap_readings(&readings_file, &[bose]).expect("writes");
+        let (nudge, nudges) = unnudged();
         let (receiver, _retier) = poll_with(
             Tiers {
                 fast: Duration::from_millis(1),
@@ -462,7 +484,8 @@ mod tests {
             |_, _| Vec::new(),
             |_, _, _| Ok(Vec::new()),
             frozen(),
-            unnudged(),
+            nudge,
+            nudges,
             readings_file.clone(),
         );
 
@@ -558,6 +581,7 @@ mod tests {
     #[test]
     fn the_fast_tier_reads_immediately_and_then_on_every_interval() {
         let reads = Arc::new(AtomicI64::new(0));
+        let (nudge, nudges) = unnudged();
         let (receiver, _retier) = poll_with(
             Tiers {
                 fast: Duration::from_millis(1),
@@ -567,7 +591,8 @@ mod tests {
             counting_fast(Arc::clone(&reads)),
             |_, _, _| Ok(Vec::new()),
             frozen(),
-            unnudged(),
+            nudge,
+            nudges,
             no_readings(),
         );
 
@@ -577,6 +602,7 @@ mod tests {
     #[test]
     fn the_slow_tier_is_read_once_and_reused_across_fast_ticks() {
         let slow_reads = Arc::new(AtomicI64::new(0));
+        let (nudge, nudges) = unnudged();
         let (receiver, _retier) = poll_with(
             Tiers {
                 fast: Duration::from_millis(1),
@@ -586,7 +612,8 @@ mod tests {
             |_, _| vec![trackpad()],
             counting_slow(Arc::clone(&slow_reads)),
             frozen(),
-            unnudged(),
+            nudge,
+            nudges,
             no_readings(),
         );
 
@@ -620,6 +647,7 @@ mod tests {
             counting_fast(Arc::clone(&fast_reads)),
             counting_slow(Arc::clone(&slow_reads)),
             frozen(),
+            nudge.clone(),
             nudges,
             no_readings(),
         );
@@ -644,6 +672,42 @@ mod tests {
     }
 
     #[test]
+    fn a_refresh_reads_both_tiers_without_waiting_out_the_interval() {
+        let fast_reads = Arc::new(AtomicI64::new(0));
+        let slow_reads = Arc::new(AtomicI64::new(0));
+        let (nudge, nudges) = mpsc::channel();
+        let (receiver, retier) = poll_with(
+            Tiers {
+                fast: Duration::from_secs(3_600),
+                slow: Duration::from_secs(3_600),
+                ..Tiers::default()
+            },
+            counting_fast(Arc::clone(&fast_reads)),
+            counting_slow(Arc::clone(&slow_reads)),
+            frozen(),
+            nudge,
+            nudges,
+            no_readings(),
+        );
+
+        receiver.recv().expect("the first reading");
+        retier.refresh();
+
+        assert_eq!(
+            stamps(&receiver, 1),
+            [1],
+            "a prompt second reading, the same as a real nudge gets"
+        );
+        assert!(
+            (0..500).any(|_| {
+                thread::sleep(Duration::from_millis(10));
+                slow_reads.load(Ordering::SeqCst) > 1
+            }),
+            "and the slow tier was asked for an early read too"
+        );
+    }
+
+    #[test]
     fn a_flapping_link_does_not_turn_into_a_stream_of_slow_reads() {
         let slow_reads = Arc::new(AtomicI64::new(0));
         let (nudge, nudges) = mpsc::channel();
@@ -656,6 +720,7 @@ mod tests {
             |_, _| vec![trackpad()],
             counting_slow(Arc::clone(&slow_reads)),
             frozen(),
+            nudge.clone(),
             nudges,
             no_readings(),
         );
@@ -677,7 +742,7 @@ mod tests {
     #[test]
     fn a_silent_nudge_source_leaves_the_tiers_on_their_intervals() {
         let reads = Arc::new(AtomicI64::new(0));
-        let (_silent, nudges) = mpsc::channel();
+        let (silent, nudges) = mpsc::channel();
         let (receiver, _retier) = poll_with(
             Tiers {
                 fast: Duration::from_millis(1),
@@ -687,6 +752,7 @@ mod tests {
             counting_fast(Arc::clone(&reads)),
             |_, _, _| Ok(Vec::new()),
             frozen(),
+            silent,
             nudges,
             no_readings(),
         );
@@ -697,6 +763,7 @@ mod tests {
     #[test]
     fn a_hung_slow_source_never_delays_a_fast_reading() {
         let (_blocked, never) = mpsc::channel::<()>();
+        let (nudge, nudges) = unnudged();
         let (receiver, _retier) = poll_with(
             Tiers {
                 fast: Duration::from_millis(1),
@@ -709,7 +776,8 @@ mod tests {
                 Ok(vec![keyboard()])
             },
             frozen(),
-            unnudged(),
+            nudge,
+            nudges,
             no_readings(),
         );
 
@@ -746,6 +814,7 @@ mod tests {
             counting_fast(Arc::clone(&reads)),
             |_, _, _| Ok(Vec::new()),
             frozen(),
+            nudge.clone(),
             nudges,
             no_readings(),
         );
@@ -771,6 +840,7 @@ mod tests {
     #[test]
     fn a_retier_message_shortens_the_slow_tier_interval_from_its_next_wakeup() {
         let slow_reads = Arc::new(AtomicI64::new(0));
+        let (nudge, nudges) = unnudged();
         let (receiver, retier) = poll_with(
             Tiers {
                 fast: Duration::from_millis(1),
@@ -780,7 +850,8 @@ mod tests {
             |_, _| vec![trackpad()],
             counting_slow(Arc::clone(&slow_reads)),
             frozen(),
-            unnudged(),
+            nudge,
+            nudges,
             no_readings(),
         );
 
@@ -803,6 +874,7 @@ mod tests {
     #[test]
     fn a_retier_message_changes_the_profiler_timeout_the_slow_tier_reads_with() {
         let seen_timeout = Arc::new(AtomicI64::new(-1));
+        let (nudge, nudges) = unnudged();
         let (receiver, retier) = poll_with(
             Tiers {
                 fast: Duration::from_millis(1),
@@ -812,7 +884,8 @@ mod tests {
             |_, _| vec![trackpad()],
             timeout_stamping_slow(Arc::clone(&seen_timeout)),
             frozen(),
-            unnudged(),
+            nudge,
+            nudges,
             no_readings(),
         );
 
@@ -846,6 +919,7 @@ mod tests {
     fn a_dropped_retier_leaves_the_tiers_running_on_whatever_they_last_had() {
         let fast_reads = Arc::new(AtomicI64::new(0));
         let slow_reads = Arc::new(AtomicI64::new(0));
+        let (nudge, nudges) = unnudged();
         let (receiver, retier) = poll_with(
             Tiers {
                 fast: Duration::from_millis(1),
@@ -855,7 +929,8 @@ mod tests {
             counting_fast(Arc::clone(&fast_reads)),
             counting_slow(Arc::clone(&slow_reads)),
             frozen(),
-            unnudged(),
+            nudge,
+            nudges,
             no_readings(),
         );
 
@@ -879,6 +954,7 @@ mod tests {
     fn dropping_the_receiver_stops_both_tiers() {
         let fast_reads = Arc::new(AtomicI64::new(0));
         let slow_reads = Arc::new(AtomicI64::new(0));
+        let (nudge, nudges) = unnudged();
         let (receiver, _retier) = poll_with(
             Tiers {
                 fast: Duration::from_millis(1),
@@ -888,7 +964,8 @@ mod tests {
             counting_fast(Arc::clone(&fast_reads)),
             counting_slow(Arc::clone(&slow_reads)),
             frozen(),
-            unnudged(),
+            nudge,
+            nudges,
             no_readings(),
         );
 

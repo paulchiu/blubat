@@ -61,7 +61,7 @@ j/k    move the selection    /  filter on name or address, esc clears it
 enter  the detail view       h  hide the selected device, H show hidden again
 i      hide the inactive section, i again shows it
 r      reload the config     c  edit the config file, reloading it on return
-?      the full keymap
+R      refresh both sources  ?  the full keymap
 ```
 
 The rest, including `config`, `daemon` and `notify-test`, is in
@@ -70,7 +70,8 @@ The rest, including `config`, `daemon` and `notify-test`, is in
 ## Documentation
 
 - [docs/dashboard.md](docs/dashboard.md): the dashboard, its keys, the detail
-  view, hiding devices, the theme and glyph, and what reloads on `r`.
+  view, hiding devices, the theme and glyph, and what reloads on `r` or
+  refreshes on `R`.
 - [docs/scripting.md](docs/scripting.md): the machine readable contract, exit
   codes, `--number`, and the `--json` schema.
 - [docs/configuration.md](docs/configuration.md): the full TOML schema,

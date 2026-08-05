@@ -967,37 +967,37 @@ mod tests {
 
     #[test]
     fn the_dashboard_draws_the_frame_it_is_specified_to_draw() {
-        let expected = " blubat   3 active   sort level ↑   poll 5s   next 5s                                                                ▲ 1 critical
+        let expected = " blubat   3 active   sort level ↑   poll 5s   next 5s                                                                          ▲ 1 critical
 
- ┌ devices ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
- │    Device                   Type         Battery       % ↑ State       Trend  Last seen                                      │
- │▎ ▲ Soundcore Liberty        audio        █░░░░░░░░░░░   8% on battery  █▇▅▄▂▁ now                                            │
- │    Magic Trackpad           trackpad     ███░░░░░░░░░  23% + charging  █▇▅▄▂▁ now                                            │
- │    MX Keys M Mac            keyboard     ████████░░░░  67% on battery  █▇▅▄▂▁ now                                            │
- │                                                                                                                              │
- │  inactive (2)                                                                                                                │
- │    AirPods Pro              audio        █████░░░░░░░  45% stale       ······ 3h ago                                         │
- │    MX Master 3S             mouse        ░░░░░░░░░░░░   -- unreported  ······ 2d ago                                         │
- │                                                                                                                              │
- │                                                                                                                              │
- │                                                                                                                              │
- │                                                                                                                              │
- │                                                                                                                              │
- │                                                                                                                              │
- │                                                                                                                              │
- │                                                                                                                              │
- │                                                                                                                              │
- │                                                                                                                              │
- │                                                                                                                              │
- │                                                                                                                              │
- │                                                                                                                              │
- │                                                                                                                              │
- │                                                                                                                              │
- │                                                                                                                              │
- │                                                                                                                              │
- └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
- q quit  j/k move  enter detail  s sort  / filter  h hide  H show hidden  i hide inactive  r reload  c edit config  ? help";
-        assert_frame(&dashboard(), 130, 30, expected);
+ ┌ devices ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+ │    Device                   Type         Battery       % ↑ State       Trend  Last seen                                                │
+ │▎ ▲ Soundcore Liberty        audio        █░░░░░░░░░░░   8% on battery  █▇▅▄▂▁ now                                                      │
+ │    Magic Trackpad           trackpad     ███░░░░░░░░░  23% + charging  █▇▅▄▂▁ now                                                      │
+ │    MX Keys M Mac            keyboard     ████████░░░░  67% on battery  █▇▅▄▂▁ now                                                      │
+ │                                                                                                                                        │
+ │  inactive (2)                                                                                                                          │
+ │    AirPods Pro              audio        █████░░░░░░░  45% stale       ······ 3h ago                                                   │
+ │    MX Master 3S             mouse        ░░░░░░░░░░░░   -- unreported  ······ 2d ago                                                   │
+ │                                                                                                                                        │
+ │                                                                                                                                        │
+ │                                                                                                                                        │
+ │                                                                                                                                        │
+ │                                                                                                                                        │
+ │                                                                                                                                        │
+ │                                                                                                                                        │
+ │                                                                                                                                        │
+ │                                                                                                                                        │
+ │                                                                                                                                        │
+ │                                                                                                                                        │
+ │                                                                                                                                        │
+ │                                                                                                                                        │
+ │                                                                                                                                        │
+ │                                                                                                                                        │
+ │                                                                                                                                        │
+ │                                                                                                                                        │
+ └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ q quit  j/k move  enter detail  s sort  / filter  h hide  H show hidden  i hide inactive  r reload  R refresh  c edit config  ? help";
+        assert_frame(&dashboard(), 140, 30, expected);
     }
 
     #[test]
@@ -1105,7 +1105,7 @@ mod tests {
 
     #[test]
     fn the_footer_carries_the_keys_of_the_view_on_screen() {
-        let dashboard = drawn(&loaded(), 130, 30);
+        let dashboard = drawn(&loaded(), 140, 30);
         let footer = dashboard.last().expect("a footer row").clone();
 
         for key in [
@@ -1118,6 +1118,7 @@ mod tests {
             "H show hidden",
             "i hide inactive",
             "r reload",
+            "R refresh",
             "c edit config",
             "? help",
         ] {
@@ -1127,7 +1128,7 @@ mod tests {
 
     #[test]
     fn the_footer_keeps_help_pinned_and_marks_dropped_bindings_with_an_ellipsis() {
-        let wide = drawn(&loaded(), 130, 30)
+        let wide = drawn(&loaded(), 140, 30)
             .last()
             .cloned()
             .expect("a footer row");
@@ -1183,17 +1184,17 @@ mod tests {
         let top = format!("┌{title}{}┐", "─".repeat(66 - title.chars().count()));
         let expected = " blubat   3 active   sort level ↑   poll 5s   next 5s                                  ▲ 1 critical
 
- ┌ devices ───────────────────────────────────────────────────────────────────────────────────────┐
- │    Device    [overlay top]t seen        │
- │▎ ▲ Soundcore │         q  quit                                                  │              │
- │    Magic Trac│       j/k  move                                                  │              │
- │    MX Keys M │     enter  detail                                                │              │
- │              │         s  sort                                                  │              │
- │  inactive (2)│         /  filter                                                │              │
- │    AirPods Pr│         h  hide                                                  │ago           │
- │    MX Master │         H  show hidden                                           │ago           │
- │              │         i  hide inactive                                         │              │
+ ┌ devices ─────[overlay top]──────────────┐
+ │    Device    │         q  quit                                                  │t seen        │
+ │▎ ▲ Soundcore │       j/k  move                                                  │              │
+ │    Magic Trac│     enter  detail                                                │              │
+ │    MX Keys M │         s  sort                                                  │              │
+ │              │         /  filter                                                │              │
+ │  inactive (2)│         h  hide                                                  │              │
+ │    AirPods Pr│         H  show hidden                                           │ago           │
+ │    MX Master │         i  hide inactive                                         │ago           │
  │              │         r  reload                                                │              │
+ │              │         R  refresh                                               │              │
  │              │         c  edit config                                           │              │
  │              │         ?  help                                                  │              │
  │              │                                                                  │              │
@@ -1207,9 +1208,9 @@ mod tests {
  │              │ h and i last: the one table blubat writes to the config file.    │              │
  │              │ a hidden device is hidden here only, never unpaired from macOS.  │              │
  │              │ r re-reads the config file; one it cannot read changes nothing.  │              │
+ │              │ R re-reads both device sources now; it never touches the config. │              │
  │              │ c opens the config in $EDITOR and reloads it once it closes.     │              │
- │              └──────────────────────────────────────────────────────────────────┘              │
- └────────────────────────────────────────────────────────────────────────────────────────────────┘
+ └──────────────└──────────────────────────────────────────────────────────────────┘──────────────┘
  esc/? close  q quit";
         assert_frame(
             &update(dashboard(), Event::Key(Key::Char('?'))),

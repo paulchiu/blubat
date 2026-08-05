@@ -33,6 +33,9 @@ sources. A connect or disconnect is therefore seen at once for anything IOKit
 reports, and within one `foreground_interval` or `daemon_interval` for
 anything only `system_profiler` knows about.
 
+The dashboard's `R` key sends the same nudge by hand: see [`R` in
+docs/dashboard.md](dashboard.md#refreshing).
+
 ## A third source: BMAP, daemon only
 
 Neither IOKit nor `system_profiler` gives macOS a reliable battery level for
