@@ -22,6 +22,31 @@ pub struct Binding {
     /// The keys as the footer prints them, several separated by `/`.
     pub keys: &'static str,
     pub label: &'static str,
+    /// Whether the footer has room budgeted for this one, as opposed to a
+    /// binding the `?` overlay lists but the footer leaves out.
+    pub hinted: bool,
+}
+
+impl Binding {
+    /// A binding advertised everywhere its mode's keys are listed: the footer
+    /// as well as the overlay.
+    const fn new(keys: &'static str, label: &'static str) -> Self {
+        Self {
+            keys,
+            label,
+            hinted: true,
+        }
+    }
+
+    /// A binding the overlay lists but the footer leaves out, for one that
+    /// would otherwise spend the footer's room without earning it.
+    const fn unhinted(keys: &'static str, label: &'static str) -> Self {
+        Self {
+            keys,
+            label,
+            hinted: false,
+        }
+    }
 }
 
 /// The dashboard keymap, in the order the footer and the overlay list it.
@@ -30,54 +55,20 @@ pub struct Binding {
 /// showing; [`dashboard_keys`] is what actually resolves them against the
 /// view in front of the keyboard.
 pub const KEYMAP: [Binding; 12] = [
-    Binding {
-        keys: "q",
-        label: "quit",
-    },
-    Binding {
-        keys: "j/k",
-        label: "move",
-    },
-    Binding {
-        keys: "enter",
-        label: "detail",
-    },
-    Binding {
-        keys: "s",
-        label: "sort",
-    },
-    Binding {
-        keys: "/",
-        label: "filter",
-    },
-    Binding {
-        keys: "h",
-        label: "hide",
-    },
-    Binding {
-        keys: "H",
-        label: "show hidden",
-    },
-    Binding {
-        keys: "i",
-        label: "hide inactive",
-    },
-    Binding {
-        keys: "r",
-        label: "reload",
-    },
-    Binding {
-        keys: "R",
-        label: "refresh",
-    },
-    Binding {
-        keys: "c",
-        label: "edit config",
-    },
-    Binding {
-        keys: "?",
-        label: "help",
-    },
+    Binding::new("q", "quit"),
+    Binding::new("j/k", "move"),
+    Binding::new("enter", "detail"),
+    Binding::new("s", "sort"),
+    Binding::new("/", "filter"),
+    Binding::new("h", "hide"),
+    Binding::new("H", "show hidden"),
+    Binding::new("i", "hide inactive"),
+    // Unhinted: the overlay is where `r` earns its keep, not a footer that
+    // has `R` for the key someone reaches for far more often.
+    Binding::unhinted("r", "reload config"),
+    Binding::new("R", "refresh data"),
+    Binding::new("c", "edit config"),
+    Binding::new("?", "help"),
 ];
 
 /// [`KEYMAP`], with `H` and `i` reading what pressing them will do to `view`
@@ -111,28 +102,16 @@ pub(super) fn dashboard_keys(view: &View) -> Vec<Binding> {
 ///
 /// Advertised beside the dashboard keymap while a kept filter is narrowing the
 /// table, since that is the only state in which it does anything.
-const CLEAR_FILTER: Binding = Binding {
-    keys: "esc",
-    label: "clear filter",
-};
+const CLEAR_FILTER: Binding = Binding::new("esc", "clear filter");
 
 /// The keys the detail view binds, which are the only ones it leaves live.
 ///
 /// `j/k` move over the same row list the dashboard shows, so the selection
 /// underneath follows: esc lands back on whichever device that left it on.
 pub const DETAIL_KEYS: [Binding; 3] = [
-    Binding {
-        keys: "esc/enter",
-        label: "back",
-    },
-    Binding {
-        keys: "j/k",
-        label: "next/previous",
-    },
-    Binding {
-        keys: "q",
-        label: "quit",
-    },
+    Binding::new("esc/enter", "back"),
+    Binding::new("j/k", "next/previous"),
+    Binding::new("q", "quit"),
 ];
 
 /// What [`DETAIL_KEYS`] stand for, and the only actions the detail view performs.
@@ -153,22 +132,13 @@ pub const NOTES: [&str; 7] = [
     "the detail chart is this run only; a restart starts it empty.",
     "h and i last: the one table blubat writes to the config file.",
     "a hidden device is hidden here only, never unpaired from macOS.",
-    "r re-reads the config file; one it cannot read changes nothing.",
-    "R re-reads both device sources now; it never touches the config.",
+    "r leaves everything as it was if the config cannot be read.",
+    "R touches only the device sources, never the config r does.",
     "c opens the config in $EDITOR and reloads it once it closes.",
 ];
 
 /// The keys the keymap overlay leaves live, since it swallows every other one.
-const OVERLAY_KEYS: [Binding; 2] = [
-    Binding {
-        keys: "esc/?",
-        label: "close",
-    },
-    Binding {
-        keys: "q",
-        label: "quit",
-    },
-];
+const OVERLAY_KEYS: [Binding; 2] = [Binding::new("esc/?", "close"), Binding::new("q", "quit")];
 
 /// What [`OVERLAY_KEYS`] stand for, and the only actions the overlay performs.
 ///
@@ -183,26 +153,11 @@ const OVERLAY_ACTIONS: [Action; 3] = [Action::ToggleKeymap, Action::Back, Action
 /// globally would let `l` sort the table from underneath the dashboard. See
 /// [`chosen`], which answers them directly instead.
 const SORT_KEYS: [Binding; 5] = [
-    Binding {
-        keys: "l",
-        label: "level",
-    },
-    Binding {
-        keys: "n",
-        label: "name",
-    },
-    Binding {
-        keys: "t",
-        label: "last seen",
-    },
-    Binding {
-        keys: "esc/s",
-        label: "cancel",
-    },
-    Binding {
-        keys: "q",
-        label: "quit",
-    },
+    Binding::new("l", "level"),
+    Binding::new("n", "name"),
+    Binding::new("t", "last seen"),
+    Binding::new("esc/s", "cancel"),
+    Binding::new("q", "quit"),
 ];
 
 /// What the sort menu's own bindings stand for, the same way [`OVERLAY_ACTIONS`]
@@ -215,16 +170,7 @@ const SORT_ACTIONS: [Action; 3] = [Action::ToggleSort, Action::Back, Action::Qui
 ///
 /// Every other key is text, which is what makes the filter narrow the table as
 /// it is typed rather than when it is submitted.
-const FILTER_KEYS: [Binding; 2] = [
-    Binding {
-        keys: "esc",
-        label: "clear",
-    },
-    Binding {
-        keys: "enter",
-        label: "keep",
-    },
-];
+const FILTER_KEYS: [Binding; 2] = [Binding::new("esc", "clear"), Binding::new("enter", "keep")];
 
 /// Which of the dashboard's views has the keyboard.
 ///
@@ -384,8 +330,8 @@ pub enum Event {
     /// which is what keeps [`App::interval`] and the running poller in step.
     Reloaded(Result<(Config, Duration), String>),
     /// What the loop did about the refresh [`Action::Refresh`] asked for:
-    /// nothing to fold back, since the fresh reading follows on
-    /// [`Event::Reading`] the way every other reading does.
+    /// nothing to fold back but the fact that it is underway, since the fresh
+    /// reading follows on [`Event::Reading`] the way every other reading does.
     Refreshed,
     /// What came of writing the dashboard table [`Action::ToggleHidden`] or
     /// [`Action::ToggleInactive`] changed.
@@ -440,6 +386,15 @@ pub struct App {
     /// travels as state. The event carries nothing back, since the fresh
     /// reading arrives separately, on the ordinary [`Event::Reading`].
     pub refresh: bool,
+    /// Set by [`Event::Refreshed`] and cleared by the [`Event::Reading`] that
+    /// follows: the fresh reading a refresh produces is the natural end of
+    /// it, which is also the moment the countdown has a full interval to
+    /// measure again. Drawn in place of the countdown while it holds.
+    pub refreshing: bool,
+    /// Ticks counted while `refreshing` holds, for the status line's
+    /// animation to derive its dot count from deterministically rather than
+    /// off the wall clock.
+    pub refreshing_ticks: u32,
     /// Set by `h` or `i` to the field it changed, and cleared the same way,
     /// for the same reason: the change is already in [`View`], and the file
     /// has yet to be told.
@@ -476,6 +431,8 @@ impl App {
             notice: None,
             reload: false,
             refresh: false,
+            refreshing: false,
+            refreshing_ticks: 0,
             save_dashboard: None,
             edit_config: false,
         }
@@ -564,11 +521,12 @@ impl App {
         Some(Duration::from_secs(u64::try_from(remaining).unwrap_or(0)))
     }
 
-    /// The keys the mode on screen binds, which the footer shows.
+    /// The keys the mode on screen binds.
     ///
     /// Every key listed here reaches [`Action::of`] in this mode and no key
-    /// outside it does anything, which is what makes the footer an account of
-    /// what pressing something will do.
+    /// outside it does anything, which is what makes this list an account of
+    /// what pressing something will do: the footer draws the `hinted` ones
+    /// of it, and the `?` overlay lists the dashboard's whole.
     pub fn keys(&self) -> Vec<Binding> {
         match self.mode {
             Mode::Keymap => OVERLAY_KEYS.to_vec(),
@@ -599,7 +557,7 @@ pub fn update(app: App, event: Event) -> App {
         ),
         Event::Interrupt => act(app, Action::Quit),
         Event::Reading(reading) => receive(app, reading),
-        Event::Tick(now) => App { now, ..app },
+        Event::Tick(now) => ticked(app, now),
         Event::Reloaded(read) => reloaded(app, read),
         Event::Refreshed => refreshed(app),
         Event::Saved(written) => saved(app, written),
@@ -612,6 +570,22 @@ pub fn update(app: App, event: Event) -> App {
     };
 
     onto_a_row(app)
+}
+
+/// Carries the clock forward, and the refreshing animation's frame with it.
+///
+/// The counter only ever moves while `refreshing` holds, so the status line's
+/// dots are a function of state a test can pin rather than of wall time.
+fn ticked(app: App, now: Timestamp) -> App {
+    App {
+        now,
+        refreshing_ticks: if app.refreshing {
+            app.refreshing_ticks.wrapping_add(1)
+        } else {
+            app.refreshing_ticks
+        },
+        ..app
+    }
 }
 
 /// Takes the config the loop read, or keeps the one in force and says why.
@@ -648,12 +622,14 @@ fn reloaded(mut app: App, read: Result<(Config, Duration), String>) -> App {
     app
 }
 
-/// Answers the refresh `R` asked for: there is nothing to fold back, since
-/// the loop has already asked the poller and the fresh reading follows on
-/// its own, on the ordinary [`Event::Reading`].
+/// Answers the refresh `R` asked for: there is nothing to fold back beyond
+/// starting the status line's "refreshing" animation, since the loop has
+/// already asked the poller and the fresh reading follows on its own, on the
+/// ordinary [`Event::Reading`] that clears it again.
 fn refreshed(mut app: App) -> App {
     app.refresh = false;
-    app.notice = Some(Notice::said("refreshing"));
+    app.refreshing = true;
+    app.refreshing_ticks = 0;
 
     app
 }
@@ -909,11 +885,15 @@ fn toggled_inactive(app: App) -> App {
 /// Takes a fresh reading, recording the levels the trend column reads.
 ///
 /// A reading is delivered as it is taken, so it carries the clock forward too
-/// and the countdown restarts from the moment the reading actually happened.
+/// and the countdown restarts from the moment the reading actually happened:
+/// a refresh's own reading is no different, so this is also what ends
+/// `refreshing` and hands the countdown back a full interval.
 fn receive(mut app: App, reading: Snapshot) -> App {
     app.history.record(&reading);
     app.now = reading.read_at;
     app.reading = Some(reading);
+    app.refreshing = false;
+    app.refreshing_ticks = 0;
 
     app
 }
@@ -1990,12 +1970,60 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn a_refresh_is_answered_with_a_notice_and_nothing_to_fold_back() {
+    fn a_refresh_is_answered_by_marking_it_underway_rather_than_with_a_notice() {
         let asked = press(loaded(), "R");
         let refreshed = update(asked, Event::Refreshed);
 
         assert!(!refreshed.refresh, "the request is answered");
-        assert_eq!(refreshed.notice, Some(Notice::said("refreshing")));
+        assert!(refreshed.refreshing, "the status line takes it from here");
+        assert_eq!(
+            refreshed.notice, None,
+            "nothing is left on screen for a keypress to clear"
+        );
+    }
+
+    #[test]
+    fn ticks_advance_the_refreshing_animation_only_while_it_is_underway() {
+        let idle = loaded();
+        let refreshing = update(press(idle.clone(), "R"), Event::Refreshed);
+
+        assert_eq!(
+            refreshing.refreshing_ticks, 0,
+            "starts from the first frame"
+        );
+
+        let after_one = update(refreshing.clone(), Event::Tick(READ_AT));
+        let after_two = update(after_one.clone(), Event::Tick(READ_AT));
+        assert_eq!(after_one.refreshing_ticks, 1);
+        assert_eq!(after_two.refreshing_ticks, 2);
+
+        assert_eq!(
+            update(idle, Event::Tick(READ_AT)).refreshing_ticks,
+            0,
+            "a tick with nothing refreshing counts nothing"
+        );
+    }
+
+    #[test]
+    fn the_reading_a_refresh_produces_ends_it_and_gives_the_countdown_a_full_interval() {
+        let refreshing = update(press(loaded(), "R"), Event::Refreshed);
+        let ticked = update(refreshing, Event::Tick(READ_AT));
+
+        let landed = update(ticked, Event::Reading(three_devices()));
+
+        assert!(
+            !landed.refreshing,
+            "the fresh reading is what it was waiting for"
+        );
+        assert_eq!(
+            landed.refreshing_ticks, 0,
+            "and the animation resets with it"
+        );
+        assert_eq!(
+            landed.next_poll_in(),
+            Some(INTERVAL),
+            "the countdown restarts at the full interval rather than carrying on"
+        );
     }
 
     #[test]

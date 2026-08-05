@@ -144,7 +144,7 @@ fn summary(app: &App, room: usize) -> String {
                 format!("{} active", app.connected().count()),
                 format!("sort {}", app.view.sort_label()),
                 poll.clone(),
-                format!("next {}", seconds(next)),
+                next_piece(app, next),
             ]
         },
     );
@@ -162,6 +162,22 @@ fn summary(app: &App, room: usize) -> String {
             line
         }
     })
+}
+
+/// The countdown, or the animated stand-in a refresh underway replaces it
+/// with until the reading it produces gives the countdown a full interval
+/// to measure again.
+///
+/// The dot count is a function of [`App::refreshing_ticks`] rather than of
+/// the wall clock, so a frame is a fact about the state rather than about
+/// when the render happened.
+fn next_piece(app: &App, next: std::time::Duration) -> String {
+    if app.refreshing {
+        let dots = ".".repeat((app.refreshing_ticks % 4) as usize);
+        format!("refreshing{dots}")
+    } else {
+        format!("next {}", seconds(next))
+    }
 }
 
 /// Says the reading is standing in for one a source could not give.
@@ -561,7 +577,7 @@ pub(super) fn keys_footer(app: &App, width: u16) -> Line<'static> {
     let help = bindings.iter().find(|binding| binding.keys == "?").copied();
     let rest: Vec<Binding> = bindings
         .into_iter()
-        .filter(|binding| Some(*binding) != help)
+        .filter(|binding| Some(*binding) != help && binding.hinted)
         .collect();
 
     let budget = usize::from(width).saturating_sub(help.map_or(0, footer_width));
@@ -996,7 +1012,7 @@ mod tests {
  │                                                                                                                                        │
  │                                                                                                                                        │
  └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
- q quit  j/k move  enter detail  s sort  / filter  h hide  H show hidden  i hide inactive  r reload  R refresh  c edit config  ? help";
+ q quit  j/k move  enter detail  s sort  / filter  h hide  H show hidden  i hide inactive  R refresh data  c edit config  ? help";
         assert_frame(&dashboard(), 140, 30, expected);
     }
 
@@ -1083,6 +1099,39 @@ mod tests {
         );
     }
 
+    /// The animation is a function of the ticks counted, not of a clock, which
+    /// is what lets every frame of the cycle be pinned exactly.
+    #[test]
+    fn a_refresh_replaces_the_countdown_with_an_animation_that_resumes_it_once_read() {
+        let refreshing = update(press(loaded(), "R"), Event::Refreshed);
+        assert!(
+            line_containing(&refreshing, "blubat").contains("refreshing"),
+            "the countdown is gone the moment a refresh is asked for"
+        );
+        assert!(!line_containing(&refreshing, "blubat").contains("next"));
+
+        let one_dot = update(refreshing.clone(), Event::Tick(refreshing.now));
+        let two_dots = update(one_dot.clone(), Event::Tick(one_dot.now));
+        let three_dots = update(two_dots.clone(), Event::Tick(two_dots.now));
+        let cycled = update(three_dots.clone(), Event::Tick(three_dots.now));
+
+        assert!(line_containing(&one_dot, "blubat").contains("refreshing."));
+        assert!(!line_containing(&one_dot, "blubat").contains("refreshing.."));
+        assert!(line_containing(&two_dots, "blubat").contains("refreshing.."));
+        assert!(!line_containing(&two_dots, "blubat").contains("refreshing..."));
+        assert!(line_containing(&three_dots, "blubat").contains("refreshing..."));
+        assert!(
+            !line_containing(&cycled, "blubat").contains("refreshing."),
+            "the fourth tick starts the cycle over rather than adding a fourth dot"
+        );
+
+        let read = update(three_dots, Event::Reading(three_devices()));
+        assert!(
+            line_containing(&read, "blubat").contains("next 5s"),
+            "the reading it was waiting for hands the countdown back a full interval"
+        );
+    }
+
     #[test]
     fn the_sorted_columns_header_carries_the_arrow_and_no_other_header_does() {
         let by_level = loaded();
@@ -1117,13 +1166,17 @@ mod tests {
             "h hide",
             "H show hidden",
             "i hide inactive",
-            "r reload",
-            "R refresh",
+            "R refresh data",
             "c edit config",
             "? help",
         ] {
             assert!(footer.contains(key), "{key} is missing from `{footer}`");
         }
+
+        assert!(
+            !footer.contains("reload"),
+            "r stays in the overlay rather than crowding the footer: `{footer}`"
+        );
     }
 
     #[test]
@@ -1193,8 +1246,8 @@ mod tests {
  │  inactive (2)│         h  hide                                                  │              │
  │    AirPods Pr│         H  show hidden                                           │ago           │
  │    MX Master │         i  hide inactive                                         │ago           │
- │              │         r  reload                                                │              │
- │              │         R  refresh                                               │              │
+ │              │         r  reload config                                         │              │
+ │              │         R  refresh data                                          │              │
  │              │         c  edit config                                           │              │
  │              │         ?  help                                                  │              │
  │              │                                                                  │              │
@@ -1207,8 +1260,8 @@ mod tests {
  │              │ the detail chart is this run only; a restart starts it empty.    │              │
  │              │ h and i last: the one table blubat writes to the config file.    │              │
  │              │ a hidden device is hidden here only, never unpaired from macOS.  │              │
- │              │ r re-reads the config file; one it cannot read changes nothing.  │              │
- │              │ R re-reads both device sources now; it never touches the config. │              │
+ │              │ r leaves everything as it was if the config cannot be read.      │              │
+ │              │ R touches only the device sources, never the config r does.      │              │
  │              │ c opens the config in $EDITOR and reloads it once it closes.     │              │
  └──────────────└──────────────────────────────────────────────────────────────────┘──────────────┘
  esc/? close  q quit";
