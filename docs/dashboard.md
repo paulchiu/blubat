@@ -1,7 +1,7 @@
 # dashboard
 
 This covers the live dashboard: its keys, the detail view, hiding devices, the
-theme and charging glyph, and what a reload does. See the
+theme and charging glyph, and what a reload or a refresh does. See the
 [README](../README.md) for installing and a quick start.
 
 Bare `blubat` opens the dashboard, or prints the command help and exits 0 when
@@ -23,7 +23,7 @@ j/k    move the selection    /  filter on name or address, esc clears it
 enter  the detail view       h  hide the selected device, H show hidden again
 i      hide the inactive section, i again shows it
 r      reload the config     c  edit the config file, reloading it on return
-?      the full keymap, titled with the version blubat is running
+R      refresh both sources  ?  the full keymap, titled with the version blubat is running
 ```
 
 `q` and ctrl+c both leave the dashboard; the keymap overlay and the sort menu
@@ -100,6 +100,15 @@ A row is painted red below the same `critical` threshold the events are raised
 by, so the count on the status line and the banners agree by construction: a
 device configured `critical = 40` is red and counted at 39%, which is also the
 level that raises `critical_battery` for it.
+
+## Refreshing
+
+`R` forces an immediate read of both device sources: IOKit answers at once
+and `system_profiler` is asked for an early read too, the same one a device
+connecting or disconnecting already triggers. That source keeps a five second
+floor between early reads, so holding `R` down does not turn into a stream of
+`system_profiler` calls. It changes nothing about the config; that is `r`'s
+job.
 
 ## Hiding
 

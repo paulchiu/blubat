@@ -29,7 +29,7 @@ pub struct Binding {
 /// `H` and `i` print here as they read while the section they toggle is
 /// showing; [`dashboard_keys`] is what actually resolves them against the
 /// view in front of the keyboard.
-pub const KEYMAP: [Binding; 11] = [
+pub const KEYMAP: [Binding; 12] = [
     Binding {
         keys: "q",
         label: "quit",
@@ -65,6 +65,10 @@ pub const KEYMAP: [Binding; 11] = [
     Binding {
         keys: "r",
         label: "reload",
+    },
+    Binding {
+        keys: "R",
+        label: "refresh",
     },
     Binding {
         keys: "c",
@@ -144,12 +148,13 @@ const DETAIL_ACTIONS: [Action; 5] = [
 ];
 
 /// What the overlay says beyond the keys themselves.
-pub const NOTES: [&str; 6] = [
+pub const NOTES: [&str; 7] = [
     "s opens a sort menu: l level, n name, t last seen, esc cancels.",
     "the detail chart is this run only; a restart starts it empty.",
     "h and i last: the one table blubat writes to the config file.",
     "a hidden device is hidden here only, never unpaired from macOS.",
     "r re-reads the config file; one it cannot read changes nothing.",
+    "R re-reads both device sources now; it never touches the config.",
     "c opens the config in $EDITOR and reloads it once it closes.",
 ];
 
@@ -301,6 +306,11 @@ pub enum Action {
     ToggleInactive,
     /// Asks the loop to read the config file again, which the reducer cannot.
     Reload,
+    /// Asks the loop to read both device sources again right away, which the
+    /// reducer cannot: unlike [`Action::Reload`], the config is never
+    /// touched, and the fresh reading arrives on the ordinary reading channel
+    /// rather than folding back through this action.
+    Refresh,
     /// Enter, which opens the detail view over the selected device and closes
     /// it again from inside.
     Detail,
@@ -323,6 +333,7 @@ impl Action {
             Key::Char('H') => Some(Action::ShowHidden),
             Key::Char('i') => Some(Action::ToggleInactive),
             Key::Char('r') => Some(Action::Reload),
+            Key::Char('R') => Some(Action::Refresh),
             Key::Char('c') => Some(Action::EditConfig),
             Key::Enter => Some(Action::Detail),
             Key::Escape => Some(Action::Back),
@@ -372,6 +383,10 @@ pub enum Event {
     /// config it read plus the fast interval it retiered the poller to,
     /// which is what keeps [`App::interval`] and the running poller in step.
     Reloaded(Result<(Config, Duration), String>),
+    /// What the loop did about the refresh [`Action::Refresh`] asked for:
+    /// nothing to fold back, since the fresh reading follows on
+    /// [`Event::Reading`] the way every other reading does.
+    Refreshed,
     /// What came of writing the dashboard table [`Action::ToggleHidden`] or
     /// [`Action::ToggleInactive`] changed.
     Saved(Result<(), String>),
@@ -420,6 +435,11 @@ pub struct App {
     /// a file, so the request travels as state and the answer comes back as an
     /// event.
     pub reload: bool,
+    /// Set by `R` and cleared by [`Event::Refreshed`], the same way `reload`
+    /// is: the reducer cannot reach either device source, so the request
+    /// travels as state. The event carries nothing back, since the fresh
+    /// reading arrives separately, on the ordinary [`Event::Reading`].
+    pub refresh: bool,
     /// Set by `h` or `i` to the field it changed, and cleared the same way,
     /// for the same reason: the change is already in [`View`], and the file
     /// has yet to be told.
@@ -455,6 +475,7 @@ impl App {
             advertised: AdvertisedThresholds::new(),
             notice: None,
             reload: false,
+            refresh: false,
             save_dashboard: None,
             edit_config: false,
         }
@@ -580,6 +601,7 @@ pub fn update(app: App, event: Event) -> App {
         Event::Reading(reading) => receive(app, reading),
         Event::Tick(now) => App { now, ..app },
         Event::Reloaded(read) => reloaded(app, read),
+        Event::Refreshed => refreshed(app),
         Event::Saved(written) => saved(app, written),
         Event::Edited(outcome) => edited(app, outcome),
         Event::Raised(raised) => recorded(app, raised),
@@ -622,6 +644,16 @@ fn reloaded(mut app: App, read: Result<(Config, Duration), String>) -> App {
         }
         Err(problem) => app.notice = Some(Notice::problem(problem)),
     }
+
+    app
+}
+
+/// Answers the refresh `R` asked for: there is nothing to fold back, since
+/// the loop has already asked the poller and the fresh reading follows on
+/// its own, on the ordinary [`Event::Reading`].
+fn refreshed(mut app: App) -> App {
+    app.refresh = false;
+    app.notice = Some(Notice::said("refreshing"));
 
     app
 }
@@ -777,6 +809,10 @@ fn act(app: App, action: Action) -> App {
         Action::ToggleInactive => toggled_inactive(app),
         Action::Reload => App {
             reload: true,
+            ..app
+        },
+        Action::Refresh => App {
+            refresh: true,
             ..app
         },
         Action::Detail => detailed(app),
@@ -1002,7 +1038,7 @@ pub(super) mod tests {
 
     /// Every key a person can reach, bound or not.
     fn every_key() -> Vec<Key> {
-        "qjksh H/?ricxz1lnt"
+        "qjksh HR/?ricxz1lnt"
             .chars()
             .map(Key::Char)
             .chain([Key::Enter, Key::Escape, Key::Backspace])
@@ -1931,6 +1967,35 @@ pub(super) mod tests {
             overlay,
             "and the overlay swallows what it does not advertise"
         );
+    }
+
+    #[test]
+    fn shift_r_asks_the_loop_for_a_refresh_from_the_dashboard_alone() {
+        let dashboard = press(loaded(), "R");
+        let filtering = press(loaded(), "/R");
+        let overlay = press(loaded(), "?");
+
+        assert!(dashboard.refresh, "the dashboard binds it");
+        assert!(
+            !dashboard.reload,
+            "a refresh never touches the config, that is r's job"
+        );
+        assert!(!filtering.refresh, "the filter takes it as text");
+        assert_eq!(filtering.view.filter.query, "R");
+        assert_eq!(
+            press(overlay.clone(), "R"),
+            overlay,
+            "and the overlay swallows what it does not advertise"
+        );
+    }
+
+    #[test]
+    fn a_refresh_is_answered_with_a_notice_and_nothing_to_fold_back() {
+        let asked = press(loaded(), "R");
+        let refreshed = update(asked, Event::Refreshed);
+
+        assert!(!refreshed.refresh, "the request is answered");
+        assert_eq!(refreshed.notice, Some(Notice::said("refreshing")));
     }
 
     #[test]
