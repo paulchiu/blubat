@@ -4,8 +4,10 @@
 //! runs, and until they do, blubat is a program that exits when it is finished.
 
 mod bmap;
+mod gatt;
 mod launchd;
 mod run;
+mod sweep;
 mod watches;
 
 use std::io;

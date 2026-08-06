@@ -16,6 +16,9 @@ pub enum Source {
     /// The daemon's own RFCOMM read of a Bose headset's BMAP battery level.
     #[serde(rename = "bmap")]
     Bmap,
+    /// The daemon's own read of a BLE peripheral's Battery Service level.
+    #[serde(rename = "gatt")]
+    Gatt,
 }
 
 impl fmt::Display for Source {
@@ -24,6 +27,7 @@ impl fmt::Display for Source {
             Source::IoKit => "iokit",
             Source::SystemProfiler => "system_profiler",
             Source::Bmap => "bmap",
+            Source::Gatt => "gatt",
         })
     }
 }
@@ -378,6 +382,7 @@ mod tests {
         assert_eq!(Source::IoKit.to_string(), "iokit");
         assert_eq!(Source::SystemProfiler.to_string(), "system_profiler");
         assert_eq!(Source::Bmap.to_string(), "bmap");
+        assert_eq!(Source::Gatt.to_string(), "gatt");
         assert_eq!(
             serde_json::to_string(&Source::SystemProfiler).expect("serialisable"),
             "\"system_profiler\""
@@ -385,6 +390,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Source::Bmap).expect("serialisable"),
             "\"bmap\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Source::Gatt).expect("serialisable"),
+            "\"gatt\""
         );
     }
 

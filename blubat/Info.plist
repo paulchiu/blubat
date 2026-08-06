@@ -7,6 +7,6 @@
     <key>CFBundleName</key>
     <string>blubat</string>
     <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>blubat's background daemon reads a paired Bose headset's battery level over Bluetooth RFCOMM (BMAP).</string>
+    <string>blubat's background daemon reads a paired Bose headset's battery level over Bluetooth RFCOMM (BMAP), and a connected Bluetooth LE peripheral's over the standard Battery Service (GATT).</string>
 </dict>
 </plist>
