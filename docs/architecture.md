@@ -1,6 +1,6 @@
 # architecture
 
-This covers the three data sources and how they tier, connect and disconnect
+This covers the four data sources and how they tier, connect and disconnect
 nudges, the crate layout, and blubat's own state files. See the
 [README](../README.md) for installing and a quick start.
 
@@ -36,34 +36,59 @@ anything only `system_profiler` knows about.
 The dashboard's `R` key sends the same nudge by hand: see [`R` in
 docs/dashboard.md](dashboard.md#refreshing).
 
-## A third source: BMAP, daemon only
+## The daemon's own sources: BMAP and GATT, daemon only
+
+Two kinds of device are unreported through both sources above, and the
+background daemon reads each of them itself.
 
 Neither IOKit nor `system_profiler` gives macOS a reliable battery level for
-a Bluetooth Classic headset such as a Bose QC. blubat's third source speaks a
-slice of Bose's own BMAP protocol over RFCOMM instead, read only, one GET
-query per sweep; see [`blubat-core`'s `bmap`
+a Bluetooth Classic headset such as a Bose QC. blubat speaks a slice of
+Bose's own BMAP protocol over RFCOMM instead, read only, one GET query per
+sweep; see [`blubat-core`'s `bmap`
 module](../blubat-core/src/bmap.rs) for the wire format and which product ids
 are supported.
 
-Only the background daemon may open that channel. macOS attributes Bluetooth
+A third party Bluetooth LE peripheral, an MX Keys or a Keychron among them,
+publishes its level through the standard Battery Service (`180F`) and nowhere
+else: IOKit's `BatteryPercent` covers Apple HID peripherals only and
+`system_profiler` carries a battery field for AirPods and little else, so
+such a keyboard sits at `unreported` in blubat while System Settings shows it
+at 95%. blubat reads that service over CoreBluetooth, from the peripherals
+macOS has already connected (`retrieveConnectedPeripheralsWithServices`) and
+never from a scan.
+
+CoreBluetooth identifies a peripheral by a per host UUID rather than by its
+Bluetooth address, and the `CoreBluetoothCache` that used to map the two is
+not present in `/Library/Preferences/com.apple.Bluetooth.plist` on a current
+macOS, so a GATT reading is matched back to a device **by name, exactly**: a
+peripheral whose name is exactly one the daemon's own device list already
+knows is recorded under that device's address, and one that matches nothing
+is skipped in silence. A device another source already has a level for is
+never read over GATT at all, so this source can only ever fill a gap and
+never displace a direct reading; the one exception is a device GATT itself
+last answered for, which is refreshed every sweep like any other.
+
+Only the background daemon may open either link. macOS attributes Bluetooth
 access through TCC to the process responsible for it: under launchd the
 daemon is responsible for itself and the usage description its own binary
 embeds lets TCC prompt for it, but under a terminal the terminal is the
 responsible process and TCC aborts the process outright rather than prompt,
 whatever blubat's own `Info.plist` says. So the TUI, `list`, `status` and
-`wait` never touch IOBluetooth at all: the code that does lives behind
-`daemon::run` in the binary crate and nothing else in the workspace can name
-it, and `blubat-core` itself carries no IOBluetooth dependency.
+`wait` never touch IOBluetooth or CoreBluetooth at all: the code that does
+lives behind `daemon::run` in the binary crate and nothing else in the
+workspace can name it, and `blubat-core` itself carries neither dependency.
 
 The daemon shares what it reads through a file instead of a channel. Each
-sweep, on the same cadence and timeout as the `system_profiler` slow tier,
-writes every Bose reading it took to `readings.toml` under the state
-directory; every read of a snapshot, from the daemon's own poll loop, the
-dashboard and every one-shot command, merges that file back in as a data
-source of its own, judged by the same `read_at` freshness every other source
-already is. A machine with no daemon running, or one under an older blubat
-that never wrote the file, simply has no BMAP data: never an error, and a TUI
-run without the daemon behaves exactly as it always has.
+pass, on the same cadence and timeout as the `system_profiler` slow tier,
+runs the BMAP sweep and then the GATT sweep and writes every reading either
+took to `readings.toml` under the state directory; every read of a snapshot,
+from the daemon's own poll loop, the dashboard and every one-shot command,
+merges that file back in as data sources of their own, judged by the same
+`read_at` freshness every other source already is. Each sweep folds only the
+addresses it answered for, so one failing costs the other nothing. A machine
+with no daemon running, or one under an older blubat that never wrote the
+file, simply has no daemon data: never an error, and a TUI run without the
+daemon behaves exactly as it always has.
 
 ## Status
 
@@ -81,11 +106,13 @@ pipeline.
 
 ## Layout
 
-- `blubat-core`: the device model, all three data sources, the poller, the
+- `blubat-core`: the device model, all four data sources, the poller, the
   event engine and the config types. Depends on no terminal library, so a
   frontend other than the TUI stays buildable. Its `bmap` module owns the
-  BMAP wire format and the `readings.toml` handoff, but not IOBluetooth
-  itself; see [above](#a-third-source-bmap-daemon-only).
+  BMAP wire format, its `gatt` module the name matching and the Battery Level
+  value, and its `readings` module the `readings.toml` handoff the two share,
+  but none of them IOBluetooth or CoreBluetooth itself; see
+  [above](#the-daemons-own-sources-bmap-and-gatt).
 - `blubat`: the binary, holding the CLI, the TUI, the daemon, the notifier,
   the hook runner and the launchd plumbing over that core. It owns argument
   parsing, rendering and exit codes, and nothing else. The dashboard is one
@@ -96,8 +123,9 @@ pipeline.
   effects layer the loop calls, never in `update`. The daemon drives that
   same layer with no view attached, which is what makes resident mode the
   dashboard minus one component rather than a second implementation of it.
-  `daemon::bmap` is the one part of it with no counterpart in the dashboard:
-  the BMAP sweep, reachable only from `daemon::run`.
+  `daemon::bmap`, `daemon::gatt` and the `daemon::sweep` that runs both are
+  the one part of it with no counterpart in the dashboard, reachable only
+  from `daemon::run`.
 
 ## State files
 
@@ -105,7 +133,8 @@ blubat writes one thing into the config file and nothing else: `h` on the
 [dashboard](dashboard.md) maintains `[dashboard] hidden`, leaving the rest of
 the file, its comments included, exactly as it was. Everything else it
 creates is its own state, under `~/.local/state/blubat/`: the event engine's
-`state.toml`, the daemon's own `readings.toml` handoff from its BMAP sweep,
+`state.toml`, the daemon's own `readings.toml` handoff from its BMAP and GATT
+sweeps,
 the `watches/` directory `blubat wait` may drop into, the `tui.lock` and
 `daemon.lock` files its resident modes hold while they run, and the two logs
 the daemon writes under launchd. The one file outside both is the LaunchAgent

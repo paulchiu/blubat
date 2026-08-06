@@ -1,7 +1,8 @@
 //! The BMAP sweep: the daemon's own read of a Bose headset's battery level
 //! over Bluetooth Classic RFCOMM, left in `readings.toml` for every
-//! frontend to merge (see `blubat_core::bmap` for the wire format and the
-//! handoff file this writes).
+//! frontend to merge (see `blubat_core::bmap` for the wire format and
+//! `blubat_core::readings` for the handoff file it shares with the GATT
+//! sweep).
 //!
 //! Only `daemon run` may reach [`IoBluetooth`]. TCC attributes Bluetooth
 //! access to the process responsible for it: under launchd the daemon is
@@ -11,23 +12,22 @@
 //! responsible process, so TCC kills blubat with SIGABRT whatever its own
 //! Info.plist says, which is why the TUI, `list`, `status` and `wait` must
 //! never reach this module. Nothing outside `daemon` names [`IoBluetooth`]
-//! or [`execute`], and that privacy is the whole enforcement: there is no
-//! flag that turns this source off, because there is no other path that
-//! reaches it.
+//! or [`sweep`], and that privacy is the whole enforcement: there is no flag
+//! that turns this source off, because there is no other path that reaches
+//! it.
 //!
 //! A stack sample of the running daemon confirmed that
 //! `openRFCOMMChannelSync` only ever completes on the process's actual main
 //! thread: IOBluetooth queues the delegate callbacks that finish the call
 //! onto whichever run loop the calling thread owns, and a call made from
 //! any other thread waits on a run loop nothing ever pumps, wedged for
-//! good. [`execute`] is what turns the daemon's main thread into that
-//! pumped run loop: it is the whole executor for BMAP, taking one
-//! [`SweepRequest`] at a time from [`super::run::serve`]'s poll loop, which
-//! runs on a worker thread of its own for exactly this reason. A wedged
-//! open therefore delays only later sweeps, since the worker keeps polling
-//! and merely stops offering new requests while the executor is still busy
-//! with an earlier one; it can never stall a reading the way blocking the
-//! poller itself would.
+//! good. [`super::sweep::execute`] is what turns the daemon's main thread
+//! into that pumped run loop, taking one request at a time from
+//! [`super::run::serve`]'s poll loop, which runs on a worker thread of its
+//! own for exactly this reason. A wedged open therefore delays only later
+//! sweeps, since the worker keeps polling and merely stops offering new
+//! requests while the executor is still busy with an earlier one; it can
+//! never stall a reading the way blocking the poller itself would.
 //!
 //! The actual channel is reached through [`Channel`], the same seam
 //! [`super::launchd::Launchctl`] and [`crate::tui::editor::Editor`] already
@@ -36,14 +36,9 @@
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
-use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, SyncSender};
 use std::time::{Duration, Instant};
 
-use blubat_core::{
-    Address, BmapFrameReader, BmapReading, Device, Timestamp, bmap_candidates,
-    carry_forward_bmap_readings,
-};
+use blubat_core::{Address, BmapFrameReader, Device, SweepReading, Timestamp, bmap_candidates};
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -200,100 +195,15 @@ pub(crate) fn sweep(
     devices: &[Device],
     read_at: Timestamp,
     timeout: Duration,
-) -> Vec<BmapReading> {
+) -> Vec<SweepReading> {
     bmap_candidates(devices)
         .into_iter()
         .filter_map(|(address, name, channel_id)| {
             channel
                 .battery(&address, channel_id, timeout)
-                .map(|level| BmapReading::new(address, name, level, read_at))
+                .map(|level| SweepReading::bmap(address, name, level, read_at))
         })
         .collect()
-}
-
-/// Whether the sweep is due, advancing the tracker when it fires.
-///
-/// Mirrors the slow tier's own cadence in [`blubat_core::poll`]: the first
-/// reading always fires it, since there is nothing to compare against yet,
-/// and every one after waits out a full `interval` from the last firing.
-pub(crate) fn due(last: &mut Option<Timestamp>, now: Timestamp, interval: Duration) -> bool {
-    let elapsed = i64::try_from(interval.as_secs()).unwrap_or(i64::MAX);
-    let fire = last.is_none_or(|previous| now.unix() - previous.unix() >= elapsed);
-
-    if fire {
-        *last = Some(now);
-    }
-
-    fire
-}
-
-/// One sweep, folded into whatever the previous one left on disk.
-///
-/// `sweep` itself only ever answers for the devices it reached this time; a
-/// device it missed (a transient RFCOMM failure, a timeout, a disconnect)
-/// keeps its last known reading rather than vanishing, via
-/// [`blubat_core::carry_forward_bmap_readings`]. Split out from
-/// [`execute`] so this folding is exercised directly against a fake
-/// channel across two sequential sweeps, without a thread or a real file.
-pub(crate) fn swept(
-    channel: &dyn Channel,
-    devices: &[Device],
-    read_at: Timestamp,
-    timeout: Duration,
-    previous: Vec<BmapReading>,
-) -> Vec<BmapReading> {
-    let fresh = sweep(channel, devices, read_at, timeout);
-
-    carry_forward_bmap_readings(previous, fresh, devices)
-}
-
-/// One sweep the poll loop wants run: the devices to check, the file to
-/// fold the result into, and how long to wait for the response frame.
-///
-/// Plain and owned rather than borrowed, since it crosses from the worker
-/// thread that finds it due to the main thread that actually runs it.
-pub(crate) struct SweepRequest {
-    pub(crate) devices: Vec<Device>,
-    pub(crate) readings_file: PathBuf,
-    pub(crate) timeout: Duration,
-}
-
-/// Offers one sweep to [`execute`], dropping it silently rather than
-/// waiting if the previous one has not been taken yet.
-///
-/// `sweeps` is a channel of capacity one, so a request still sitting in it
-/// means the executor is still mid attempt on the one before. That is the
-/// same one-attempt-no-retry discipline every other BMAP failure keeps:
-/// this sweep is simply skipped rather than queued behind the last one, so
-/// the backlog can never grow past a single pending request.
-pub(crate) fn offer(sweeps: &SyncSender<SweepRequest>, request: SweepRequest) {
-    let _ = sweeps.try_send(request);
-}
-
-/// The daemon's main thread, for as long as it runs: takes one
-/// [`SweepRequest`] at a time and saves whatever it and the previous sweep
-/// together account for.
-///
-/// This has to be the main thread and nothing else, because IOBluetooth
-/// only completes a synchronous RFCOMM open through that thread's own run
-/// loop; see the module doc for the live finding that established this.
-/// The loop ends on its own once every [`SyncSender`] offering requests has
-/// gone, which is the poll loop's worker thread finishing or dying, and
-/// `serve` joins that thread immediately after to recover its result. A
-/// save that fails is as silent as an empty sweep; the next sweep folds in
-/// over whatever is on disk either way.
-pub(crate) fn execute(channel: &dyn Channel, requests: Receiver<SweepRequest>) {
-    for request in requests {
-        let previous = blubat_core::load_bmap_readings(&request.readings_file);
-        let readings = swept(
-            channel,
-            &request.devices,
-            Timestamp::now(),
-            request.timeout,
-            previous,
-        );
-        let _ = blubat_core::save_bmap_readings(&request.readings_file, &readings);
-    }
 }
 
 #[cfg(test)]
@@ -309,14 +219,6 @@ mod tests {
 
     fn address(raw: &str) -> Address {
         Address::parse(raw).expect("valid address")
-    }
-
-    fn sweep_request(devices: Vec<Device>) -> SweepRequest {
-        SweepRequest {
-            devices,
-            readings_file: PathBuf::from("/dev/null"),
-            timeout: Duration::ZERO,
-        }
     }
 
     fn bose(vendor_id: Option<u16>, product_id: Option<u16>) -> Device {
@@ -376,7 +278,7 @@ mod tests {
 
         assert_eq!(
             readings,
-            [BmapReading::new(
+            [SweepReading::bmap(
                 address(PRINCE),
                 "Bose QC Headphones",
                 76,
@@ -401,62 +303,6 @@ mod tests {
         );
 
         assert_eq!(readings, []);
-    }
-
-    #[test]
-    fn a_miss_on_the_second_sweep_carries_the_first_sweeps_reading_forward() {
-        let still_connected = bose(Some(0x009E), Some(0x4075));
-        let first = swept(
-            &Fake::answering(vec![Some(76)]),
-            std::slice::from_ref(&still_connected),
-            READ_AT,
-            Duration::ZERO,
-            Vec::new(),
-        );
-
-        let second = swept(
-            &Fake::answering(vec![None]),
-            &[still_connected],
-            Timestamp::from_unix(READ_AT.unix() + 300),
-            Duration::ZERO,
-            first.clone(),
-        );
-
-        assert_eq!(
-            second, first,
-            "a still connected device missed this sweep, so its last reading is unchanged"
-        );
-    }
-
-    #[test]
-    fn a_device_that_actually_disconnected_between_sweeps_is_carried_forward_as_last_seen() {
-        let connected = bose(Some(0x009E), Some(0x4075));
-        let first = swept(
-            &Fake::answering(vec![Some(76)]),
-            &[connected],
-            READ_AT,
-            Duration::ZERO,
-            Vec::new(),
-        );
-
-        let disconnected = Device {
-            connected: false,
-            ..bose(Some(0x009E), Some(0x4075))
-        };
-        let second = swept(
-            &Fake::default(),
-            &[disconnected],
-            Timestamp::from_unix(READ_AT.unix() + 300),
-            Duration::ZERO,
-            first,
-        );
-
-        assert_eq!(second.len(), 1);
-        assert_eq!(second[0].level, 76, "the last known level stays");
-        assert!(
-            !second[0].connected,
-            "gone from the device list means last seen, not connected"
-        );
     }
 
     #[test]
@@ -497,46 +343,5 @@ mod tests {
     #[test]
     fn hyphenated_addresses_are_offered_to_the_channel_in_colon_form() {
         assert_eq!(colon_form(&address(PRINCE)), "bc:87:fa:18:b0:b7");
-    }
-
-    #[test]
-    fn the_first_reading_always_fires_the_sweep() {
-        let mut last = None;
-
-        assert!(due(&mut last, READ_AT, Duration::from_secs(300)));
-        assert_eq!(last, Some(READ_AT));
-    }
-
-    #[test]
-    fn a_second_reading_waits_out_the_full_interval() {
-        let mut last = Some(READ_AT);
-        let interval = Duration::from_secs(300);
-
-        assert!(!due(
-            &mut last,
-            Timestamp::from_unix(READ_AT.unix() + 299),
-            interval
-        ));
-        assert!(due(
-            &mut last,
-            Timestamp::from_unix(READ_AT.unix() + 300),
-            interval
-        ));
-        assert_eq!(last, Some(Timestamp::from_unix(READ_AT.unix() + 300)));
-    }
-
-    #[test]
-    fn an_offer_made_while_the_previous_one_is_still_waiting_is_dropped_not_queued() {
-        let (sweeps, requests) = std::sync::mpsc::sync_channel(1);
-        let waiting = bose(Some(0x009E), Some(0x4075));
-
-        offer(&sweeps, sweep_request(vec![waiting]));
-        offer(&sweeps, sweep_request(Vec::new()));
-
-        assert_eq!(
-            requests.try_iter().count(),
-            1,
-            "the channel's capacity of one already held a request, so the second offer found no room"
-        );
     }
 }

@@ -23,12 +23,14 @@ than the versioned Cellar path underneath it, so `brew upgrade` deleting that
 version does not orphan the agent. Anyone who installed before this was added
 fixes it once by rerunning `blubat daemon install`.
 
-A Bose headset's battery level only ever comes from this daemon: the TUI and
-every one-shot command never touch Bluetooth for it, so a machine with the
-daemon not running or not yet installed simply shows a supported Bose as
-`unreported`, the same as an unsupported one. Reading it needs
-[BMAP](architecture.md#a-third-source-bmap-daemon-only) over RFCOMM, which
-needs macOS's Bluetooth permission, and macOS attributes that permission to
+A Bose headset's battery level, and a third party Bluetooth LE peripheral's,
+only ever come from this daemon: the TUI and every one-shot command never
+touch Bluetooth for either, so a machine with the daemon not running or not
+yet installed simply shows both as `unreported`, the same as a device blubat
+cannot read at all. Reading them needs
+[BMAP over RFCOMM or the Battery Service over
+GATT](architecture.md#the-daemons-own-sources-bmap-and-gatt), which needs
+macOS's Bluetooth permission, and macOS attributes that permission to
 whichever process is responsible: under launchd that is this binary itself,
 and the `NSBluetoothAlwaysUsageDescription` `build.rs` embeds in it is what
 lets TCC create the row for blubat under System Settings → Privacy &

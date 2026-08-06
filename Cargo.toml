@@ -47,6 +47,24 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "std",
     "NSObject",
     "NSString",
+    # CoreBluetooth takes the services to filter on as an array and hands the
+    # Battery Level characteristic's value back as data.
+    "NSArray",
+    "NSData",
+] }
+# The daemon's own read of a BLE peripheral's Battery Service level; only the
+# daemon binary crate links against this, for the same TCC reason IOBluetooth
+# is kept out of `blubat-core`.
+objc2-core-bluetooth = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CBAttribute",
+    "CBCentralManager",
+    "CBCharacteristic",
+    "CBManager",
+    "CBPeer",
+    "CBPeripheral",
+    "CBService",
+    "CBUUID",
 ] }
 # The daemon's own RFCOMM read of a Bose headset's BMAP battery level; only
 # the daemon binary crate links against this.

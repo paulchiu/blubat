@@ -7,7 +7,7 @@ use crate::device::Device;
 use crate::error::Result;
 use crate::snapshot::{Snapshot, merge};
 use crate::timestamp::Timestamp;
-use crate::{bmap, iokit, presence, profiler};
+use crate::{iokit, presence, profiler, readings};
 
 /// How often each tier reads its source, and how long the slow one may take.
 ///
@@ -36,7 +36,7 @@ impl Default for Tiers {
 }
 
 /// Takes one merged reading from both sources, plus whatever the daemon's
-/// BMAP sweep last left in `readings_file`.
+/// own sweeps last left in `readings_file`.
 ///
 /// The one-shot path, on the default timeout: there is no earlier reading for
 /// a degraded one to fall back on here, so a failing slow source leaves the
@@ -49,7 +49,7 @@ pub fn snapshot(readings_file: &Path) -> Snapshot {
     let cached = read_slow(&Cached::default(), read_at, timeout, profiler::read);
     let reading = read_fast(read_at, iokit::read, &cached);
 
-    bmap::merge(reading, &bmap::load(readings_file))
+    readings::merge(reading, &readings::load(readings_file))
 }
 
 /// Polls both tiers on their own threads and delivers merged snapshots.
@@ -65,9 +65,9 @@ pub fn snapshot(readings_file: &Path) -> Snapshot {
 /// on every nudge; the slow one reads once and then sits out [`EARLY_FLOOR`],
 /// since a flapping link must not turn into a stream of expensive calls.
 ///
-/// Every reading is also merged with whatever the daemon's BMAP sweep has
-/// most recently left in `readings_file`, re-read on every fast tick so a
-/// sweep landing between ticks is picked up on the very next one.
+/// Every reading is also merged with whatever the daemon's own BMAP and GATT
+/// sweeps have most recently left in `readings_file`, re-read on every fast
+/// tick so a sweep landing between ticks is picked up on the very next one.
 ///
 /// The tiers run for as long as the process does: nothing here changes them
 /// after the fact. [`poll_retierable`] is the constructor for a caller, such
@@ -299,8 +299,8 @@ fn slow_tier(
 /// A nudge cuts the tick short here and is passed on to the slow tier, whose
 /// answer lands on the tick after it. Dropping `polling` as this loop ends is
 /// what stops that tier. `readings_file` is re-read on every tick rather than
-/// cached, since it is small and only the daemon's own BMAP sweep, on its own
-/// much slower cadence, ever changes it.
+/// cached, since it is small and only the daemon's own sweeps, on their own
+/// much slower cadence, ever change it.
 ///
 /// `tiers` starts as whatever the caller polled with and is replaced by
 /// whatever [`Retier::set`] has most recently sent, picked up at the top of
@@ -320,7 +320,7 @@ fn fast_tier(
         latest = wires.cached.try_iter().last().unwrap_or(latest);
 
         let reading = read_fast(clock(), &read, &latest);
-        let reading = bmap::merge(reading, &bmap::load(readings_file));
+        let reading = readings::merge(reading, &readings::load(readings_file));
         if wires.snapshots.send(reading).is_err() {
             break;
         }
@@ -410,7 +410,7 @@ mod tests {
     }
 
     /// A readings file that was never written, which is a machine with no
-    /// BMAP daemon sweeping: nothing here should be merged in.
+    /// daemon sweeping at all: nothing here should be merged in.
     fn no_readings() -> PathBuf {
         std::env::temp_dir().join(format!(
             "blubat-poll-tests-no-readings-{}.toml",
@@ -467,13 +467,13 @@ mod tests {
             std::process::id(),
             line!()
         ));
-        let bose = crate::BmapReading::new(
+        let bose = crate::SweepReading::bmap(
             Address::parse("bc-87-fa-18-b0-b7").expect("valid address"),
             "Bose QC Headphones",
             77,
             READ_AT,
         );
-        crate::save_bmap_readings(&readings_file, &[bose]).expect("writes");
+        crate::save_readings(&readings_file, &[bose]).expect("writes");
         let (nudge, nudges) = unnudged();
         let (receiver, _retier) = poll_with(
             Tiers {

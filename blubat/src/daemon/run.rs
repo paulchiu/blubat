@@ -25,7 +25,9 @@ use crate::hooks::Outcome;
 use crate::notify::{Desktop, Notifier};
 use crate::{Failure, lock};
 
-use super::bmap::{self, IoBluetooth};
+use super::bmap::IoBluetooth;
+use super::gatt::CoreBluetooth;
+use super::sweep::{self, SweepRequest};
 use super::watches::Watches;
 
 /// Everything the loop keeps between readings.
@@ -45,16 +47,17 @@ struct Resident {
 /// Refuses to start beside another daemon: two of them would evaluate the same
 /// readings against the same state file and announce everything twice.
 ///
-/// This process's own main thread is the only place BMAP's IOBluetooth calls
-/// ever complete (see `super::bmap` for the live finding behind that), so
-/// `serve` sets everything up and then stays on this thread as the BMAP
-/// executor for as long as the daemon runs. The polling and every other side
-/// effect move onto a worker thread, [`poll_loop`], started with the setup
-/// this function already did; that is what keeps a wedged Bluetooth open
-/// from ever stalling a reading. `poll_loop`'s `Result` is what this
-/// function's own caller sees, recovered by joining the worker once the
-/// executor loop below ends, which happens the moment `poll_loop` drops its
-/// sender, whether by returning or by panicking.
+/// This process's own main thread is the only place the daemon's own
+/// Bluetooth calls ever complete (see `super::bmap` for the live finding
+/// behind that, which `super::gatt` inherits), so `serve` sets everything up
+/// and then stays on this thread as the sweep executor for as long as the
+/// daemon runs. The polling and every other side effect move onto a worker
+/// thread, [`poll_loop`], started with the setup this function already did;
+/// that is what keeps a wedged Bluetooth open from ever stalling a reading.
+/// `poll_loop`'s `Result` is what this function's own caller sees, recovered
+/// by joining the worker once the executor loop below ends, which happens the
+/// moment `poll_loop` drops its sender, whether by returning or by
+/// panicking.
 pub fn serve(paths: &Paths) -> Result<(), Failure> {
     let Some(_running) = lock::take(&paths.daemon_lock()).map_err(Failure::Error)? else {
         return Err(Failure::Error(
@@ -86,40 +89,40 @@ pub fn serve(paths: &Paths) -> Result<(), Failure> {
     thread::scope(|scope| {
         let worker = scope.spawn(move || poll_loop(resident, config, paths, out, sweeps));
 
-        bmap::execute(&IoBluetooth, requests);
+        sweep::execute(&IoBluetooth, &CoreBluetooth, requests);
 
         worker.join().expect("the poll loop thread panicked")
     })
 }
 
-/// The poll loop, on a worker thread of its own: every reading, the BMAP
-/// sweeps it schedules, and everything a reading sets off in [`Resident`].
+/// The poll loop, on a worker thread of its own: every reading, the sweeps
+/// it schedules, and everything a reading sets off in [`Resident`].
 ///
-/// Only the offering of a BMAP sweep differs from what used to run inline
-/// on the daemon's main thread; everything else here is unchanged, moved
-/// wholesale so the main thread is free to be BMAP's executor instead. A
-/// sweep already offered and not yet taken means the executor is still
-/// busy with an earlier one, so this loop drops the new one silently rather
-/// than waiting for room, matching the one-attempt-no-retry discipline
-/// every other BMAP failure keeps.
+/// Only the offering of a sweep differs from what used to run inline on the
+/// daemon's main thread; everything else here is unchanged, moved wholesale
+/// so the main thread is free to be the sweep executor instead. A sweep
+/// already offered and not yet taken means the executor is still busy with
+/// an earlier one, so this loop drops the new one silently rather than
+/// waiting for room, matching the one-attempt-no-retry discipline every
+/// sweep failure keeps.
 fn poll_loop(
     mut resident: Resident,
     config: Config,
     paths: &Paths,
     mut out: impl Write,
-    sweeps: mpsc::SyncSender<bmap::SweepRequest>,
+    sweeps: mpsc::SyncSender<SweepRequest>,
 ) -> Result<(), Failure> {
-    let mut bmap_swept_at = None;
+    let mut swept_at = None;
 
     for reading in blubat_core::poll(config.poll.daemon_tiers(), &paths.readings_file()) {
-        if bmap::due(
-            &mut bmap_swept_at,
+        if sweep::due(
+            &mut swept_at,
             reading.read_at,
             config.poll.profiler_interval,
         ) {
-            bmap::offer(
+            sweep::offer(
                 &sweeps,
-                bmap::SweepRequest {
+                SweepRequest {
                     devices: reading.devices.clone(),
                     readings_file: paths.readings_file(),
                     timeout: config.poll.profiler_timeout,
