@@ -23,18 +23,20 @@ than the versioned Cellar path underneath it, so `brew upgrade` deleting that
 version does not orphan the agent. Anyone who installed before this was added
 fixes it once by rerunning `blubat daemon install`.
 
-A Bose headset's battery level, and a third party Bluetooth LE peripheral's,
-only ever come from this daemon: the TUI and every one-shot command never
-touch Bluetooth for either, so a machine with the daemon not running or not
-yet installed simply shows both as `unreported`, the same as a device blubat
-cannot read at all. Reading them needs
-[BMAP over RFCOMM or the Battery Service over
-GATT](architecture.md#the-daemons-own-sources-bmap-and-gatt), which needs
-macOS's Bluetooth permission, and macOS attributes that permission to
-whichever process is responsible: under launchd that is this binary itself,
-and the `NSBluetoothAlwaysUsageDescription` `build.rs` embeds in it is what
-lets TCC create the row for blubat under System Settings → Privacy &
-Security → Bluetooth on first sweep rather than aborting the process. That
+A Bose headset's battery level, a third party Bluetooth LE peripheral's, and
+anything else only macOS itself has a number for, only ever come from this
+daemon: the TUI and every one-shot command never touch Bluetooth for any of
+them, so a machine with the daemon not running or not yet installed simply
+shows them as `unreported`, the same as a device blubat cannot read at all.
+Reading them needs [the cache macOS keeps, BMAP over RFCOMM or the Battery
+Service over
+GATT](architecture.md#the-daemons-own-sources-bluetoothd-bmap-and-gatt),
+which needs macOS's Bluetooth permission, and macOS attributes that
+permission to whichever process is responsible: under launchd that is this
+binary itself, and the `NSBluetoothAlwaysUsageDescription` `build.rs` embeds
+in it is what lets TCC create the row for blubat under System Settings →
+Privacy & Security → Bluetooth on first sweep rather than aborting the
+process. That
 row has to be granted once, the same as any other app's; running `blubat`
 bare in a terminal never asks for it, because the terminal, not blubat, would
 be the process TCC held responsible.

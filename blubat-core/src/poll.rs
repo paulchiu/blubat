@@ -65,8 +65,8 @@ pub fn snapshot(readings_file: &Path) -> Snapshot {
 /// on every nudge; the slow one reads once and then sits out [`EARLY_FLOOR`],
 /// since a flapping link must not turn into a stream of expensive calls.
 ///
-/// Every reading is also merged with whatever the daemon's own BMAP and GATT
-/// sweeps have most recently left in `readings_file`, re-read on every fast
+/// Every reading is also merged with whatever the daemon's own sweeps have
+/// most recently left in `readings_file`, re-read on every fast
 /// tick so a sweep landing between ticks is picked up on the very next one.
 ///
 /// The tiers run for as long as the process does: nothing here changes them

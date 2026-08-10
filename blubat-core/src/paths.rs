@@ -87,8 +87,8 @@ impl Paths {
         self.state_dir.join(STATE_FILE)
     }
 
-    /// The sweep handoff: the BMAP and GATT readings the daemon's last pass
-    /// took, for every frontend to merge in as data sources of their own.
+    /// The sweep handoff: every reading the daemon's last pass took, for
+    /// every frontend to merge in as data sources of their own.
     pub fn readings_file(&self) -> PathBuf {
         self.state_dir.join(READINGS_FILE)
     }

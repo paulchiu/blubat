@@ -12,11 +12,11 @@ disconnected ones sit under a dimmed `inactive` heading with their own count,
 keeping their last seen level out of the critical summary. A device no source
 reports a level for is listed as `unreported` rather than dropped, which is
 where a Bose headset and a third party Bluetooth LE keyboard otherwise sit:
-both read instead once the [background daemon](daemon.md) is running, over
-BMAP and over the Battery Service rather than IOKit or `system_profiler`, and
-show up here as `bmap` and `gatt` in the source column like any other
-reading. A narrow terminal gives up columns from the right rather than
-breaking the table.
+both read instead once the [background daemon](daemon.md) is running, out of
+the levels macOS itself has cached, over BMAP or over the Battery Service
+rather than IOKit or `system_profiler`, and show up here as `bluetoothd`,
+`bmap` and `gatt` in the source column like any other reading. A narrow
+terminal gives up columns from the right rather than breaking the table.
 
 ```
 q      quit                  s  open the sort menu: level, name, last seen

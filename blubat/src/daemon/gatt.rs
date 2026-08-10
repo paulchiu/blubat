@@ -1,7 +1,7 @@
 //! The GATT sweep: a BLE peripheral's own Battery Service level, read over
-//! CoreBluetooth and left in `readings.toml` beside the BMAP sweep's own
+//! CoreBluetooth and left in `readings.toml` beside the other two sweeps'
 //! readings (see `blubat_core::gatt` for why a peripheral is matched by name,
-//! and `blubat_core::readings` for the file the two share).
+//! and `blubat_core::readings` for the file the three share).
 //!
 //! Everything [`super::bmap`]'s module doc says about TCC and the main thread
 //! holds here too, and for the same reason: CoreBluetooth delivers its

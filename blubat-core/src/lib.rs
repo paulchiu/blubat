@@ -5,8 +5,9 @@
 //! the trend and the rate, the threshold event engine and the configuration and
 //! JSON shapes. No single macOS source lists every device
 //! battery, so readings come from IOKit, from `system_profiler` and from the
-//! two links only the daemon may open (a Bose headset's BMAP battery block
-//! over RFCOMM, and a Bluetooth LE peripheral's Battery Service over GATT),
+//! three reads only the daemon may make (the levels macOS's own `bluetoothd`
+//! has cached, a Bose headset's BMAP battery block over RFCOMM, and a
+//! Bluetooth LE peripheral's Battery Service over GATT),
 //! and are merged into one view that keeps the source and freshness of each
 //! reading visible. Nothing here depends on a terminal library, so the TUI is one
 //! frontend over this crate rather than the program itself. For the same
@@ -23,6 +24,7 @@
 
 mod address;
 mod atomic;
+mod bluetoothd;
 mod bmap;
 mod config;
 mod device;
@@ -45,6 +47,7 @@ mod timestamp;
 mod watch;
 
 pub use address::Address;
+pub use bluetoothd::battery_level as bluetoothd_battery_level;
 pub use bmap::{
     BATTERY_QUERY as BMAP_QUERY, FrameReader as BmapFrameReader, candidates as bmap_candidates,
 };
