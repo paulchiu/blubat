@@ -85,7 +85,7 @@ entry of `levels`) are omitted when they have no value.
 | `transport` | string, optional | Link the IOKit node reports. |
 | `levels` | object | Any of `main`, `left`, `right`, `case`, each a percentage. Absent keys are omitted, so a single-battery device is `{ "main": 83 }` and AirPods are `{ "left": …, "right": …, "case": … }`. |
 | `charge` | string | `charging`, `discharging` or `unknown`. Only Apple HID devices report it. The human output prints `discharging` as `on battery`, as the POC does. |
-| `source` | string | `iokit`, `system_profiler`, `bmap` or `gatt`. The last two are the background daemon's own reads; see [architecture](architecture.md#the-daemons-own-sources-bmap-and-gatt). |
+| `source` | string | `iokit`, `system_profiler`, `bluetoothd`, `bmap` or `gatt`. The last three are the background daemon's own reads; see [architecture](architecture.md#the-daemons-own-sources-bluetoothd-bmap-and-gatt). |
 | `connected` | boolean | `false` means `levels` is last seen data of unknown age. |
 | `read_at` | string | RFC 3339 in UTC, whole seconds. When blubat took the reading, not when the device reported it. |
 

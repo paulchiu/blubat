@@ -19,8 +19,8 @@
 //! in the workspace that links against it. This module owns everything
 //! blubat-core can be about BMAP without that dependency: the wire format
 //! and which product ids are supported. The file the daemon leaves for every
-//! frontend to merge back in is [`crate::readings`], shared with the GATT
-//! sweep.
+//! frontend to merge back in is [`crate::readings`], shared with the
+//! bluetoothd and GATT sweeps.
 
 use crate::address::Address;
 use crate::device::Device;

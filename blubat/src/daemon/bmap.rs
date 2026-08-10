@@ -1,8 +1,8 @@
 //! The BMAP sweep: the daemon's own read of a Bose headset's battery level
 //! over Bluetooth Classic RFCOMM, left in `readings.toml` for every
 //! frontend to merge (see `blubat_core::bmap` for the wire format and
-//! `blubat_core::readings` for the handoff file it shares with the GATT
-//! sweep).
+//! `blubat_core::readings` for the handoff file it shares with the
+//! bluetoothd and GATT sweeps).
 //!
 //! Only `daemon run` may reach [`IoBluetooth`]. TCC attributes Bluetooth
 //! access to the process responsible for it: under launchd the daemon is

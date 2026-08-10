@@ -25,6 +25,7 @@ use crate::hooks::Outcome;
 use crate::notify::{Desktop, Notifier};
 use crate::{Failure, lock};
 
+use super::bluetoothd::Bluetoothd;
 use super::bmap::IoBluetooth;
 use super::gatt::CoreBluetooth;
 use super::sweep::{self, SweepRequest};
@@ -89,7 +90,7 @@ pub fn serve(paths: &Paths) -> Result<(), Failure> {
     thread::scope(|scope| {
         let worker = scope.spawn(move || poll_loop(resident, config, paths, out, sweeps));
 
-        sweep::execute(&IoBluetooth, &CoreBluetooth, requests);
+        sweep::execute(&Bluetoothd, &IoBluetooth, &CoreBluetooth, requests);
 
         worker.join().expect("the poll loop thread panicked")
     })

@@ -1,6 +1,6 @@
 # architecture
 
-This covers the four data sources and how they tier, connect and disconnect
+This covers the five data sources and how they tier, connect and disconnect
 nudges, the crate layout, and blubat's own state files. See the
 [README](../README.md) for installing and a quick start.
 
@@ -36,10 +36,30 @@ anything only `system_profiler` knows about.
 The dashboard's `R` key sends the same nudge by hand: see [`R` in
 docs/dashboard.md](dashboard.md#refreshing).
 
-## The daemon's own sources: BMAP and GATT, daemon only
+## The daemon's own sources: bluetoothd, BMAP and GATT, daemon only
 
-Two kinds of device are unreported through both sources above, and the
-background daemon reads each of them itself.
+Devices are unreported through both sources above for three different
+reasons, and the background daemon has a read of its own for each.
+
+The first is the levels macOS already has. A headset reports its battery in
+the hands free profile (`AT+IPHONEACCEV`) and other devices over links no
+third party program can open, and `bluetoothd` keeps what it hears, which is
+why System Settings shows a Bose QC at 79% while nothing blubat can call
+carries a number for it. Since Monterey that cache is readable back off the
+paired device itself, so the daemon asks every connected device what macOS
+knows about it and takes the lowest percentage held against it, the same way
+a multi battery device's own level is its emptiest part. This costs no link
+and no waiting, since a cache either answers or does not.
+
+The properties carrying it are private: Apple publishes no battery API on
+`IOBluetoothDevice`, and `batteryPercentSingle` and its siblings have simply
+been there for several releases. Any macOS update may take them away without
+notice, so each is read only where `respondsToSelector` says this system
+still has it, and a system that has none of them sweeps to nothing rather
+than failing. blubat would lose a source it never had a guarantee of and
+keep every other reading it takes. `batteryPercentCase` is left unread: the
+others agree with what System Settings shows and the case value does not
+reliably.
 
 Neither IOKit nor `system_profiler` gives macOS a reliable battery level for
 a Bluetooth Classic headset such as a Bose QC. blubat speaks a slice of
@@ -66,11 +86,14 @@ knows is recorded under that device's address, and one that matches nothing
 is skipped in silence. A device another source already has a level for is
 never read over GATT at all, so this source can only ever fill a gap and
 never displace a direct reading; the one exception is a device GATT itself
-last answered for, which is refreshed every sweep like any other.
+last answered for, which is refreshed every sweep like any other. The
+bluetoothd cache holds back the same way and for a related reason: a level
+read from the device itself beats one macOS wrote down at a time nothing
+records, and only the levels the cache itself last left are refreshed.
 
-Only the background daemon may open either link. macOS attributes Bluetooth
-access through TCC to the process responsible for it: under launchd the
-daemon is responsible for itself and the usage description its own binary
+Only the background daemon may make any of these reads. macOS attributes
+Bluetooth access through TCC to the process responsible for it: under launchd
+the daemon is responsible for itself and the usage description its own binary
 embeds lets TCC prompt for it, but under a terminal the terminal is the
 responsible process and TCC aborts the process outright rather than prompt,
 whatever blubat's own `Info.plist` says. So the TUI, `list`, `status` and
@@ -80,15 +103,19 @@ workspace can name it, and `blubat-core` itself carries neither dependency.
 
 The daemon shares what it reads through a file instead of a channel. Each
 pass, on the same cadence and timeout as the `system_profiler` slow tier,
-runs the BMAP sweep and then the GATT sweep and writes every reading either
-took to `readings.toml` under the state directory; every read of a snapshot,
-from the daemon's own poll loop, the dashboard and every one-shot command,
-merges that file back in as data sources of their own, judged by the same
-`read_at` freshness every other source already is. Each sweep folds only the
-addresses it answered for, so one failing costs the other nothing. A machine
-with no daemon running, or one under an older blubat that never wrote the
-file, simply has no daemon data: never an error, and a TUI run without the
-daemon behaves exactly as it always has.
+runs the bluetoothd sweep, then the BMAP sweep, then the GATT sweep, and
+writes every reading any of them took to `readings.toml` under the state
+directory; every read of a snapshot, from the daemon's own poll loop, the
+dashboard and every one-shot command, merges that file back in as data
+sources of their own, judged by the same `read_at` freshness every other
+source already is. Each sweep folds only the addresses it answered for, so
+one failing costs the others nothing. The cache goes first because the two
+after it ask the device itself, so their answer wins an address they share,
+while a BMAP query wedged against a headset that will not talk leaves this
+pass's cached reading standing rather than a stale carried forward one. A
+machine with no daemon running, or one under an older blubat that never
+wrote the file, simply has no daemon data: never an error, and a TUI run
+without the daemon behaves exactly as it always has.
 
 ## Status
 
@@ -106,13 +133,14 @@ pipeline.
 
 ## Layout
 
-- `blubat-core`: the device model, all four data sources, the poller, the
+- `blubat-core`: the device model, all five data sources, the poller, the
   event engine and the config types. Depends on no terminal library, so a
   frontend other than the TUI stays buildable. Its `bmap` module owns the
   BMAP wire format, its `gatt` module the name matching and the Battery Level
-  value, and its `readings` module the `readings.toml` handoff the two share,
+  value, its `bluetoothd` module what a device's cached percentages amount
+  to, and its `readings` module the `readings.toml` handoff the three share,
   but none of them IOBluetooth or CoreBluetooth itself; see
-  [above](#the-daemons-own-sources-bmap-and-gatt).
+  [above](#the-daemons-own-sources-bluetoothd-bmap-and-gatt).
 - `blubat`: the binary, holding the CLI, the TUI, the daemon, the notifier,
   the hook runner and the launchd plumbing over that core. It owns argument
   parsing, rendering and exit codes, and nothing else. The dashboard is one
@@ -123,9 +151,9 @@ pipeline.
   effects layer the loop calls, never in `update`. The daemon drives that
   same layer with no view attached, which is what makes resident mode the
   dashboard minus one component rather than a second implementation of it.
-  `daemon::bmap`, `daemon::gatt` and the `daemon::sweep` that runs both are
-  the one part of it with no counterpart in the dashboard, reachable only
-  from `daemon::run`.
+  `daemon::bluetoothd`, `daemon::bmap`, `daemon::gatt` and the
+  `daemon::sweep` that runs all three are the one part of it with no
+  counterpart in the dashboard, reachable only from `daemon::run`.
 
 ## State files
 
@@ -133,10 +161,10 @@ blubat writes one thing into the config file and nothing else: `h` on the
 [dashboard](dashboard.md) maintains `[dashboard] hidden`, leaving the rest of
 the file, its comments included, exactly as it was. Everything else it
 creates is its own state, under `~/.local/state/blubat/`: the event engine's
-`state.toml`, the daemon's own `readings.toml` handoff from its BMAP and GATT
-sweeps,
-the `watches/` directory `blubat wait` may drop into, the `tui.lock` and
-`daemon.lock` files its resident modes hold while they run, and the two logs
+`state.toml`, the daemon's own `readings.toml` handoff from its bluetoothd,
+BMAP and GATT sweeps, the `watches/` directory `blubat wait` may drop into,
+the `tui.lock` and `daemon.lock` files its resident modes hold while they
+run, and the two logs
 the daemon writes under launchd. The one file outside both is the LaunchAgent
 plist, written to `~/Library/LaunchAgents/` by `daemon install` and by
 nothing else.

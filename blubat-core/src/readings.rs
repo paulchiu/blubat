@@ -1,13 +1,14 @@
 //! The daemon's handoff file: every battery level its own sweeps read, left
 //! in `readings.toml` for every frontend to merge back in.
 //!
-//! Two sources write here. [`crate::bmap`] asks a Bose headset over Bluetooth
-//! Classic RFCOMM and [`crate::gatt`] reads a BLE peripheral's own Battery
-//! Service, and each reading names which of the two took it. Neither can be
-//! reached from this crate: opening either link needs a framework only the
-//! daemon process may touch (see those modules for why), so this is the whole
-//! of what `blubat-core` can be about a sweep. The record, the file, and the
-//! precedence a reading merges back in under.
+//! Three sources write here. [`crate::bluetoothd`] reads back the levels
+//! macOS itself has cached, [`crate::bmap`] asks a Bose headset over
+//! Bluetooth Classic RFCOMM and [`crate::gatt`] reads a BLE peripheral's own
+//! Battery Service, and each reading names which of the three took it. None
+//! can be reached from this crate: every one of them needs a framework only
+//! the daemon process may touch (see those modules for why), so this is the
+//! whole of what `blubat-core` can be about a sweep. The record, the file,
+//! and the precedence a reading merges back in under.
 
 use std::fs;
 use std::path::Path;
@@ -49,6 +50,16 @@ impl Reading {
     /// A level a BLE peripheral's Battery Service answered with.
     pub fn gatt(address: Address, name: impl Into<String>, level: u8, read_at: Timestamp) -> Self {
         Self::taken(Source::Gatt, address, name, level, read_at)
+    }
+
+    /// A level read back out of what macOS's own `bluetoothd` had cached.
+    pub fn bluetoothd(
+        address: Address,
+        name: impl Into<String>,
+        level: u8,
+        read_at: Timestamp,
+    ) -> Self {
+        Self::taken(Source::Bluetoothd, address, name, level, read_at)
     }
 
     /// Always connected: a device that did not answer never reaches here.
@@ -137,21 +148,30 @@ pub fn load(path: &Path) -> Vec<Reading> {
         .unwrap_or_default()
 }
 
+/// Whether a source may only ever fill a gap rather than displace a level.
+///
+/// GATT reads arbitrary third party peripherals and bluetoothd reads a cache
+/// macOS filled from who knows when, so for both of them a level another
+/// source already has is the better reading. Only a level the source itself
+/// last left is refreshed, which is what keeps a device it has taken over
+/// moving instead of frozen at its first reading.
+fn fills_gaps(source: Source) -> bool {
+    matches!(source, Source::Gatt | Source::Bluetoothd)
+}
+
 /// Whether the device already merged in outranks this reading.
 ///
 /// IOKit is authoritative over every daemon sweep, the same way it already is
 /// over `system_profiler` in [`crate::snapshot::merge`]. A BMAP reading beats
 /// everything below that, since the only battery value `system_profiler` ever
-/// carries for a supported Bose is a stale placeholder. GATT is the other way
-/// round: its devices are arbitrary third party peripherals, so a level
-/// another source already has for one is the better reading and the sweep
-/// must never displace it. Only a level GATT itself last left is refreshed,
-/// which is also what keeps a device this source has taken over readable on
-/// the sweep after (see [`crate::gatt::candidates`], which will not offer a
-/// device up twice unless the level on it is GATT's own).
+/// carries for a supported Bose is a stale placeholder. The two gap filling
+/// sources are the other way round, holding back wherever anything else has
+/// already answered (see [`fills_gaps`], and [`crate::gatt::candidates`],
+/// which will not offer a device up twice unless the level on it is GATT's
+/// own).
 fn outranks(device: &Device, reading: &Reading) -> bool {
     device.source == Source::IoKit
-        || (reading.source == Source::Gatt && device.source != Source::Gatt && device.has_battery())
+        || (fills_gaps(reading.source) && device.source != reading.source && device.has_battery())
 }
 
 /// Overlays the daemon's sweep readings onto an already merged snapshot.
@@ -249,6 +269,10 @@ mod tests {
         Reading::gatt(address(KEYS), "MX Keys M Mac", level, READ_AT)
     }
 
+    fn cached_reading(level: u8) -> Reading {
+        Reading::bluetoothd(address(PRINCE), "Bose QC Headphones", level, READ_AT)
+    }
+
     fn snapshot(devices: Vec<Device>) -> Snapshot {
         Snapshot {
             read_at: READ_AT,
@@ -323,18 +347,17 @@ mod tests {
     }
 
     #[test]
-    fn both_sources_share_the_one_file_and_read_back_naming_themselves() {
+    fn every_source_shares_the_one_file_and_reads_back_naming_itself() {
         let scratch = Scratch::new();
+        let swept = [reading(50), keys_reading(95), cached_reading(79)];
 
-        save(&scratch.readings_file(), &[reading(50), keys_reading(95)]).expect("writes");
+        save(&scratch.readings_file(), &swept).expect("writes");
 
         let contents = fs::read_to_string(scratch.readings_file()).expect("a written file");
         assert!(contents.contains("source = \"bmap\""), "{contents}");
         assert!(contents.contains("source = \"gatt\""), "{contents}");
-        assert_eq!(
-            load(&scratch.readings_file()),
-            [reading(50), keys_reading(95)]
-        );
+        assert!(contents.contains("source = \"bluetoothd\""), "{contents}");
+        assert_eq!(load(&scratch.readings_file()), swept);
     }
 
     #[test]
@@ -440,8 +463,8 @@ mod tests {
     }
 
     #[test]
-    fn an_address_iokit_already_reported_is_left_untouched_by_either_source() {
-        for reading in [reading(76), keys_reading(95)] {
+    fn an_address_iokit_already_reported_is_left_untouched_by_any_source() {
+        for reading in [reading(76), keys_reading(95), cached_reading(79)] {
             let held = levelled(12, device("Held", reading.address.as_str(), Source::IoKit));
 
             let merged = merge(snapshot(vec![held.clone()]), &[reading]);
@@ -452,15 +475,17 @@ mod tests {
 
     #[test]
     fn a_gatt_reading_never_shadows_a_device_another_source_already_has_a_level_for() {
-        let reported = levelled(40, device("MX Keys M Mac", KEYS, Source::SystemProfiler));
+        for source in [Source::SystemProfiler, Source::Bmap, Source::Bluetoothd] {
+            let reported = levelled(40, device("MX Keys M Mac", KEYS, source));
 
-        let merged = merge(snapshot(vec![reported.clone()]), &[keys_reading(95)]);
+            let merged = merge(snapshot(vec![reported.clone()]), &[keys_reading(95)]);
 
-        assert_eq!(
-            merged.devices,
-            [reported],
-            "a direct reading is the better one, however fresh the sweep is"
-        );
+            assert_eq!(
+                merged.devices,
+                [reported],
+                "{source} already answered, and this sweep being fresher does not make it better"
+            );
+        }
     }
 
     #[test]
@@ -481,6 +506,56 @@ mod tests {
 
         assert_eq!(merged.devices[0].source, Source::Gatt);
         assert_eq!(merged.devices[0].levels.main, Some(95));
+    }
+
+    #[test]
+    fn a_bluetoothd_reading_never_shadows_a_device_another_source_already_has_a_level_for() {
+        for source in [Source::SystemProfiler, Source::Bmap, Source::Gatt] {
+            let reported = levelled(40, device("Bose QC Headphones", PRINCE, source));
+
+            let merged = merge(snapshot(vec![reported.clone()]), &[cached_reading(79)]);
+
+            assert_eq!(
+                merged.devices,
+                [reported],
+                "{source} answered for itself, which beats anything macOS cached"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bluetoothd_reading_refreshes_the_level_bluetoothd_itself_last_left() {
+        let cached = levelled(40, device("Bose QC Headphones", PRINCE, Source::Bluetoothd));
+
+        let merged = merge(snapshot(vec![cached]), &[cached_reading(79)]);
+
+        assert_eq!(merged.devices[0].levels.main, Some(79));
+        assert_eq!(merged.devices[0].source, Source::Bluetoothd);
+    }
+
+    #[test]
+    fn a_bluetoothd_reading_fills_in_a_device_no_source_has_a_level_for() {
+        let merged = merge(
+            snapshot(vec![profiler_placeholder()]),
+            &[cached_reading(79)],
+        );
+
+        assert_eq!(merged.devices[0].source, Source::Bluetoothd);
+        assert_eq!(merged.devices[0].levels.main, Some(79));
+    }
+
+    #[test]
+    fn a_bmap_reading_displaces_a_level_the_cache_left() {
+        let cached = levelled(40, device("Bose QC Headphones", PRINCE, Source::Bluetoothd));
+
+        let merged = merge(snapshot(vec![cached]), &[reading(76)]);
+
+        assert_eq!(merged.devices[0].levels.main, Some(76));
+        assert_eq!(
+            merged.devices[0].source,
+            Source::Bmap,
+            "the headset's own answer is better than what macOS had cached"
+        );
     }
 
     #[test]

@@ -3,6 +3,7 @@
 //! Nothing here starts by itself. Installing the agent is a command the user
 //! runs, and until they do, blubat is a program that exits when it is finished.
 
+mod bluetoothd;
 mod bmap;
 mod gatt;
 mod launchd;

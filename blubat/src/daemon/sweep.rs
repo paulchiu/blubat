@@ -1,17 +1,17 @@
-//! The daemon's own battery reads, scheduled as one errand: the BMAP query
+//! The daemon's own battery reads, scheduled as one errand: the levels
+//! [`super::bluetoothd`] reads back out of macOS's own cache, the BMAP query
 //! [`super::bmap`] makes over RFCOMM and the Battery Service read
-//! [`super::gatt`] makes over BLE, folded into the one `readings.toml` both
-//! share (see `blubat_core::readings`).
+//! [`super::gatt`] makes over BLE, folded into the one `readings.toml` all
+//! three share (see `blubat_core::readings`).
 //!
-//! One request drives both, because both want the same thing at the same
+//! One request drives all three, because they want the same thing at the same
 //! time: the devices the poll loop just read, on the `system_profiler`
 //! cadence, once. Splitting them would double the scheduling in
-//! [`super::run`] to buy nothing, since neither can run while the other is
+//! [`super::run`] to buy nothing, since none can run while another is
 //! using the main thread anyway. What they must not do is interfere, so
-//! [`swept`] runs the Bose query first and folds its answer in before the
-//! GATT sweep is even started: a peripheral that will not connect costs the
-//! headset nothing, and a headset that will not answer costs the peripherals
-//! nothing.
+//! [`swept`] folds each sweep's answer in before the next is even started: a
+//! peripheral that will not connect costs the headset nothing, and a headset
+//! that will not answer costs the peripherals nothing.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, SyncSender};
@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use blubat_core::{Device, SweepReading, Timestamp, carry_forward_readings};
 
+use super::bluetoothd::{self, Cache};
 use super::bmap::{self, Channel};
 use super::gatt::{self, Peripherals};
 
@@ -61,18 +62,24 @@ pub(crate) fn offer(sweeps: &SyncSender<SweepRequest>, request: SweepRequest) {
     let _ = sweeps.try_send(request);
 }
 
-/// Both sweeps, folded into whatever the previous pass left on disk.
+/// All three sweeps, folded into whatever the previous pass left on disk.
 ///
-/// Either sweep only ever answers for the devices it reached this time; one
-/// it missed (a transient failure, a timeout, a disconnect) keeps its last
+/// A sweep only ever answers for the devices it reached this time; one it
+/// missed (a transient failure, a timeout, a disconnect) keeps its last
 /// known reading rather than vanishing, via
 /// [`blubat_core::carry_forward_readings`]. Folding once per sweep rather
-/// than once per pass is what keeps the two out of each other's way: each
+/// than once per pass is what keeps the three out of each other's way: each
 /// fold refreshes only the addresses that sweep answered for and carries
-/// every other address, the other source's included, forward untouched.
+/// every other address, the other sources' included, forward untouched.
 /// Split out from [`execute`] so this is exercised directly against fakes,
 /// without a thread or a real file.
+///
+/// The cache is read first because the two after it ask the device itself, so
+/// their answer is the better one for an address they share, and a sweep
+/// wedged against a device that will not talk leaves this pass's cached
+/// reading standing rather than a carried forward one.
 pub(crate) fn swept(
+    cache: &dyn Cache,
     channel: &dyn Channel,
     peripherals: &dyn Peripherals,
     devices: &[Device],
@@ -80,8 +87,10 @@ pub(crate) fn swept(
     timeout: Duration,
     previous: Vec<SweepReading>,
 ) -> Vec<SweepReading> {
+    let after_cache = carry_forward_readings(previous, bluetoothd::sweep(cache, read_at), devices);
+
     let after_bmap = carry_forward_readings(
-        previous,
+        after_cache,
         bmap::sweep(channel, devices, read_at, timeout),
         devices,
     );
@@ -106,6 +115,7 @@ pub(crate) fn swept(
 /// that fails is as silent as an empty sweep; the next pass folds in over
 /// whatever is on disk either way.
 pub(crate) fn execute(
+    cache: &dyn Cache,
     channel: &dyn Channel,
     peripherals: &dyn Peripherals,
     requests: Receiver<SweepRequest>,
@@ -113,6 +123,7 @@ pub(crate) fn execute(
     for request in requests {
         let previous = blubat_core::load_readings(&request.readings_file);
         let readings = swept(
+            cache,
             channel,
             peripherals,
             &request.devices,
@@ -134,6 +145,7 @@ mod tests {
 
     const PRINCE: &str = "bc-87-fa-18-b0-b7";
     const KEYS: &str = "de-df-38-f0-46-9b";
+    const TRACKPAD: &str = "30-82-16-f2-24-90";
     const READ_AT: Timestamp = Timestamp::from_unix(1_785_643_199);
 
     fn address(raw: &str) -> Address {
@@ -172,11 +184,41 @@ mod tests {
         SweepReading::gatt(address(KEYS), "MX Keys M Mac", level, READ_AT)
     }
 
+    fn cached_reading(level: u8) -> SweepReading {
+        SweepReading::bluetoothd(address(PRINCE), "Bose QC Headphones", level, READ_AT)
+    }
+
     fn sweep_request(devices: Vec<Device>) -> SweepRequest {
         SweepRequest {
             devices,
             readings_file: PathBuf::from("/dev/null"),
             timeout: Duration::ZERO,
+        }
+    }
+
+    /// A cache holding a percentage per device it was built with.
+    #[derive(Default)]
+    struct FakeCache(Vec<bluetoothd::Cached>);
+
+    impl FakeCache {
+        fn holding(devices: Vec<(&Device, u8)>) -> Self {
+            Self(
+                devices
+                    .into_iter()
+                    .map(|(device, percentage)| bluetoothd::Cached {
+                        address: device.address.as_str().to_string(),
+                        name: device.name.clone(),
+                        connected: true,
+                        percentages: vec![percentage],
+                    })
+                    .collect(),
+            )
+        }
+    }
+
+    impl Cache for FakeCache {
+        fn paired(&self) -> Vec<bluetoothd::Cached> {
+            self.0.clone()
         }
     }
 
@@ -227,14 +269,16 @@ mod tests {
         }
     }
 
-    /// One pass over both sources, with nothing on disk from before it.
+    /// One pass over every source, with nothing on disk from before it.
     fn pass(
+        cache: &dyn Cache,
         channel: &dyn Channel,
         peripherals: &dyn Peripherals,
         devices: &[Device],
         previous: Vec<SweepReading>,
     ) -> Vec<SweepReading> {
         swept(
+            cache,
             channel,
             peripherals,
             devices,
@@ -245,20 +289,30 @@ mod tests {
     }
 
     #[test]
-    fn one_pass_records_both_sources_in_the_one_set_of_readings() {
+    fn one_pass_records_every_source_in_the_one_set_of_readings() {
+        let trackpad = device("Magic Trackpad", TRACKPAD, None, None);
         let readings = pass(
+            &FakeCache::holding(vec![(&trackpad, 96)]),
             &FakeChannel::answering(vec![Some(76)]),
             &FakePeripherals::answering(vec![("MX Keys M Mac", 95)]),
-            &[bose(), keys()],
+            &[bose(), keys(), trackpad.clone()],
             Vec::new(),
         );
 
-        assert_eq!(readings, [bmap_reading(76), gatt_reading(95)]);
+        assert_eq!(
+            readings,
+            [
+                SweepReading::bluetoothd(address(TRACKPAD), "Magic Trackpad", 96, READ_AT),
+                bmap_reading(76),
+                gatt_reading(95)
+            ]
+        );
     }
 
     #[test]
     fn a_gatt_sweep_that_answers_nothing_leaves_the_bose_reading_alone() {
         let readings = pass(
+            &FakeCache::default(),
             &FakeChannel::answering(vec![Some(76)]),
             &FakePeripherals::default(),
             &[bose(), keys()],
@@ -271,6 +325,7 @@ mod tests {
     #[test]
     fn a_bose_that_would_not_answer_does_not_cost_the_peripherals_their_reading() {
         let readings = pass(
+            &FakeCache::default(),
             &FakeChannel::answering(vec![None]),
             &FakePeripherals::answering(vec![("MX Keys M Mac", 95)]),
             &[bose(), keys()],
@@ -281,9 +336,53 @@ mod tests {
     }
 
     #[test]
+    fn the_bose_own_answer_beats_the_cached_one_for_the_same_pass() {
+        let readings = pass(
+            &FakeCache::holding(vec![(&bose(), 79)]),
+            &FakeChannel::answering(vec![Some(76)]),
+            &FakePeripherals::default(),
+            &[bose()],
+            Vec::new(),
+        );
+
+        assert_eq!(
+            readings,
+            [bmap_reading(76)],
+            "the headset answered for itself, so the cache's reading gives way"
+        );
+    }
+
+    #[test]
+    fn a_cached_reading_replaces_a_bmap_reading_carried_forward_from_an_earlier_pass() {
+        let devices = [bose()];
+        let first = pass(
+            &FakeCache::default(),
+            &FakeChannel::answering(vec![Some(76)]),
+            &FakePeripherals::default(),
+            &devices,
+            Vec::new(),
+        );
+
+        let second = pass(
+            &FakeCache::holding(vec![(&bose(), 79)]),
+            &FakeChannel::answering(vec![None]),
+            &FakePeripherals::default(),
+            &devices,
+            first,
+        );
+
+        assert_eq!(
+            second,
+            [cached_reading(79)],
+            "a headset that has stopped answering still moves, on what macOS knows"
+        );
+    }
+
+    #[test]
     fn a_miss_on_the_second_pass_carries_the_first_passes_readings_forward() {
         let devices = [bose(), keys()];
         let first = pass(
+            &FakeCache::default(),
             &FakeChannel::answering(vec![Some(76)]),
             &FakePeripherals::answering(vec![("MX Keys M Mac", 95)]),
             &devices,
@@ -291,6 +390,7 @@ mod tests {
         );
 
         let second = swept(
+            &FakeCache::default(),
             &FakeChannel::answering(vec![None]),
             &FakePeripherals::default(),
             &devices,
@@ -308,6 +408,7 @@ mod tests {
     #[test]
     fn a_device_that_actually_disconnected_between_passes_is_carried_forward_as_last_seen() {
         let first = pass(
+            &FakeCache::default(),
             &FakeChannel::default(),
             &FakePeripherals::answering(vec![("MX Keys M Mac", 95)]),
             &[keys()],
@@ -319,6 +420,7 @@ mod tests {
             ..keys()
         };
         let second = swept(
+            &FakeCache::default(),
             &FakeChannel::default(),
             &FakePeripherals::default(),
             &[gone],

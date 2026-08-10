@@ -19,6 +19,9 @@ pub enum Source {
     /// The daemon's own read of a BLE peripheral's Battery Service level.
     #[serde(rename = "gatt")]
     Gatt,
+    /// A level macOS's own `bluetoothd` cached, read back off the paired device.
+    #[serde(rename = "bluetoothd")]
+    Bluetoothd,
 }
 
 impl fmt::Display for Source {
@@ -28,6 +31,7 @@ impl fmt::Display for Source {
             Source::SystemProfiler => "system_profiler",
             Source::Bmap => "bmap",
             Source::Gatt => "gatt",
+            Source::Bluetoothd => "bluetoothd",
         })
     }
 }
@@ -383,6 +387,7 @@ mod tests {
         assert_eq!(Source::SystemProfiler.to_string(), "system_profiler");
         assert_eq!(Source::Bmap.to_string(), "bmap");
         assert_eq!(Source::Gatt.to_string(), "gatt");
+        assert_eq!(Source::Bluetoothd.to_string(), "bluetoothd");
         assert_eq!(
             serde_json::to_string(&Source::SystemProfiler).expect("serialisable"),
             "\"system_profiler\""
@@ -394,6 +399,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Source::Gatt).expect("serialisable"),
             "\"gatt\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Source::Bluetoothd).expect("serialisable"),
+            "\"bluetoothd\""
         );
     }
 
