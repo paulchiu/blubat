@@ -61,6 +61,19 @@ keep every other reading it takes. `batteryPercentCase` is left unread: the
 others agree with what System Settings shows and the case value does not
 reliably.
 
+That read runs in a short-lived helper process, `blubat daemon cached-levels`,
+one spawned per sweep the way the slow tier spawns `system_profiler`, rather
+than in the daemon itself. A process only ever sees the cache as it stood when
+IOBluetooth initialised in it: twenty minute probes against a cache that was
+visibly changing refreshed nothing, whatever was done to make them (run loop
+pumping, connect notifications, the private `updateFromServer`), and a Bose
+QC's percentage cleared itself to 0 within a minute of launch. A daemon
+reading in process therefore reported its launch time snapshot for as long as
+it ran. A fresh process always reads the current values, so the helper does
+the one read and exits, and a helper that cannot be spawned, outlasts the
+sweep's timeout, exits badly or writes anything unexpected is simply no
+readings that pass.
+
 Neither IOKit nor `system_profiler` gives macOS a reliable battery level for
 a Bluetooth Classic headset such as a Bose QC. blubat speaks a slice of
 Bose's own BMAP protocol over RFCOMM instead, read only, one GET query per
@@ -98,8 +111,11 @@ embeds lets TCC prompt for it, but under a terminal the terminal is the
 responsible process and TCC aborts the process outright rather than prompt,
 whatever blubat's own `Info.plist` says. So the TUI, `list`, `status` and
 `wait` never touch IOBluetooth or CoreBluetooth at all: the code that does
-lives behind `daemon::run` in the binary crate and nothing else in the
-workspace can name it, and `blubat-core` itself carries neither dependency.
+lives behind `daemon::run` and the hidden `daemon cached-levels` its sweep
+spawns, and nothing else in the workspace can name it, while `blubat-core`
+itself carries neither dependency. A child inherits the responsibility macOS
+assigns, so the helper reads under the grant the daemon that spawned it
+holds, and reads under the terminal's when it is run by hand.
 
 The daemon shares what it reads through a file instead of a channel. Each
 pass, on the same cadence and timeout as the `system_profiler` slow tier,
@@ -153,7 +169,8 @@ pipeline.
   dashboard minus one component rather than a second implementation of it.
   `daemon::bluetoothd`, `daemon::bmap`, `daemon::gatt` and the
   `daemon::sweep` that runs all three are the one part of it with no
-  counterpart in the dashboard, reachable only from `daemon::run`.
+  counterpart in the dashboard, reachable only from `daemon::run` and, for
+  the cache read, the helper process its sweep spawns.
 
 ## State files
 

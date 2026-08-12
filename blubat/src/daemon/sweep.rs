@@ -24,7 +24,7 @@ use super::bmap::{self, Channel};
 use super::gatt::{self, Peripherals};
 
 /// One pass the poll loop wants run: the devices to check, the file to fold
-/// the result into, and how long either source may wait for an answer.
+/// the result into, and how long any one source may wait for an answer.
 ///
 /// Plain and owned rather than borrowed, since it crosses from the worker
 /// thread that finds it due to the main thread that actually runs it.
@@ -87,7 +87,11 @@ pub(crate) fn swept(
     timeout: Duration,
     previous: Vec<SweepReading>,
 ) -> Vec<SweepReading> {
-    let after_cache = carry_forward_readings(previous, bluetoothd::sweep(cache, read_at), devices);
+    let after_cache = carry_forward_readings(
+        previous,
+        bluetoothd::sweep(cache, read_at, timeout),
+        devices,
+    );
 
     let after_bmap = carry_forward_readings(
         after_cache,
@@ -217,7 +221,7 @@ mod tests {
     }
 
     impl Cache for FakeCache {
-        fn paired(&self) -> Vec<bluetoothd::Cached> {
+        fn paired(&self, _timeout: Duration) -> Vec<bluetoothd::Cached> {
             self.0.clone()
         }
     }
