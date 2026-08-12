@@ -31,6 +31,14 @@ pub enum Command {
     Uninstall,
     /// Report whether the LaunchAgent is installed, loaded and running.
     Status,
+    /// Print what macOS has cached for every paired device, as JSON.
+    ///
+    /// The sweep's own helper rather than anything to run by hand: from a
+    /// terminal this may abort under TCC, since the terminal is then the
+    /// process macOS holds responsible for the Bluetooth access, while the
+    /// daemon's children read under the daemon's own grant.
+    #[command(hide = true)]
+    CachedLevels,
 }
 
 /// Runs one `blubat daemon` subcommand.
@@ -44,5 +52,6 @@ pub fn run(command: &Command, paths: &Paths) -> Result<(), Failure> {
         }
         Command::Uninstall => launchd::uninstall(&launchd::Cli, &launchd::plist_file()?, &mut out),
         Command::Status => launchd::status(&launchd::Cli, &launchd::plist_file()?, &mut out),
+        Command::CachedLevels => bluetoothd::print_cache(&mut out),
     }
 }

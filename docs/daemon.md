@@ -36,7 +36,10 @@ permission to whichever process is responsible: under launchd that is this
 binary itself, and the `NSBluetoothAlwaysUsageDescription` `build.rs` embeds
 in it is what lets TCC create the row for blubat under System Settings →
 Privacy & Security → Bluetooth on first sweep rather than aborting the
-process. That
+process. The cache read runs in a short-lived child the sweep spawns, for the
+reason [architecture.md
+gives](architecture.md#the-daemons-own-sources-bluetoothd-bmap-and-gatt), and
+that child reads under the same grant, since responsibility is inherited. That
 row has to be granted once, the same as any other app's; running `blubat`
 bare in a terminal never asks for it, because the terminal, not blubat, would
 be the process TCC held responsible.

@@ -16,8 +16,8 @@ armed and fired state, and each hook's debounce clock, live in
 `charged` additionally needs a device that is not reporting itself as
 draining, since it says a charge has finished: an earbud put back in its case
 lifts the device's level without being anything to announce. Devices that
-report no charge state at all, which is every one `system_profiler`, `bmap`
-or `gatt` sees, raise it on the level alone.
+report no charge state at all, which is every one `system_profiler`,
+`bluetoothd`, `bmap` or `gatt` sees, raise it on the level alone.
 
 `[notifications]` switches the banners per event and nothing else: an event a
 toggle silences still runs its hooks, since the two are separate subscribers.
@@ -52,7 +52,7 @@ the timeout is blubat's to enforce and lasts only as long as blubat does.
 | `BLUBAT_LEVEL` | Level in percent that raised the event |
 | `BLUBAT_PREVIOUS_LEVEL` | Last level seen before it |
 | `BLUBAT_CHARGING` | `1`, `0`, or `unknown` where no source knows |
-| `BLUBAT_SOURCE` | `iokit`, `system_profiler`, `bmap` or `gatt` |
+| `BLUBAT_SOURCE` | `iokit`, `system_profiler`, `bluetoothd`, `bmap` or `gatt` |
 | `BLUBAT_THRESHOLD` | The threshold crossed, empty for the events that watch no level |
 
 ```sh

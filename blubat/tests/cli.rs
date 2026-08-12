@@ -152,6 +152,15 @@ fn daemon_lists_the_four_things_it_can_be_asked_to_do() {
     }
 }
 
+/// `cached-levels` is the sweep's own helper rather than something to run, and
+/// running it here would ask the terminal for Bluetooth and be aborted for it.
+#[test]
+fn the_helper_the_sweep_spawns_is_kept_out_of_the_daemons_help() {
+    let printed = stdout(&blubat(&["daemon", "--help"]));
+
+    assert!(!printed.contains("cached-levels"), "{printed}");
+}
+
 #[test]
 fn wait_says_it_may_hand_the_wait_to_a_daemon() {
     let printed = stdout(&blubat(&["wait", "--help"]));
