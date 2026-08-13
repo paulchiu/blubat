@@ -25,6 +25,8 @@
 //! usefully is simply no reading for that peripheral this sweep, the
 //! one-attempt-no-retry discipline every other daemon sweep keeps.
 
+#![allow(unsafe_code)]
+
 use std::cell::Cell;
 use std::time::{Duration, Instant};
 

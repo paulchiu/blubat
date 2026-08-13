@@ -34,6 +34,8 @@
 //! use, so [`sweep`] is exercised below with a fake and none of its tests
 //! need a paired Bose headset or Bluetooth permission of their own.
 
+#![allow(unsafe_code)]
+
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::time::{Duration, Instant};

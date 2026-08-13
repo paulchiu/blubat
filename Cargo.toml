@@ -2,6 +2,9 @@
 resolver = "3"
 members = ["blubat-core", "blubat"]
 
+[workspace.lints.rust]
+unsafe_code = "deny"
+
 [workspace.package]
 version = "0.13.1"
 edition = "2024"
