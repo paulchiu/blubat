@@ -308,6 +308,7 @@ fn field(printed: &str, name: &str) -> Option<String> {
 ///
 /// `bootstrap` and `bootout` name a domain and a service in it; `load` and
 /// `unload` have been deprecated since OS X 10.10.
+#[allow(unsafe_code)]
 fn domain() -> String {
     // SAFETY: `getuid` reads no memory blubat owns and cannot fail.
     format!("gui/{}", unsafe { libc::getuid() })

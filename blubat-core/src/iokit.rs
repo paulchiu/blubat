@@ -4,6 +4,8 @@
 //! this is both the only source for them and, at well under a millisecond, the
 //! one cheap enough to sit on a poll tick.
 
+#![allow(unsafe_code)]
+
 use std::collections::HashMap;
 use std::ffi::CString;
 

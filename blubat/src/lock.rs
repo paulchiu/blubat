@@ -95,6 +95,7 @@ fn release(file: &File) {
 }
 
 /// Takes `operation` on `file` without waiting, answering whether it was given.
+#[allow(unsafe_code)]
 fn locked(file: &File, operation: i32) -> bool {
     // SAFETY: `flock` is given a descriptor this process owns and reads no
     // memory blubat owns. Non-blocking, so it cannot hold the caller up.

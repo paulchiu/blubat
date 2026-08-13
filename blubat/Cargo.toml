@@ -12,6 +12,9 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 blubat-core = { path = "../blubat-core", version = "0.13.1" }
 clap = { workspace = true }

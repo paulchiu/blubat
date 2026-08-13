@@ -10,6 +10,8 @@
 //! device that reports through `system_profiler` alone still arrives on the
 //! ordinary tick.
 
+#![allow(unsafe_code)]
+
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::mpsc::Sender;
 use std::thread;

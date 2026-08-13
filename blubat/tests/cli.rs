@@ -323,6 +323,7 @@ impl Scratch {
 
     /// A daemon lock this scratch's blubat sees as a running daemon, held for
     /// as long as the returned file is open.
+    #[allow(unsafe_code)]
     fn daemon_lock(&self) -> File {
         fs::create_dir_all(self.state()).expect("a state directory");
 
