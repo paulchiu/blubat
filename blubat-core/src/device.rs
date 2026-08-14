@@ -205,6 +205,15 @@ impl Device {
     pub fn is_stale(&self, stale_after: Duration, now: Timestamp) -> bool {
         now >= self.read_at.plus(stale_after)
     }
+
+    /// Whether this device belongs in the dashboard's inactive section.
+    ///
+    /// True once it is disconnected, or once its newest reading is older than
+    /// `inactive_after`: macOS can keep reporting a device connected long
+    /// after it has gone quiet, so the split cannot be `connected` alone.
+    pub fn is_inactive(&self, inactive_after: Duration, now: Timestamp) -> bool {
+        !self.connected || now >= self.read_at.plus(inactive_after)
+    }
 }
 
 #[cfg(test)]
@@ -342,6 +351,31 @@ mod tests {
         assert!(!trackpad.is_stale(window, Timestamp::from_unix(1_599)));
         assert!(trackpad.is_stale(window, Timestamp::from_unix(1_600)));
         assert!(trackpad.is_stale(window, Timestamp::from_unix(9_000)));
+    }
+
+    #[test]
+    fn a_connected_device_is_inactive_once_its_reading_has_gone_quiet() {
+        let window = Duration::from_secs(3_600);
+        let trackpad = Device {
+            read_at: Timestamp::from_unix(1_000),
+            ..device("Paul\u{2019}s Magic Trackpad", "30-82-16-f2-24-90")
+        };
+
+        assert!(!trackpad.is_inactive(window, Timestamp::from_unix(4_599)));
+        assert!(trackpad.is_inactive(window, Timestamp::from_unix(4_600)));
+        assert!(trackpad.is_inactive(window, Timestamp::from_unix(9_000)));
+    }
+
+    #[test]
+    fn a_disconnected_device_is_inactive_however_fresh_its_reading_is() {
+        let window = Duration::from_secs(3_600);
+        let disconnected = Device {
+            connected: false,
+            read_at: Timestamp::from_unix(1_000),
+            ..device("MX Keys", "de:df:38:f0:46:9b")
+        };
+
+        assert!(disconnected.is_inactive(window, Timestamp::from_unix(1_000)));
     }
 
     #[test]

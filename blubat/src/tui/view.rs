@@ -4,7 +4,9 @@
 //! hidden devices, the order and the split into connected and disconnected all
 //! live here, so every one of them can be exercised without a frame.
 
-use blubat_core::Device;
+use std::time::Duration;
+
+use blubat_core::{Device, Timestamp};
 
 /// The order the table lists devices in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -201,12 +203,20 @@ impl<'a> Rows<'a> {
     ///
     /// `hide_inactive` drops the whole section rather than filtering it out
     /// device by device, so a device hidden this way is still connected as
-    /// far as the status line and the alert count are concerned.
-    pub fn of(devices: &'a [Device], view: &View) -> Self {
+    /// far as the status line and the alert count are concerned. The split
+    /// itself is [`Device::is_inactive`] against `inactive_after` and `now`,
+    /// not raw `connected`, so a device macOS still reports connected but
+    /// that has gone quiet still lands in the inactive section.
+    pub fn of(
+        devices: &'a [Device],
+        view: &View,
+        inactive_after: Duration,
+        now: Timestamp,
+    ) -> Self {
         let (active, inactive) = devices
             .iter()
             .filter(|device| view.shows(device))
-            .partition::<Vec<_>, _>(|device| device.connected);
+            .partition::<Vec<_>, _>(|device| !device.is_inactive(inactive_after, now));
 
         Self {
             active: sorted(active, view.sort, view.direction),
@@ -284,6 +294,14 @@ mod tests {
     use super::*;
 
     const READ_AT: i64 = 1_785_643_199;
+    /// Far longer than any gap the fixtures below leave between `READ_AT` and
+    /// `now`, so a device's freshness never accidentally drives the split in
+    /// a test that is not about `inactive_after` itself.
+    const INACTIVE_AFTER: Duration = Duration::from_secs(3_600);
+
+    fn now() -> Timestamp {
+        Timestamp::from_unix(READ_AT)
+    }
 
     fn device(name: &str, address: &str, level: Option<u8>) -> Device {
         Device {
@@ -325,7 +343,7 @@ mod tests {
     }
 
     fn shown(devices: &[Device], view: &View) -> Vec<String> {
-        Rows::of(devices, view)
+        Rows::of(devices, view, INACTIVE_AFTER, now())
             .all()
             .map(|device| device.name.clone())
             .collect()
@@ -343,7 +361,7 @@ mod tests {
     #[test]
     fn connected_devices_come_before_disconnected_ones() {
         let devices = devices();
-        let rows = Rows::of(&devices, &View::default());
+        let rows = Rows::of(&devices, &View::default(), INACTIVE_AFTER, now());
 
         assert_eq!(rows.active.len(), 3);
         assert_eq!(rows.inactive.len(), 1);
@@ -599,17 +617,24 @@ mod tests {
         let devices = devices();
         let mut view = View::default();
 
-        assert_eq!(Rows::of(&devices, &view).inactive.len(), 1);
+        assert_eq!(
+            Rows::of(&devices, &view, INACTIVE_AFTER, now())
+                .inactive
+                .len(),
+            1
+        );
 
         view.hide_inactive = true;
-        let rows = Rows::of(&devices, &view);
+        let rows = Rows::of(&devices, &view, INACTIVE_AFTER, now());
         assert_eq!(rows.active.len(), 3, "the active section is untouched");
         assert!(rows.inactive.is_empty());
         assert_eq!(rows.len(), 3);
 
         view.hide_inactive = false;
         assert_eq!(
-            Rows::of(&devices, &view).inactive.len(),
+            Rows::of(&devices, &view, INACTIVE_AFTER, now())
+                .inactive
+                .len(),
             1,
             "and the same key brings it back"
         );
@@ -626,9 +651,29 @@ mod tests {
 
     #[test]
     fn nothing_read_yet_is_no_rows_rather_than_an_absence() {
-        let rows = Rows::of(&[], &View::default());
+        let rows = Rows::of(&[], &View::default(), INACTIVE_AFTER, now());
 
         assert!(rows.is_empty());
         assert_eq!(names(rows.all()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_connected_device_with_a_long_silent_reading_lands_in_the_inactive_section() {
+        let devices = vec![
+            device("Fresh", "aa-aa-aa-aa-aa-aa", Some(50)),
+            Device {
+                read_at: Timestamp::from_unix(READ_AT - INACTIVE_AFTER.as_secs() as i64),
+                ..device("Long Silent", "bb-bb-bb-bb-bb-bb", Some(50))
+            },
+        ];
+
+        let rows = Rows::of(&devices, &View::default(), INACTIVE_AFTER, now());
+
+        assert_eq!(names(rows.active.into_iter()), ["Fresh"]);
+        assert_eq!(
+            names(rows.inactive.into_iter()),
+            ["Long Silent"],
+            "still connected, but its reading is as old as the window"
+        );
     }
 }

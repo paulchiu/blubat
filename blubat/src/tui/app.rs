@@ -328,7 +328,10 @@ pub enum Event {
     /// What the loop made of the reload [`Action::Reload`] asked for: the
     /// config it read plus the fast interval it retiered the poller to,
     /// which is what keeps [`App::interval`] and the running poller in step.
-    Reloaded(Result<(Config, Duration), String>),
+    ///
+    /// Boxed so this one variant carrying a whole [`Config`] does not set the
+    /// size every other variant of [`Event`] pays for.
+    Reloaded(Box<Result<(Config, Duration), String>>),
     /// What the loop did about the refresh [`Action::Refresh`] asked for:
     /// nothing to fold back but the fact that it is underway, since the fresh
     /// reading follows on [`Event::Reading`] the way every other reading does.
@@ -486,7 +489,12 @@ impl App {
 
     /// The devices on screen, which is what the table draws and `j` moves through.
     pub fn rows(&self) -> Rows<'_> {
-        Rows::of(self.devices(), &self.view)
+        Rows::of(
+            self.devices(),
+            &self.view,
+            self.config.dashboard.inactive_after,
+            self.now,
+        )
     }
 
     /// The device the selection sits on, absent while nothing is on screen.
@@ -558,7 +566,7 @@ pub fn update(app: App, event: Event) -> App {
         Event::Interrupt => act(app, Action::Quit),
         Event::Reading(reading) => receive(app, reading),
         Event::Tick(now) => ticked(app, now),
-        Event::Reloaded(read) => reloaded(app, read),
+        Event::Reloaded(read) => reloaded(app, *read),
         Event::Refreshed => refreshed(app),
         Event::Saved(written) => saved(app, written),
         Event::Edited(outcome) => edited(app, outcome),
@@ -1708,10 +1716,10 @@ pub(super) mod tests {
     fn reloading_takes_the_hidden_devices_the_file_now_holds() {
         let reloaded = update(
             press(loaded(), "h"),
-            Event::Reloaded(Ok((
+            Event::Reloaded(Box::new(Ok((
                 config("[dashboard]\nhidden = [\"Soundcore\"]\n"),
                 INTERVAL,
-            ))),
+            )))),
         );
 
         assert_eq!(
@@ -1725,10 +1733,10 @@ pub(super) mod tests {
     fn reloading_takes_the_hide_inactive_the_file_now_holds() {
         let reloaded = update(
             press(loaded(), "i"),
-            Event::Reloaded(Ok((
+            Event::Reloaded(Box::new(Ok((
                 config("[dashboard]\nhide_inactive = true\n"),
                 INTERVAL,
-            ))),
+            )))),
         );
 
         assert!(
@@ -2033,14 +2041,14 @@ pub(super) mod tests {
 
         let reloaded = update(
             asked,
-            Event::Reloaded(Ok((
+            Event::Reloaded(Box::new(Ok((
                 config(
                     "[defaults]\nlow = 30\n\n\
                      [theme]\nscheme = \"light\"\ncharging_glyph = \"^\"\n\n\
                      [[hook]]\nevent = \"charged\"\ncommand = \"unplug\"\n",
                 ),
                 retiered,
-            ))),
+            )))),
         );
 
         assert!(!reloaded.reload, "the request is answered");
@@ -2059,15 +2067,17 @@ pub(super) mod tests {
     fn a_reload_that_cannot_be_read_leaves_the_config_in_force_alone() {
         let configured = update(
             press(loaded(), "r"),
-            Event::Reloaded(Ok((
+            Event::Reloaded(Box::new(Ok((
                 config("[defaults]\nlow = 30\n\n[theme]\nscheme = \"light\"\n"),
                 Duration::from_secs(90),
-            ))),
+            )))),
         );
 
         let rejected = update(
             press(configured.clone(), "r"),
-            Event::Reloaded(Err("config.toml: expected `=` at line 3".to_string())),
+            Event::Reloaded(Box::new(Err(
+                "config.toml: expected `=` at line 3".to_string()
+            ))),
         );
 
         assert!(rejected.running, "a typo is not a reason to stop");
