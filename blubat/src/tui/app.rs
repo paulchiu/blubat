@@ -469,20 +469,25 @@ impl App {
             .map_or(&[], |reading| reading.devices.as_slice())
     }
 
-    /// The connected devices of the last reading, whatever the view is showing.
+    /// The active devices of the last reading, whatever the view is showing.
     ///
-    /// Read from the reading rather than from the rows, so a filter narrows
-    /// what is drawn without changing what the status line counts.
-    pub fn connected(&self) -> impl Iterator<Item = &Device> {
-        self.devices().iter().filter(|device| device.connected)
+    /// Follows the same inactive rule as the table's section split, so the
+    /// bar, the alert count and the sections can never disagree. Read from
+    /// the reading rather than from the rows, so a filter narrows what is
+    /// drawn without changing what the status line counts.
+    pub fn active(&self) -> impl Iterator<Item = &Device> {
+        self.devices()
+            .iter()
+            .filter(|device| !device.is_inactive(self.config.dashboard.inactive_after, self.now))
     }
 
-    /// Connected devices low enough to want attention.
+    /// Active devices low enough to want attention.
     ///
     /// A disconnected device can never count: its level is what macOS last
-    /// persisted, so it is history rather than an alert.
+    /// persisted, so it is history rather than an alert, and the same holds
+    /// for one that has simply gone quiet.
     pub fn critical(&self) -> usize {
-        self.connected()
+        self.active()
             .filter(|device| theme::is_critical(device.active_level(), self.thresholds(device)))
             .count()
     }
@@ -1467,12 +1472,48 @@ pub(super) mod tests {
         );
 
         assert_eq!(app.critical(), 1, "the disconnected 4% is history");
-        assert_eq!(app.connected().count(), 2);
+        assert_eq!(app.active().count(), 2);
 
         let filtered = press(app, "/trackpad");
         assert_eq!(filtered.rows().len(), 1, "the low device is off screen");
         assert_eq!(filtered.critical(), 1, "and still counted");
-        assert_eq!(filtered.connected().count(), 2);
+        assert_eq!(filtered.active().count(), 2);
+    }
+
+    #[test]
+    fn a_connected_device_gone_quiet_past_inactive_after_is_not_counted_active() {
+        let quiet = Device {
+            read_at: Timestamp::from_unix(READ_AT.unix() - 7_200),
+            ..device("Soundcore Liberty", "d0-03-4b-0b-e6-4e", Some(42))
+        };
+        let app = update(
+            app(),
+            Event::Reading(reading(vec![
+                device("Magic Trackpad", "30-82-16-f2-24-90", Some(85)),
+                quiet,
+            ])),
+        );
+
+        assert_eq!(
+            app.active().count(),
+            1,
+            "the top bar agrees with the inactive section, not with the raw connected flag"
+        );
+    }
+
+    #[test]
+    fn a_connected_device_gone_quiet_past_inactive_after_is_not_critical() {
+        let quiet = Device {
+            read_at: Timestamp::from_unix(READ_AT.unix() - 7_200),
+            ..device("Soundcore Liberty", "d0-03-4b-0b-e6-4e", Some(9))
+        };
+        let app = update(app(), Event::Reading(reading(vec![quiet])));
+
+        assert_eq!(
+            app.critical(),
+            0,
+            "a device this quiet is history rather than an alert, however low its last level"
+        );
     }
 
     #[test]

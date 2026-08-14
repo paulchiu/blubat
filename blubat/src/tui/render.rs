@@ -141,7 +141,7 @@ fn summary(app: &App, room: usize) -> String {
         || vec!["waiting for the first reading".to_string(), poll.clone()],
         |next| {
             vec![
-                format!("{} active", app.connected().count()),
+                format!("{} active", app.active().count()),
                 format!("sort {}", app.view.sort_label()),
                 poll.clone(),
                 next_piece(app, next),
@@ -202,7 +202,7 @@ fn warnings(count: usize, palette: Palette) -> Span<'static> {
     }
 }
 
-/// Only connected devices can be critical, so the inactive section never shows here.
+/// Only active devices can be critical, so the inactive section never shows here.
 fn alert_line(critical: usize, palette: Palette) -> Line<'static> {
     match critical {
         0 => Line::from(Span::styled("all ok", palette.dim)).right_aligned(),
@@ -550,7 +550,7 @@ fn nothing_to_show(app: &App) -> Paragraph<'static> {
         "no Bluetooth devices reported"
     } else if app.view.filter.narrows() {
         "no device matches the filter"
-    } else if app.view.hide_inactive && app.connected().count() == 0 {
+    } else if app.view.hide_inactive && app.active().count() == 0 {
         "every device is inactive; press i to show them"
     } else {
         "every device is hidden; press H to show them"
