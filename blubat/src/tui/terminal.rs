@@ -1,6 +1,7 @@
 //! Owning the terminal for as long as the dashboard has it.
 
 use std::io;
+use std::time::Duration;
 
 use ratatui::DefaultTerminal;
 use ratatui::widgets::TableState;
@@ -49,6 +50,14 @@ impl Session {
     /// own keypress reader is gated shut around it too: without that, the
     /// reader and the editor would both be reading the one terminal at once,
     /// and whichever the kernel wakes would get the keystroke.
+    ///
+    /// The editor can leave bytes behind it that never made it to `during`
+    /// as a keystroke: its own exit chatter, and late replies to queries it
+    /// made of the terminal, a background-colour query's OSC reply among
+    /// them, that land after it has already exited. Re-init happens before
+    /// [`Admission::resume`] reopens the reader's gate specifically so
+    /// [`drain_typeahead`] can clear that buffer while the reader is still
+    /// parked: nothing else touches the terminal until `resume` returns.
     pub fn suspended<T>(
         &mut self,
         admission: &Admission,
@@ -58,9 +67,29 @@ impl Session {
         ratatui::try_restore()?;
         let result = during();
         self.terminal = ratatui::try_init()?;
+        drain_typeahead();
         admission.resume();
 
         Ok(result)
+    }
+}
+
+/// How long [`drain_typeahead`] waits for the next byte before deciding the
+/// buffer is empty. Short enough not to be felt as a pause, long enough to
+/// still be there for a query reply that has not landed yet: an in-flight
+/// one arrives a poll after the last stale byte, not zero polls after, so a
+/// zero-duration poll would stop draining before it did.
+const DRAIN_GRACE: Duration = Duration::from_millis(20);
+
+/// Discards whatever is in the terminal's input buffer, plus anything that
+/// trickles in within a short grace window: the editor's exit chatter and
+/// late replies to queries it made, which would otherwise be read as
+/// keystrokes once the gate reopens.
+fn drain_typeahead() {
+    while matches!(crossterm::event::poll(DRAIN_GRACE), Ok(true)) {
+        if crossterm::event::read().is_err() {
+            break;
+        }
     }
 }
 
