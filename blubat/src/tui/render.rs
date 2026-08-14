@@ -1786,11 +1786,15 @@ mod tests {
     }
 
     /// The same staleness rule as the table, on the view opened from it.
+    ///
+    /// Past `stale_after` but short of `inactive_after`, so the tick marks
+    /// the connected devices stale without also moving them into the
+    /// inactive section and disturbing the selection this test relies on.
     #[test]
     fn a_stale_device_is_marked_in_the_detail_view_as_well_as_the_table() {
         let quiet = update(
             press(dashboard(), "jjj"),
-            Event::Tick(Timestamp::from_unix(READ_AT.unix() + 3_600)),
+            Event::Tick(Timestamp::from_unix(READ_AT.unix() + 1_800)),
         );
         let open = update(quiet.clone(), Event::Key(Key::Enter));
 

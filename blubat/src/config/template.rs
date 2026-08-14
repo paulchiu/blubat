@@ -75,10 +75,13 @@ const THEME: &str = "## Colours as #rrggbb hex, each defaulting to the scheme's 
 
 const DASHBOARD: &str = "## What the dashboard hides and how it sorts: level, name or last_seen.
 ## h and i maintain hidden and hide_inactive from the dashboard itself.
+## inactive_after moves a connected device with no reading this recent into
+## the inactive section too.
 [dashboard]
 # hidden = []
 # sort = \"level\"
 # hide_inactive = false
+# inactive_after = \"60m\"
 ";
 
 /// Every scalar table's guide section, paired with the key migration checks
