@@ -1,4 +1,4 @@
-# blubat
+<p align="center"><img src="docs/images/blubat-banner.svg" alt="blubat" width="830"></p>
 
 blubat reports the battery level of Bluetooth peripherals on macOS by gathering
 data from IOKit and `system_profiler`, plus a background daemon that reads
