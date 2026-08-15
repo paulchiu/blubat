@@ -130,7 +130,7 @@ pub fn run(paths: &Paths) -> Result<(), Failure> {
                 (config, retiered.fast)
             });
 
-            app = update(app, Event::Reloaded(Box::new(read)));
+            app = update(app, Event::Reloaded(read));
         }
         if app.refresh {
             // Unlike a reload there is no result to fold back: the fresh

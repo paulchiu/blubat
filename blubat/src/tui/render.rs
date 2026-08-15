@@ -141,7 +141,7 @@ fn summary(app: &App, room: usize) -> String {
         || vec!["waiting for the first reading".to_string(), poll.clone()],
         |next| {
             vec![
-                format!("{} active", app.active().count()),
+                format!("{} connected", app.connected().count()),
                 format!("sort {}", app.view.sort_label()),
                 poll.clone(),
                 next_piece(app, next),
@@ -202,7 +202,7 @@ fn warnings(count: usize, palette: Palette) -> Span<'static> {
     }
 }
 
-/// Only active devices can be critical, so the inactive section never shows here.
+/// Only connected devices can be critical, so the disconnected section never shows here.
 fn alert_line(critical: usize, palette: Palette) -> Line<'static> {
     match critical {
         0 => Line::from(Span::styled("all ok", palette.dim)).right_aligned(),
@@ -274,10 +274,10 @@ fn devices_block(palette: Palette) -> Block<'static> {
 
 /// Where the selected device sits among the table's rows.
 ///
-/// The inactive heading is a row of its own, so everything under it is one
+/// The disconnected heading is a row of its own, so everything under it is one
 /// further down than the selection, which only counts devices.
 fn table_row(rows: &Rows<'_>, selected: usize) -> usize {
-    if selected < rows.active.len() {
+    if selected < rows.connected.len() {
         selected
     } else {
         selected + 1
@@ -301,17 +301,17 @@ fn device_table<'a>(app: &'a App, rows: &Rows<'a>, width: u16) -> Table<'a> {
         .collect::<Vec<_>>();
 
     let mut table = rows
-        .active
+        .connected
         .iter()
-        .map(|device| device_row(app, device, &columns, Section::Active))
+        .map(|device| device_row(app, device, &columns, Section::Connected))
         .collect::<Vec<_>>();
 
-    if !rows.inactive.is_empty() {
-        table.push(section_row(rows.inactive.len(), palette));
+    if !rows.disconnected.is_empty() {
+        table.push(section_row(rows.disconnected.len(), palette));
         table.extend(
-            rows.inactive
+            rows.disconnected
                 .iter()
-                .map(|device| device_row(app, device, &columns, Section::Inactive)),
+                .map(|device| device_row(app, device, &columns, Section::Disconnected)),
         );
     }
 
@@ -349,8 +349,8 @@ fn header_cell(column: Column, sort: Sort, direction: Direction) -> Cell<'static
 /// Which half of the table a row is in, and what that does to its colours.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
-    Active,
-    Inactive,
+    Connected,
+    Disconnected,
 }
 
 impl Section {
@@ -360,8 +360,8 @@ impl Section {
     /// last persisted, so nothing there competes with a live reading.
     fn tint(self, colour: Color, palette: Palette) -> Color {
         match self {
-            Section::Active => colour,
-            Section::Inactive => palette.dim,
+            Section::Connected => colour,
+            Section::Disconnected => palette.dim,
         }
     }
 }
@@ -373,7 +373,7 @@ fn device_row<'a>(
     section: Section,
 ) -> Row<'a> {
     let palette = app.look.palette;
-    let critical = section == Section::Active
+    let critical = section == Section::Connected
         && theme::is_critical(device.active_level(), app.thresholds(device));
     let cells = columns
         .iter()
@@ -534,9 +534,9 @@ fn state(app: &App, device: &Device, critical: bool) -> (String, Color) {
 }
 
 /// Announces the disconnected devices, a line clear of the live ones.
-fn section_row<'a>(inactive: usize, palette: Palette) -> Row<'a> {
+fn section_row<'a>(disconnected: usize, palette: Palette) -> Row<'a> {
     Row::new(vec![Cell::from(Span::styled(
-        format!("inactive ({inactive})"),
+        format!("disconnected ({disconnected})"),
         palette.dim,
     ))])
     .top_margin(1)
@@ -550,8 +550,8 @@ fn nothing_to_show(app: &App) -> Paragraph<'static> {
         "no Bluetooth devices reported"
     } else if app.view.filter.narrows() {
         "no device matches the filter"
-    } else if app.view.hide_inactive && app.active().count() == 0 {
-        "every device is inactive; press i to show them"
+    } else if app.view.hide_inactive && app.connected().count() == 0 {
+        "every device is disconnected; press i to show them"
     } else {
         "every device is hidden; press H to show them"
     };
@@ -816,7 +816,7 @@ mod tests {
     }
 
     /// The dashboard with one of everything: a charging device, a critical one,
-    /// an ordinary one, and an inactive section holding a last seen level and a
+    /// an ordinary one, and a disconnected section holding a last seen level and a
     /// device no source has ever had a level for.
     fn dashboard() -> App {
         let devices = vec![
@@ -983,7 +983,7 @@ mod tests {
 
     #[test]
     fn the_dashboard_draws_the_frame_it_is_specified_to_draw() {
-        let expected = " blubat   3 active   sort level ↑   poll 5s   next 5s                                                                          ▲ 1 critical
+        let expected = " blubat   3 connected   sort level ↑   poll 5s   next 5s                                                                       ▲ 1 critical
 
  ┌ devices ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
  │    Device                   Type         Battery       % ↑ State       Trend  Last seen                                                │
@@ -991,7 +991,7 @@ mod tests {
  │    Magic Trackpad           trackpad     ███░░░░░░░░░  23% + charging  █▇▅▄▂▁ now                                                      │
  │    MX Keys M Mac            keyboard     ████████░░░░  67% on battery  █▇▅▄▂▁ now                                                      │
  │                                                                                                                                        │
- │  inactive (2)                                                                                                                          │
+ │  disconnected (2)                                                                                                                      │
  │    AirPods Pro              audio        █████░░░░░░░  45% stale       ······ 3h ago                                                   │
  │    MX Master 3S             mouse        ░░░░░░░░░░░░   -- unreported  ······ 2d ago                                                   │
  │                                                                                                                                        │
@@ -1012,13 +1012,13 @@ mod tests {
  │                                                                                                                                        │
  │                                                                                                                                        │
  └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
- q quit  j/k move  enter detail  s sort  / filter  h hide  H show hidden  i hide inactive  R refresh data  c edit config  ? help";
+ q quit  j/k move  enter detail  s sort  / filter  h hide  H show hidden  i hide disconnected  R refresh data  c edit config  ? help";
         assert_frame(&dashboard(), 140, 30, expected);
     }
 
     #[test]
     fn a_narrow_terminal_drops_columns_rather_than_the_reading() {
-        let expected = " blubat   3 active   sort level ↑   poll 5s    ▲ 1 critical
+        let expected = " blubat   3 connected   sort level ↑           ▲ 1 critical
 
  ┌ devices ───────────────────────────────────────────────┐
  │    Device                 Battery       % ↑ State      │
@@ -1026,7 +1026,7 @@ mod tests {
  │    Magic Trackpad         ███░░░░░░░░░  23% + charging │
  │    MX Keys M Mac          ████████░░░░  67% on battery │
  │                                                        │
- │  inactive (2)                                          │
+ │  disconnected (2)                                      │
  │    AirPods Pro            █████░░░░░░░  45% stale      │
  │    MX Master 3S           ░░░░░░░░░░░░   -- unreported │
  │                                                        │
@@ -1070,7 +1070,7 @@ mod tests {
             Event::Tick(Timestamp::from_unix(app.now.unix() + 3)),
         );
 
-        assert!(line_containing(&app, "blubat").contains("3 active"));
+        assert!(line_containing(&app, "blubat").contains("3 connected"));
         assert!(line_containing(&app, "blubat").contains("sort level"));
         assert!(line_containing(&app, "blubat").contains("poll 5s"));
         assert!(line_containing(&app, "blubat").contains("next 5s"));
@@ -1165,7 +1165,7 @@ mod tests {
             "/ filter",
             "h hide",
             "H show hidden",
-            "i hide inactive",
+            "i hide disconnected",
             "R refresh data",
             "c edit config",
             "? help",
@@ -1235,7 +1235,7 @@ mod tests {
     fn the_keymap_overlay_covers_the_dashboard_and_lists_both_views_keys() {
         let title = format!(" blubat v{} keys ", env!("CARGO_PKG_VERSION"));
         let top = format!("┌{title}{}┐", "─".repeat(66 - title.chars().count()));
-        let expected = " blubat   3 active   sort level ↑   poll 5s   next 5s                                  ▲ 1 critical
+        let expected = " blubat   3 connected   sort level ↑   poll 5s   next 5s                               ▲ 1 critical
 
  ┌ devices ─────[overlay top]──────────────┐
  │    Device    │         q  quit                                                  │t seen        │
@@ -1243,9 +1243,9 @@ mod tests {
  │    Magic Trac│     enter  detail                                                │              │
  │    MX Keys M │         s  sort                                                  │              │
  │              │         /  filter                                                │              │
- │  inactive (2)│         h  hide                                                  │              │
+ │  disconnected│         h  hide                                                  │              │
  │    AirPods Pr│         H  show hidden                                           │ago           │
- │    MX Master │         i  hide inactive                                         │ago           │
+ │    MX Master │         i  hide disconnected                                     │ago           │
  │              │         r  reload config                                         │              │
  │              │         R  refresh data                                          │              │
  │              │         c  edit config                                           │              │
@@ -1288,11 +1288,11 @@ mod tests {
     }
 
     #[test]
-    fn the_selection_marker_skips_the_inactive_heading() {
+    fn the_selection_marker_skips_the_disconnected_heading() {
         let app = press(dashboard(), "jjj");
 
         assert!(line_containing(&app, "AirPods Pro").contains(MARKER));
-        assert!(!line_containing(&app, "inactive (2)").contains(MARKER));
+        assert!(!line_containing(&app, "disconnected (2)").contains(MARKER));
     }
 
     #[test]
@@ -1342,7 +1342,7 @@ mod tests {
         let all_hidden = press(loaded(), "hhh");
         assert!(screen(&all_hidden).contains("every device is hidden"));
 
-        let all_inactive = update(
+        let all_disconnected = update(
             press(app(), "i"),
             Event::Reading(reading(
                 three_devices()
@@ -1356,7 +1356,7 @@ mod tests {
             )),
         );
         assert!(
-            screen(&all_inactive).contains("every device is inactive"),
+            screen(&all_disconnected).contains("every device is disconnected"),
             "hide_inactive emptying the table is not the same kind of empty as h"
         );
     }
@@ -1382,12 +1382,12 @@ mod tests {
     }
 
     #[test]
-    fn a_disconnected_device_sits_under_a_counted_inactive_heading() {
+    fn a_disconnected_device_sits_under_a_counted_disconnected_heading() {
         let rows = drawn(&dashboard(), 100, 30);
         let heading = rows
             .iter()
-            .position(|line| line.contains("inactive (2)"))
-            .expect("an inactive heading");
+            .position(|line| line.contains("disconnected (2)"))
+            .expect("a disconnected heading");
         let airpods = rows
             .iter()
             .position(|line| line.contains("AirPods Pro"))
@@ -1559,7 +1559,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dashboard_with_nothing_connected_selects_through_the_inactive_section() {
+    fn a_dashboard_with_nothing_connected_selects_through_the_disconnected_section() {
         let asleep = update(
             app(),
             Event::Reading(reading(
@@ -1576,14 +1576,14 @@ mod tests {
             )),
         );
 
-        assert!(line_containing(&asleep, "blubat").contains("0 active"));
-        assert!(!line_containing(&asleep, "inactive (2)").contains(MARKER));
+        assert!(line_containing(&asleep, "blubat").contains("0 connected"));
+        assert!(!line_containing(&asleep, "disconnected (2)").contains(MARKER));
         assert!(line_containing(&asleep, "Magic Trackpad").contains(MARKER));
         assert!(line_containing(&press(asleep, "j"), "MX Keys M Mac").contains(MARKER));
     }
 
     /// Colour and weight carry as much of this layout as the glyphs do: the
-    /// dimmed inactive section, the level scale, the selection tint and the
+    /// dimmed disconnected section, the level scale, the selection tint and the
     /// critical red are all invisible to a frame compared as text.
     #[test]
     fn the_palette_reaches_the_buffer_it_is_drawn_into() {
@@ -1609,7 +1609,7 @@ mod tests {
         assert_eq!(
             cell("AirPods Pro").fg,
             dark.dim,
-            "the inactive section is dim throughout"
+            "the disconnected section is dim throughout"
         );
         assert_eq!(cell("45%").fg, dark.dim);
     }
@@ -1786,15 +1786,11 @@ mod tests {
     }
 
     /// The same staleness rule as the table, on the view opened from it.
-    ///
-    /// Past `stale_after` but short of `inactive_after`, so the tick marks
-    /// the connected devices stale without also moving them into the
-    /// inactive section and disturbing the selection this test relies on.
     #[test]
     fn a_stale_device_is_marked_in_the_detail_view_as_well_as_the_table() {
         let quiet = update(
             press(dashboard(), "jjj"),
-            Event::Tick(Timestamp::from_unix(READ_AT.unix() + 1_800)),
+            Event::Tick(Timestamp::from_unix(READ_AT.unix() + 3_600)),
         );
         let open = update(quiet.clone(), Event::Key(Key::Enter));
 

@@ -8,10 +8,10 @@ Bare `blubat` opens the dashboard, or prints the command help and exits 0 when
 there is no terminal to draw one on, so a piped `blubat` still answers. The
 trend column is a six cell sparkline over the levels read this run, with dots
 for a device nothing has been read from yet. Connected devices come first;
-disconnected ones sit under a dimmed `inactive` heading with their own count,
-keeping their last seen level out of the critical summary. A device no source
-reports a level for is listed as `unreported` rather than dropped, which is
-where a Bose headset and a third party Bluetooth LE keyboard otherwise sit:
+disconnected ones sit under a dimmed `disconnected` heading with their own
+count, keeping their last seen level out of the critical summary. A device no
+source reports a level for is listed as `unreported` rather than dropped,
+which is where a Bose headset and a third party Bluetooth LE keyboard otherwise sit:
 both read instead once the [background daemon](daemon.md) is running, out of
 the levels macOS itself has cached, over BMAP or over the Battery Service
 rather than IOKit or `system_profiler`, and show up here as `bluetoothd`,
@@ -22,7 +22,7 @@ terminal gives up columns from the right rather than breaking the table.
 q      quit                  s  open the sort menu: level, name, last seen
 j/k    move the selection    /  filter on name or address, esc clears it
 enter  the detail view       h  hide the selected device, H show hidden again
-i      hide the inactive section, i again shows it
+i      hide the disconnected section, i again shows it
 r      reload the config     c  edit the config file, reloading it on return
 R      refresh both sources  ?  the full keymap, titled with the version blubat is running
 ```
@@ -41,10 +41,11 @@ column carries an arrow saying which way it is currently read. `esc` or `s`
 again backs out of the menu without changing anything.
 
 `i` drops the disconnected section off the table for the rest of the run and
-brings it back with the same key; the footer reads `hide inactive` or `show
-inactive` depending on which it would do next. Like `h`, it writes back to the
-config file: `[dashboard] hide_inactive` is what the dashboard opens showing,
-so the choice survives a restart the same way a hide does.
+brings it back with the same key; the footer reads `hide disconnected` or
+`show disconnected` depending on which it would do next. Like `h`, it writes
+back to the config file: `[dashboard] hide_inactive` is what the dashboard
+opens showing (the key name predates the connected/disconnected wording), so
+the choice survives a restart the same way a hide does.
 
 ## Detail view
 
@@ -62,7 +63,7 @@ blubat polls.
 
 `j` and `k` move to the next and previous device without leaving the view, over
 the same row list the dashboard shows: hidden rows only where `H` is showing
-them, and the inactive section absent where `i` has hidden it. `esc` and
+them, and the disconnected section absent where `i` has hidden it. `esc` and
 `enter` both back out to the dashboard with the selection on whichever device
 that left it on. It leaves nothing else live, so there is no way to act on a
 device from a view of another one:

@@ -62,7 +62,7 @@ pub const KEYMAP: [Binding; 12] = [
     Binding::new("/", "filter"),
     Binding::new("h", "hide"),
     Binding::new("H", "show hidden"),
-    Binding::new("i", "hide inactive"),
+    Binding::new("i", "hide disconnected"),
     // Unhinted: the overlay is where `r` earns its keep, not a footer that
     // has `R` for the key someone reaches for far more often.
     Binding::unhinted("r", "reload config"),
@@ -87,9 +87,9 @@ pub(super) fn dashboard_keys(view: &View) -> Vec<Binding> {
             },
             "i" => Binding {
                 label: if view.hide_inactive {
-                    "show inactive"
+                    "show disconnected"
                 } else {
-                    "hide inactive"
+                    "hide disconnected"
                 },
                 ..*binding
             },
@@ -249,7 +249,7 @@ pub enum Action {
     Back,
     ToggleHidden,
     ShowHidden,
-    ToggleInactive,
+    ToggleDisconnected,
     /// Asks the loop to read the config file again, which the reducer cannot.
     Reload,
     /// Asks the loop to read both device sources again right away, which the
@@ -277,7 +277,7 @@ impl Action {
             Key::Char('/') => Some(Action::OpenFilter),
             Key::Char('h') => Some(Action::ToggleHidden),
             Key::Char('H') => Some(Action::ShowHidden),
-            Key::Char('i') => Some(Action::ToggleInactive),
+            Key::Char('i') => Some(Action::ToggleDisconnected),
             Key::Char('r') => Some(Action::Reload),
             Key::Char('R') => Some(Action::Refresh),
             Key::Char('c') => Some(Action::EditConfig),
@@ -328,16 +328,13 @@ pub enum Event {
     /// What the loop made of the reload [`Action::Reload`] asked for: the
     /// config it read plus the fast interval it retiered the poller to,
     /// which is what keeps [`App::interval`] and the running poller in step.
-    ///
-    /// Boxed so this one variant carrying a whole [`Config`] does not set the
-    /// size every other variant of [`Event`] pays for.
-    Reloaded(Box<Result<(Config, Duration), String>>),
+    Reloaded(Result<(Config, Duration), String>),
     /// What the loop did about the refresh [`Action::Refresh`] asked for:
     /// nothing to fold back but the fact that it is underway, since the fresh
     /// reading follows on [`Event::Reading`] the way every other reading does.
     Refreshed,
     /// What came of writing the dashboard table [`Action::ToggleHidden`] or
-    /// [`Action::ToggleInactive`] changed.
+    /// [`Action::ToggleDisconnected`] changed.
     Saved(Result<(), String>),
     /// What came of the editor [`Action::EditConfig`] suspended the terminal
     /// for. A success folds into the same reload `r` uses; a failure, missing
@@ -469,37 +466,29 @@ impl App {
             .map_or(&[], |reading| reading.devices.as_slice())
     }
 
-    /// The active devices of the last reading, whatever the view is showing.
+    /// The connected devices of the last reading, whatever the view is showing.
     ///
-    /// Follows the same inactive rule as the table's section split, so the
-    /// bar, the alert count and the sections can never disagree. Read from
-    /// the reading rather than from the rows, so a filter narrows what is
-    /// drawn without changing what the status line counts.
-    pub fn active(&self) -> impl Iterator<Item = &Device> {
-        self.devices()
-            .iter()
-            .filter(|device| !device.is_inactive(self.config.dashboard.inactive_after, self.now))
+    /// Follows the same split as the table's sections, so the bar, the alert
+    /// count and the sections can never disagree. Read from the reading
+    /// rather than from the rows, so a filter narrows what is drawn without
+    /// changing what the status line counts.
+    pub fn connected(&self) -> impl Iterator<Item = &Device> {
+        self.devices().iter().filter(|device| device.connected)
     }
 
-    /// Active devices low enough to want attention.
+    /// Connected devices low enough to want attention.
     ///
     /// A disconnected device can never count: its level is what macOS last
-    /// persisted, so it is history rather than an alert, and the same holds
-    /// for one that has simply gone quiet.
+    /// persisted, so it is history rather than an alert.
     pub fn critical(&self) -> usize {
-        self.active()
+        self.connected()
             .filter(|device| theme::is_critical(device.active_level(), self.thresholds(device)))
             .count()
     }
 
     /// The devices on screen, which is what the table draws and `j` moves through.
     pub fn rows(&self) -> Rows<'_> {
-        Rows::of(
-            self.devices(),
-            &self.view,
-            self.config.dashboard.inactive_after,
-            self.now,
-        )
+        Rows::of(self.devices(), &self.view)
     }
 
     /// The device the selection sits on, absent while nothing is on screen.
@@ -571,7 +560,7 @@ pub fn update(app: App, event: Event) -> App {
         Event::Interrupt => act(app, Action::Quit),
         Event::Reading(reading) => receive(app, reading),
         Event::Tick(now) => ticked(app, now),
-        Event::Reloaded(read) => reloaded(app, *read),
+        Event::Reloaded(read) => reloaded(app, read),
         Event::Refreshed => refreshed(app),
         Event::Saved(written) => saved(app, written),
         Event::Edited(outcome) => edited(app, outcome),
@@ -795,7 +784,7 @@ fn act(app: App, action: Action) -> App {
         Action::Back => backed(app),
         Action::ToggleHidden => hide_selected(app),
         Action::ShowHidden => viewed(app, |view| view.show_hidden = !view.show_hidden),
-        Action::ToggleInactive => toggled_inactive(app),
+        Action::ToggleDisconnected => toggled_disconnected(app),
         Action::Reload => App {
             reload: true,
             ..app
@@ -881,12 +870,12 @@ fn hide_selected(app: App) -> App {
     viewed(app, |view| view.toggle_hidden(&device))
 }
 
-/// Toggles whether the inactive section is shown, and asks the loop to write
-/// that back the same way `h` does.
+/// Toggles whether the disconnected section is shown, and asks the loop to
+/// write that back the same way `h` does.
 ///
 /// One key both ways, as `h` is. Never a no-op the way hiding nothing is: the
 /// toggle always has a new value, so it is always worth telling the file.
-fn toggled_inactive(app: App) -> App {
+fn toggled_disconnected(app: App) -> App {
     let app = App {
         save_dashboard: Some(DashboardField::HideInactive),
         ..app
@@ -1472,48 +1461,12 @@ pub(super) mod tests {
         );
 
         assert_eq!(app.critical(), 1, "the disconnected 4% is history");
-        assert_eq!(app.active().count(), 2);
+        assert_eq!(app.connected().count(), 2);
 
         let filtered = press(app, "/trackpad");
         assert_eq!(filtered.rows().len(), 1, "the low device is off screen");
         assert_eq!(filtered.critical(), 1, "and still counted");
-        assert_eq!(filtered.active().count(), 2);
-    }
-
-    #[test]
-    fn a_connected_device_gone_quiet_past_inactive_after_is_not_counted_active() {
-        let quiet = Device {
-            read_at: Timestamp::from_unix(READ_AT.unix() - 7_200),
-            ..device("Soundcore Liberty", "d0-03-4b-0b-e6-4e", Some(42))
-        };
-        let app = update(
-            app(),
-            Event::Reading(reading(vec![
-                device("Magic Trackpad", "30-82-16-f2-24-90", Some(85)),
-                quiet,
-            ])),
-        );
-
-        assert_eq!(
-            app.active().count(),
-            1,
-            "the top bar agrees with the inactive section, not with the raw connected flag"
-        );
-    }
-
-    #[test]
-    fn a_connected_device_gone_quiet_past_inactive_after_is_not_critical() {
-        let quiet = Device {
-            read_at: Timestamp::from_unix(READ_AT.unix() - 7_200),
-            ..device("Soundcore Liberty", "d0-03-4b-0b-e6-4e", Some(9))
-        };
-        let app = update(app(), Event::Reading(reading(vec![quiet])));
-
-        assert_eq!(
-            app.critical(),
-            0,
-            "a device this quiet is history rather than an alert, however low its last level"
-        );
+        assert_eq!(filtered.connected().count(), 2);
     }
 
     #[test]
@@ -1593,7 +1546,7 @@ pub(super) mod tests {
     }
 
     /// A reading with one device of each section, for the tests below.
-    fn with_an_inactive_device() -> App {
+    fn with_a_disconnected_device() -> App {
         update(
             app(),
             Event::Reading(reading(vec![
@@ -1607,8 +1560,8 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn i_toggles_whether_the_inactive_section_is_shown() {
-        let both = with_an_inactive_device();
+    fn i_toggles_whether_the_disconnected_section_is_shown() {
+        let both = with_a_disconnected_device();
         assert_eq!(names(&both), ["Magic Trackpad", "AirPods Pro"]);
 
         let hidden = press(both.clone(), "i");
@@ -1623,11 +1576,11 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn hiding_the_inactive_section_pulls_the_selection_back_onto_a_row() {
-        let on_the_inactive_row = press(with_an_inactive_device(), "j");
-        assert_eq!(on_the_inactive_row.selected, 1);
+    fn hiding_the_disconnected_section_pulls_the_selection_back_onto_a_row() {
+        let on_the_disconnected_row = press(with_a_disconnected_device(), "j");
+        assert_eq!(on_the_disconnected_row.selected, 1);
 
-        let hidden = press(on_the_inactive_row, "i");
+        let hidden = press(on_the_disconnected_row, "i");
         assert_eq!(hidden.selected, 0, "the row it sat on is gone");
         assert_eq!(
             hidden.current().map(|device| device.name.as_str()),
@@ -1636,8 +1589,8 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn toggling_the_inactive_section_asks_the_loop_to_write_the_config_file() {
-        let hidden = press(with_an_inactive_device(), "i");
+    fn toggling_the_disconnected_section_asks_the_loop_to_write_the_config_file() {
+        let hidden = press(with_a_disconnected_device(), "i");
         let written = update(hidden.clone(), Event::Saved(Ok(())));
 
         assert_eq!(
@@ -1654,7 +1607,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn the_dashboard_can_open_with_the_inactive_section_already_hidden() {
+    fn the_dashboard_can_open_with_the_disconnected_section_already_hidden() {
         let opened = App::new(
             INTERVAL,
             READ_AT,
@@ -1694,11 +1647,11 @@ pub(super) mod tests {
 
         let closed = loaded();
         assert_eq!(label(&closed, "H"), "show hidden");
-        assert_eq!(label(&closed, "i"), "hide inactive");
+        assert_eq!(label(&closed, "i"), "hide disconnected");
 
         let toggled = press(press(closed, "H"), "i");
         assert_eq!(label(&toggled, "H"), "hide hidden");
-        assert_eq!(label(&toggled, "i"), "show inactive");
+        assert_eq!(label(&toggled, "i"), "show disconnected");
     }
 
     #[test]
@@ -1757,10 +1710,10 @@ pub(super) mod tests {
     fn reloading_takes_the_hidden_devices_the_file_now_holds() {
         let reloaded = update(
             press(loaded(), "h"),
-            Event::Reloaded(Box::new(Ok((
+            Event::Reloaded(Ok((
                 config("[dashboard]\nhidden = [\"Soundcore\"]\n"),
                 INTERVAL,
-            )))),
+            ))),
         );
 
         assert_eq!(
@@ -1774,10 +1727,10 @@ pub(super) mod tests {
     fn reloading_takes_the_hide_inactive_the_file_now_holds() {
         let reloaded = update(
             press(loaded(), "i"),
-            Event::Reloaded(Box::new(Ok((
+            Event::Reloaded(Ok((
                 config("[dashboard]\nhide_inactive = true\n"),
                 INTERVAL,
-            )))),
+            ))),
         );
 
         assert!(
@@ -1915,15 +1868,15 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn detail_navigation_skips_the_inactive_section_once_it_is_hidden() {
-        let both = with_an_inactive_device();
+    fn detail_navigation_skips_the_disconnected_section_once_it_is_hidden() {
+        let both = with_a_disconnected_device();
         let hidden = press(both, "i");
         let opened = key(hidden, Key::Enter);
 
         assert_eq!(
             press(opened.clone(), "j"),
             opened,
-            "no second row to move to once the inactive section is hidden"
+            "no second row to move to once the disconnected section is hidden"
         );
     }
 
@@ -2082,14 +2035,14 @@ pub(super) mod tests {
 
         let reloaded = update(
             asked,
-            Event::Reloaded(Box::new(Ok((
+            Event::Reloaded(Ok((
                 config(
                     "[defaults]\nlow = 30\n\n\
                      [theme]\nscheme = \"light\"\ncharging_glyph = \"^\"\n\n\
                      [[hook]]\nevent = \"charged\"\ncommand = \"unplug\"\n",
                 ),
                 retiered,
-            )))),
+            ))),
         );
 
         assert!(!reloaded.reload, "the request is answered");
@@ -2108,17 +2061,15 @@ pub(super) mod tests {
     fn a_reload_that_cannot_be_read_leaves_the_config_in_force_alone() {
         let configured = update(
             press(loaded(), "r"),
-            Event::Reloaded(Box::new(Ok((
+            Event::Reloaded(Ok((
                 config("[defaults]\nlow = 30\n\n[theme]\nscheme = \"light\"\n"),
                 Duration::from_secs(90),
-            )))),
+            ))),
         );
 
         let rejected = update(
             press(configured.clone(), "r"),
-            Event::Reloaded(Box::new(Err(
-                "config.toml: expected `=` at line 3".to_string()
-            ))),
+            Event::Reloaded(Err("config.toml: expected `=` at line 3".to_string())),
         );
 
         assert!(rejected.running, "a typo is not a reason to stop");

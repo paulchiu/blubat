@@ -311,7 +311,7 @@ impl Hook {
 }
 
 /// What the dashboard hides and how it sorts.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Dashboard {
     /// Matches for devices the dashboard leaves out, which `h` maintains.
@@ -319,23 +319,9 @@ pub struct Dashboard {
     pub sort: Sort,
     /// Whether the dashboard opens with the disconnected section already
     /// left off. `i` maintains this the same way `h` maintains `hidden`: the
-    /// only two fields blubat ever writes back into the file.
+    /// only two fields blubat ever writes back into the file. The key name
+    /// predates the connected/disconnected wording.
     pub hide_inactive: bool,
-    /// A device silent for this long counts as inactive even while macOS
-    /// still reports it connected.
-    #[serde(deserialize_with = "de_duration")]
-    pub inactive_after: Duration,
-}
-
-impl Default for Dashboard {
-    fn default() -> Self {
-        Self {
-            hidden: Vec::new(),
-            sort: Sort::default(),
-            hide_inactive: false,
-            inactive_after: Duration::from_secs(3_600),
-        }
-    }
 }
 
 /// The order the dashboard lists devices in.
@@ -472,7 +458,6 @@ ok       = "#57ab5a"
 hidden        = ["MX Master"]
 sort          = "level"
 hide_inactive = true
-inactive_after = "5m"
 
 [[device]]
 match = "trackpad"
@@ -542,7 +527,6 @@ timeout  = "10s"
         assert_eq!(config.dashboard.hidden, ["MX Master"]);
         assert_eq!(config.dashboard.sort, Sort::Level);
         assert!(config.dashboard.hide_inactive);
-        assert_eq!(config.dashboard.inactive_after, Duration::from_secs(300));
         assert_eq!(config.devices.len(), 3);
         assert_eq!(config.hooks.len(), 3);
         assert_eq!(config.hooks[0].event, Event::LowBattery);
@@ -567,18 +551,6 @@ timeout  = "10s"
             !Config::default().dashboard.hide_inactive,
             "shown by default"
         );
-        assert_eq!(
-            Config::default().dashboard.inactive_after,
-            Duration::from_secs(3_600),
-            "an hour of silence before a connected device counts as inactive"
-        );
-    }
-
-    #[test]
-    fn inactive_after_parses_a_written_duration() {
-        let config = Config::parse("[dashboard]\ninactive_after = \"5m\"\n").expect("parses");
-
-        assert_eq!(config.dashboard.inactive_after, Duration::from_secs(300));
     }
 
     #[test]
