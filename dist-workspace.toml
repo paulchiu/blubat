@@ -21,3 +21,8 @@ hosting = "github"
 publish-jobs = ["homebrew"]
 tap = "paulchiu/homebrew-tap"
 formula = "blubat"
+
+# Keep the generated workflow on the same checkout major as the hand-written
+# ones; dist 0.32.0 still emits v6 on its own
+[dist.github-action-commits]
+"actions/checkout" = "v7"
