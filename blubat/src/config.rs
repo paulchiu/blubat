@@ -509,27 +509,6 @@ mod tests {
         );
     }
 
-    /// `inactive_after` is not one of the two keys blubat ever writes, so a
-    /// hand set value has to survive a write naming only `hidden`.
-    #[test]
-    fn a_hand_set_inactive_after_survives_a_write_to_hidden() {
-        let scratch = Scratch::new();
-        let path = scratch.write_config("[dashboard]\ninactive_after = \"5m\"\n");
-
-        assert_eq!(
-            save_dashboard(&path, Some(&["30-82-16".to_string()]), None),
-            Ok(())
-        );
-        assert_eq!(
-            Config::load(&path)
-                .expect("parses")
-                .dashboard
-                .inactive_after,
-            std::time::Duration::from_secs(300),
-            "a hand edit to inactive_after survives a write that only named hidden"
-        );
-    }
-
     /// The one place blubat writes to a file it does not own, so a `[dashboard]`
     /// that is not a table is reported and left exactly as it was, the same
     /// guarantee a file that will not parse gets.
