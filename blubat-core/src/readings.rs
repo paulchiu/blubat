@@ -30,6 +30,9 @@ use crate::timestamp::Timestamp;
 /// (see [`carry_forward`]) copies whatever the daemon's own device list most
 /// recently reported for that address, so a device that has actually gone
 /// away is shown as last seen rather than as connected with a stale level.
+/// This flag only stands where nothing fresher exists: when [`merge`] finds
+/// the address still in the live scan, the scan's own `connected` wins,
+/// since a reading may be days old and the scan is this poll's own answer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Reading {
@@ -180,6 +183,12 @@ fn outranks(device: &Device, reading: &Reading) -> bool {
 /// carried are kept, the way an IOKit reading keeps the category in
 /// [`crate::snapshot::merge`]: dropping the ids here would make the device a
 /// BMAP sweep just read invisible to the next one.
+///
+/// `connected` is kept from the displaced record too, not the reading: the
+/// snapshot is this poll's own live scan, so it is always at least as fresh
+/// as a reading, which may have been taken sweeps ago. Only when the address
+/// is not in the snapshot at all does the reading's own `connected` stand,
+/// since nothing fresher exists for it.
 pub(crate) fn merge(mut snapshot: Snapshot, readings: &[Reading]) -> Snapshot {
     for reading in readings {
         let index = snapshot
@@ -204,7 +213,7 @@ pub(crate) fn merge(mut snapshot: Snapshot, readings: &[Reading]) -> Snapshot {
             },
             charge: ChargeState::Unknown,
             source: reading.source,
-            connected: reading.connected,
+            connected: displaced.map_or(reading.connected, |device| device.connected),
             read_at: reading.read_at,
         };
 
@@ -286,6 +295,13 @@ mod tests {
         Device {
             kind: Some("Headphones".to_string()),
             ..bose(false)
+        }
+    }
+
+    fn connected_profiler_placeholder() -> Device {
+        Device {
+            connected: true,
+            ..profiler_placeholder()
         }
     }
 
@@ -443,7 +459,10 @@ mod tests {
         assert_eq!(device.source, Source::Bmap);
         assert_eq!(device.levels.main, Some(76));
         assert_eq!(device.charge, ChargeState::Unknown);
-        assert!(device.connected);
+        assert!(
+            !device.connected,
+            "the profiler record is what the live scan just reported for this address, and it said not connected"
+        );
         assert_eq!(
             device.kind.as_deref(),
             Some("Headphones"),
@@ -452,8 +471,26 @@ mod tests {
     }
 
     #[test]
-    fn a_bmap_reading_preserves_the_ids_the_next_sweep_needs_to_find_it_again() {
+    fn a_saved_readings_connected_flag_never_outlives_what_the_live_scan_just_reported() {
         let merged = merge(snapshot(vec![profiler_placeholder()]), &[reading(76)]);
+
+        assert_eq!(
+            merged.devices[0].levels.main,
+            Some(76),
+            "the level comes from the saved reading"
+        );
+        assert!(
+            !merged.devices[0].connected,
+            "connected comes from this poll's live scan, not a reading that may be days old"
+        );
+    }
+
+    #[test]
+    fn a_bmap_reading_preserves_the_ids_the_next_sweep_needs_to_find_it_again() {
+        let merged = merge(
+            snapshot(vec![connected_profiler_placeholder()]),
+            &[reading(76)],
+        );
 
         assert_eq!(
             crate::bmap::candidates(&merged.devices),
