@@ -5,7 +5,7 @@
 //! file yet, and introduces a file that predates the template to its own
 //! defaults the same way, once, before handing either to the editor; see
 //! [`annotate`] for what that adds and what it leaves alone. [`save_dashboard`]
-//! is the exception: `h` and `i` on the dashboard write `[dashboard] hidden`
+//! is the exception: `h` and `d` on the dashboard write `[dashboard] hidden`
 //! and `[dashboard] hide_inactive` respectively, each only its own key and
 //! nothing else, ever. [`editor`] and the private `edit` below it are also
 //! what the dashboard's own `c` opens the file in, reached through
@@ -55,7 +55,7 @@ pub fn run(command: &Command, paths: &Paths) -> Result<(), Failure> {
 /// was.
 ///
 /// The one table blubat ever writes back, from either of the two keys that
-/// maintain it: `h` and `i` both call this rather than each keeping a write of
+/// maintain it: `h` and `d` both call this rather than each keeping a write of
 /// its own. Each names only the field it changed, so a write from one key
 /// never carries the other's possibly stale in-memory value over a change the
 /// file gained since this dashboard last read it, whether that was a hand
@@ -460,7 +460,7 @@ mod tests {
         );
     }
 
-    /// `i` names only `hide_inactive`, so the key is added to a table that
+    /// `d` names only `hide_inactive`, so the key is added to a table that
     /// predates it without the write carrying `hidden` along, and without
     /// disturbing whatever `hidden` the table already holds.
     #[test]

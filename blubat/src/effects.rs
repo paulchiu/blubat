@@ -201,7 +201,7 @@ impl Effects {
         Config::load(&self.config_file).map_err(|error| error.to_string())
     }
 
-    /// Writes the dashboard table back, which `h` or `i` ask for.
+    /// Writes the dashboard table back, which `h` or `d` ask for.
     ///
     /// The only table blubat writes to that file, and the reason the reload
     /// above and this sit together: they are the two ends of the one file

@@ -51,7 +51,7 @@ impl Binding {
 
 /// The dashboard keymap, in the order the footer and the overlay list it.
 ///
-/// `H` and `i` print here as they read while the section they toggle is
+/// `H` and `d` print here as they read while the section they toggle is
 /// showing; [`dashboard_keys`] is what actually resolves them against the
 /// view in front of the keyboard.
 pub const KEYMAP: [Binding; 12] = [
@@ -71,7 +71,7 @@ pub const KEYMAP: [Binding; 12] = [
     Binding::new("?", "help"),
 ];
 
-/// [`KEYMAP`], with `H` and `i` reading what pressing them will do to `view`
+/// [`KEYMAP`], with `H` and `d` reading what pressing them will do to `view`
 /// rather than what they did in the file that wrote them.
 pub(super) fn dashboard_keys(view: &View) -> Vec<Binding> {
     KEYMAP
@@ -222,7 +222,7 @@ pub enum Key {
 /// Which single field of `[dashboard]` a key just changed, and so which one
 /// the file still needs telling about.
 ///
-/// `h` and `i` never change both at once, so the loop only ever has one of
+/// `h` and `d` never change both at once, so the loop only ever has one of
 /// these pending: the field named is the only one the write touches, which is
 /// what keeps that write from carrying the other field's in-memory copy over
 /// a change the file gained elsewhere since this dashboard last read it.
@@ -395,7 +395,7 @@ pub struct App {
     /// animation to derive its dot count from deterministically rather than
     /// off the wall clock.
     pub refreshing_ticks: u32,
-    /// Set by `h` or `i` to the field it changed, and cleared the same way,
+    /// Set by `h` or `d` to the field it changed, and cleared the same way,
     /// for the same reason: the change is already in [`View`], and the file
     /// has yet to be told.
     pub save_dashboard: Option<DashboardField>,
@@ -597,7 +597,7 @@ fn ticked(app: App, now: Timestamp) -> App {
 /// hooks that were working a moment ago carry on working.
 ///
 /// A reload takes the file's hidden devices and its hide_inactive too, since
-/// `h` and `i` write them there: the file is where the dashboard table lives,
+/// `h` and `d` write them there: the file is where the dashboard table lives,
 /// so a hand edit is picked up by the key that re-reads it rather than needing
 /// a restart.
 ///
