@@ -62,7 +62,7 @@ pub const KEYMAP: [Binding; 12] = [
     Binding::new("/", "filter"),
     Binding::new("h", "hide"),
     Binding::new("H", "show hidden"),
-    Binding::new("i", "hide disconnected"),
+    Binding::new("d", "hide disconnected"),
     // Unhinted: the overlay is where `r` earns its keep, not a footer that
     // has `R` for the key someone reaches for far more often.
     Binding::unhinted("r", "reload config"),
@@ -85,7 +85,7 @@ pub(super) fn dashboard_keys(view: &View) -> Vec<Binding> {
                 },
                 ..*binding
             },
-            "i" => Binding {
+            "d" => Binding {
                 label: if view.hide_inactive {
                     "show disconnected"
                 } else {
@@ -277,7 +277,7 @@ impl Action {
             Key::Char('/') => Some(Action::OpenFilter),
             Key::Char('h') => Some(Action::ToggleHidden),
             Key::Char('H') => Some(Action::ShowHidden),
-            Key::Char('i') => Some(Action::ToggleDisconnected),
+            Key::Char('d') => Some(Action::ToggleDisconnected),
             Key::Char('r') => Some(Action::Reload),
             Key::Char('R') => Some(Action::Refresh),
             Key::Char('c') => Some(Action::EditConfig),
@@ -1560,16 +1560,16 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn i_toggles_whether_the_disconnected_section_is_shown() {
+    fn d_toggles_whether_the_disconnected_section_is_shown() {
         let both = with_a_disconnected_device();
         assert_eq!(names(&both), ["Magic Trackpad", "AirPods Pro"]);
 
-        let hidden = press(both.clone(), "i");
+        let hidden = press(both.clone(), "d");
         assert!(hidden.view.hide_inactive);
         assert_eq!(names(&hidden), ["Magic Trackpad"]);
 
         assert_eq!(
-            names(&press(hidden, "i")),
+            names(&press(hidden, "d")),
             ["Magic Trackpad", "AirPods Pro"],
             "the same key both ways"
         );
@@ -1580,7 +1580,7 @@ pub(super) mod tests {
         let on_the_disconnected_row = press(with_a_disconnected_device(), "j");
         assert_eq!(on_the_disconnected_row.selected, 1);
 
-        let hidden = press(on_the_disconnected_row, "i");
+        let hidden = press(on_the_disconnected_row, "d");
         assert_eq!(hidden.selected, 0, "the row it sat on is gone");
         assert_eq!(
             hidden.current().map(|device| device.name.as_str()),
@@ -1590,17 +1590,17 @@ pub(super) mod tests {
 
     #[test]
     fn toggling_the_disconnected_section_asks_the_loop_to_write_the_config_file() {
-        let hidden = press(with_a_disconnected_device(), "i");
+        let hidden = press(with_a_disconnected_device(), "d");
         let written = update(hidden.clone(), Event::Saved(Ok(())));
 
         assert_eq!(
             hidden.save_dashboard,
             Some(DashboardField::HideInactive),
-            "i lasts the same way h does"
+            "d lasts the same way h does"
         );
         assert_eq!(written.save_dashboard, None, "and once told, stops asking");
         assert_eq!(
-            press(hidden, "i").save_dashboard,
+            press(hidden, "d").save_dashboard,
             Some(DashboardField::HideInactive),
             "showing the section again is a write too"
         );
@@ -1647,11 +1647,11 @@ pub(super) mod tests {
 
         let closed = loaded();
         assert_eq!(label(&closed, "H"), "show hidden");
-        assert_eq!(label(&closed, "i"), "hide disconnected");
+        assert_eq!(label(&closed, "d"), "hide disconnected");
 
-        let toggled = press(press(closed, "H"), "i");
+        let toggled = press(press(closed, "H"), "d");
         assert_eq!(label(&toggled, "H"), "hide hidden");
-        assert_eq!(label(&toggled, "i"), "show disconnected");
+        assert_eq!(label(&toggled, "d"), "show disconnected");
     }
 
     #[test]
@@ -1726,7 +1726,7 @@ pub(super) mod tests {
     #[test]
     fn reloading_takes_the_hide_inactive_the_file_now_holds() {
         let reloaded = update(
-            press(loaded(), "i"),
+            press(loaded(), "d"),
             Event::Reloaded(Ok((
                 config("[dashboard]\nhide_inactive = true\n"),
                 INTERVAL,
@@ -1870,7 +1870,7 @@ pub(super) mod tests {
     #[test]
     fn detail_navigation_skips_the_disconnected_section_once_it_is_hidden() {
         let both = with_a_disconnected_device();
-        let hidden = press(both, "i");
+        let hidden = press(both, "d");
         let opened = key(hidden, Key::Enter);
 
         assert_eq!(

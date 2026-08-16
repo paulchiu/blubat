@@ -22,7 +22,7 @@ terminal gives up columns from the right rather than breaking the table.
 q      quit                  s  open the sort menu: level, name, last seen
 j/k    move the selection    /  filter on name or address, esc clears it
 enter  the detail view       h  hide the selected device, H show hidden again
-i      hide the disconnected section, i again shows it
+d      hide the disconnected section, d again shows it
 r      reload the config     c  edit the config file, reloading it on return
 R      refresh both sources  ?  the full keymap, titled with the version blubat is running
 ```
@@ -40,7 +40,7 @@ flips the direction instead of reapplying it, and the header of the sorted
 column carries an arrow saying which way it is currently read. `esc` or `s`
 again backs out of the menu without changing anything.
 
-`i` drops the disconnected section off the table for the rest of the run and
+`d` drops the disconnected section off the table for the rest of the run and
 brings it back with the same key; the footer reads `hide disconnected` or
 `show disconnected` depending on which it would do next. Like `h`, it writes
 back to the config file: `[dashboard] hide_inactive` is what the dashboard
@@ -63,7 +63,7 @@ blubat polls.
 
 `j` and `k` move to the next and previous device without leaving the view, over
 the same row list the dashboard shows: hidden rows only where `H` is showing
-them, and the disconnected section absent where `i` has hidden it. `esc` and
+them, and the disconnected section absent where `d` has hidden it. `esc` and
 `enter` both back out to the dashboard with the selection on whichever device
 that left it on. It leaves nothing else live, so there is no way to act on a
 device from a view of another one:

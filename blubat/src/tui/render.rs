@@ -551,7 +551,7 @@ fn nothing_to_show(app: &App) -> Paragraph<'static> {
     } else if app.view.filter.narrows() {
         "no device matches the filter"
     } else if app.view.hide_inactive && app.connected().count() == 0 {
-        "every device is disconnected; press i to show them"
+        "every device is disconnected; press d to show them"
     } else {
         "every device is hidden; press H to show them"
     };
@@ -1012,7 +1012,7 @@ mod tests {
  │                                                                                                                                        │
  │                                                                                                                                        │
  └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
- q quit  j/k move  enter detail  s sort  / filter  h hide  H show hidden  i hide disconnected  R refresh data  c edit config  ? help";
+ q quit  j/k move  enter detail  s sort  / filter  h hide  H show hidden  d hide disconnected  R refresh data  c edit config  ? help";
         assert_frame(&dashboard(), 140, 30, expected);
     }
 
@@ -1165,7 +1165,7 @@ mod tests {
             "/ filter",
             "h hide",
             "H show hidden",
-            "i hide disconnected",
+            "d hide disconnected",
             "R refresh data",
             "c edit config",
             "? help",
@@ -1245,7 +1245,7 @@ mod tests {
  │              │         /  filter                                                │              │
  │  disconnected│         h  hide                                                  │              │
  │    AirPods Pr│         H  show hidden                                           │ago           │
- │    MX Master │         i  hide disconnected                                     │ago           │
+ │    MX Master │         d  hide disconnected                                     │ago           │
  │              │         r  reload config                                         │              │
  │              │         R  refresh data                                          │              │
  │              │         c  edit config                                           │              │
@@ -1343,7 +1343,7 @@ mod tests {
         assert!(screen(&all_hidden).contains("every device is hidden"));
 
         let all_disconnected = update(
-            press(app(), "i"),
+            press(app(), "d"),
             Event::Reading(reading(
                 three_devices()
                     .devices

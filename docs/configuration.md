@@ -48,7 +48,7 @@ charging_glyph = "+"          # overrides the Nerd Font guess either way
 [dashboard]
 hidden        = ["MX Master"] # matches, as --device takes them; `h` writes here
 sort          = "level"       # level, name or last_seen
-hide_inactive = false         # whether the disconnected section opens shown; `i` writes here
+hide_inactive = false         # whether the disconnected section opens shown; `d` writes here
 
 # Per device overrides. `match` is the same case insensitive substring
 # `--device` takes, tested against the name and the address. The first
@@ -86,10 +86,10 @@ on `r` or `c`'s reload the same as everything else in the file; see
 `[dashboard] hidden` and `[dashboard] hide_inactive` are maintained from the
 dashboard as well as by hand, and both live in the one table: `h` appends the
 selected device's address and `h` over a shown-again device removes whatever
-was hiding it, and `i` flips whether the dashboard opens with the disconnected
+was hiding it, and `d` flips whether the dashboard opens with the disconnected
 section shown. Each key writes only the field it changed, so pressing `h`
 never carries `hide_inactive` back over a value the file gained since this
-dashboard last read it, and pressing `i` never carries `hidden` back either.
+dashboard last read it, and pressing `d` never carries `hidden` back either.
 The edit is surgical, so a hand written file keeps its comments, its blank
 lines and the order of everything in it. `r` on the
 [dashboard](dashboard.md), and `c`'s reload once its editor closes, re-read
