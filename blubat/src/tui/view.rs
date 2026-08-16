@@ -112,7 +112,7 @@ pub struct View {
     /// same substring matches `--device` takes, and what `h` writes back.
     pub hidden: Vec<String>,
     pub show_hidden: bool,
-    /// Whether the disconnected section is left off the table, which `i`
+    /// Whether the disconnected section is left off the table, which `d`
     /// toggles and, like `h` toggling `hidden`, writes back to the config file.
     pub hide_inactive: bool,
 }

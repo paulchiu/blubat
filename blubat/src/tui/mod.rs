@@ -141,7 +141,7 @@ pub fn run(paths: &Paths) -> Result<(), Failure> {
             app = update(app, Event::Refreshed);
         }
         if let Some(field) = app.save_dashboard {
-            // Only the field `h` or `i` actually changed travels to the write,
+            // Only the field `h` or `d` actually changed travels to the write,
             // so it never carries the other's possibly stale in-memory value
             // over a change the file gained since this dashboard last read it.
             let written = match field {

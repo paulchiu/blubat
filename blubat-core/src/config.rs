@@ -1,7 +1,7 @@
 //! The TOML file at `~/.config/blubat/config.toml`.
 //!
 //! The file is user intent: blubat maintains `[dashboard] hidden` and
-//! `[dashboard] hide_inactive` from the dashboard's own `h` and `i`, and
+//! `[dashboard] hide_inactive` from the dashboard's own `h` and `d`, and
 //! introduces a file that predates the self-documenting template to it once,
 //! but everything else in the file stays exactly as the user left it. It is
 //! also optional: everything here has a built-in default, so a machine with
@@ -318,7 +318,7 @@ pub struct Dashboard {
     pub hidden: Vec<String>,
     pub sort: Sort,
     /// Whether the dashboard opens with the disconnected section already
-    /// left off. `i` maintains this the same way `h` maintains `hidden`: the
+    /// left off. `d` maintains this the same way `h` maintains `hidden`: the
     /// only two fields blubat ever writes back into the file. The key name
     /// predates the connected/disconnected wording.
     pub hide_inactive: bool,
