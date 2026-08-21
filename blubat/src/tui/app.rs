@@ -13,7 +13,7 @@ use blubat_core::{
 };
 
 use super::journal::Journal;
-use super::theme::{self, Look};
+use super::theme::Look;
 use super::view::{Filter, Rows, Sort, View};
 
 /// One advertised key: what to press, and what pressing it does.
@@ -450,15 +450,6 @@ impl App {
         )
     }
 
-    /// Whether a device has gone quiet for longer than the config allows.
-    ///
-    /// The core's own rule against the clock the dashboard is drawing at, so a
-    /// row marked stale is one blubat has raised `stale` for rather than one it
-    /// merely drew that way.
-    pub fn is_stale(&self, device: &Device) -> bool {
-        device.is_stale(self.config.poll.stale_after, self.now)
-    }
-
     /// The devices of the last reading, empty before the first one lands.
     pub fn devices(&self) -> &[Device] {
         self.reading
@@ -478,11 +469,13 @@ impl App {
 
     /// Connected devices low enough to want attention.
     ///
-    /// A disconnected device can never count: its level is what macOS last
-    /// persisted, so it is history rather than an alert.
+    /// One fold over [`App::status`], so this count and the rows it summarises
+    /// read the same classification and cannot disagree. A disconnected device
+    /// can never count: its level is what macOS last persisted, so it is
+    /// history rather than an alert.
     pub fn critical(&self) -> usize {
         self.connected()
-            .filter(|device| theme::is_critical(device.active_level(), self.thresholds(device)))
+            .filter(|device| self.status(device).alerting)
             .count()
     }
 

@@ -16,6 +16,7 @@ mod events;
 mod glyph;
 mod journal;
 mod render;
+mod status;
 mod terminal;
 mod theme;
 mod view;

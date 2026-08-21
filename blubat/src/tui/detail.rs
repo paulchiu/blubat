@@ -17,6 +17,7 @@ use ratatui::widgets::{Axis, Block, BorderType, Chart, Dataset, GraphType, Parag
 
 use super::app::App;
 use super::render;
+use super::status::Link;
 use super::theme::{self, Palette};
 
 /// Seconds in the hour the chart's axis and the rates are both stated in.
@@ -167,17 +168,17 @@ fn sub_levels<'a>(app: &'a App, device: &'a Device) -> impl Iterator<Item = Line
 /// Where the reading came from, whether the link is up, and how old it is.
 fn reading_line(app: &App, device: &Device) -> Line<'static> {
     let palette = app.look.palette;
-    let link = if device.connected {
-        "connected"
-    } else {
-        "last seen"
+    let status = app.status(device);
+    let link = match status.link {
+        Link::Live(_) => "connected",
+        Link::LastSeen => "last seen",
     };
     let said = format!(
         "{link}{SEPARATOR}{}{SEPARATOR}last reading {}",
         device.source,
         theme::age(app.now.unix().saturating_sub(device.read_at.unix()))
     );
-    let stale = if app.is_stale(device) {
+    let stale = if status.stale {
         Span::styled(format!("{SEPARATOR}stale"), palette.low)
     } else {
         Span::raw("")
@@ -192,10 +193,9 @@ fn reading_line(app: &App, device: &Device) -> Line<'static> {
 /// battery is and a rate says how fast it is moving, but only the two together
 /// answer whether to go and find the cable.
 fn doing(app: &App, device: &Device) -> String {
-    let state = if device.connected {
-        device.charge.to_string()
-    } else {
-        "last seen level".to_string()
+    let state = match app.status(device).link {
+        Link::Live(charge) => charge.to_string(),
+        Link::LastSeen => "last seen level".to_string(),
     };
 
     match estimate(app, device) {

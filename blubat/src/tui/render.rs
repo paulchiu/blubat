@@ -4,7 +4,7 @@
 //! already says. Every function takes the state borrowed and returns a widget,
 //! so a view can be drawn into a test buffer without a terminal.
 
-use blubat_core::{ChargeState, Device, Thresholds};
+use blubat_core::{Device, Thresholds};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -15,7 +15,8 @@ use super::app::{App, Binding, DETAIL_KEYS, Mode, NOTES, Notice, dashboard_keys}
 use super::columns::{self, Column};
 use super::detail;
 use super::glyph::Glyphs;
-use super::theme::{self, Palette};
+use super::status::{Badge, Status};
+use super::theme::{self, Look, Palette};
 use super::view::{Direction, Rows, Sort, View};
 
 /// Kept in front of every name so rows stay aligned whatever the gutter holds.
@@ -202,7 +203,8 @@ fn warnings(count: usize, palette: Palette) -> Span<'static> {
     }
 }
 
-/// Only connected devices can be critical, so the disconnected section never shows here.
+/// Only a live reading can alert, a [`Status`] invariant, so the disconnected
+/// section never shows here.
 fn alert_line(critical: usize, palette: Palette) -> Line<'static> {
     match critical {
         0 => Line::from(Span::styled("all ok", palette.dim)).right_aligned(),
@@ -373,11 +375,10 @@ fn device_row<'a>(
     section: Section,
 ) -> Row<'a> {
     let palette = app.look.palette;
-    let critical = section == Section::Connected
-        && theme::is_critical(device.active_level(), app.thresholds(device));
+    let status = app.status(device);
     let cells = columns
         .iter()
-        .map(|column| cell(app, device, *column, section, critical))
+        .map(|column| cell(app, device, *column, section, status))
         .collect::<Vec<_>>();
 
     Row::new(cells).style(section.tint(palette.text, palette))
@@ -388,7 +389,7 @@ fn cell<'a>(
     device: &'a Device,
     column: Column,
     section: Section,
-    critical: bool,
+    status: Status,
 ) -> Cell<'a> {
     let palette = app.look.palette;
     let level = device.levels.lowest();
@@ -398,7 +399,7 @@ fn cell<'a>(
         Column::Name => Cell::from(name(
             device,
             section,
-            critical,
+            status,
             app.view.hides(device),
             palette,
             &app.look.glyphs,
@@ -418,14 +419,14 @@ fn cell<'a>(
             .right_aligned(),
         ),
         Column::State => {
-            let (text, colour) = state(app, device, critical);
+            let (text, colour) = state(&app.look, status);
 
             Cell::from(Span::styled(text, section.tint(colour, palette)))
         }
         Column::Trend => Cell::from(Span::styled(
             theme::sparkline(&recent_levels(app, device)),
             section.tint(
-                if critical {
+                if status.alerting {
                     palette.critical
                 } else {
                     palette.text
@@ -463,17 +464,17 @@ fn recent_levels(app: &App, device: &Device) -> Vec<u8> {
 fn name<'a>(
     device: &'a Device,
     section: Section,
-    critical: bool,
+    status: Status,
     hidden: bool,
     palette: Palette,
     glyphs: &Glyphs,
 ) -> Line<'a> {
-    let marker = if critical {
+    let marker = if status.alerting {
         Span::styled(ALERT, palette.critical)
     } else {
         Span::raw(GUTTER)
     };
-    let colour = if critical {
+    let colour = if status.alerting {
         palette.alert
     } else {
         section.tint(palette.strong, palette)
@@ -507,29 +508,28 @@ fn bar(
 
 /// What a device is doing, which is not always something it is doing.
 ///
-/// A device no source has a level for is unreported rather than absent; one
-/// that has stopped reporting is stale, which is the same rule the `stale`
-/// event is raised by; and a disconnected one's level is labelled last seen,
-/// since macOS keeps reporting it with no timestamp long after the device went
-/// away.
-fn state(app: &App, device: &Device, critical: bool) -> (String, Color) {
-    let palette = app.look.palette;
+/// A pure map from the badge to the column's text and colour: which badge wins
+/// is decided by [`Status::badge`], and the one nuance kept here is that an
+/// alerting device keeps its charge text in the alert colour.
+fn state(look: &Look, status: Status) -> (String, Color) {
+    let palette = look.palette;
 
-    if !device.has_battery() {
-        ("unreported".to_string(), palette.dim)
-    } else if app.is_stale(device) {
-        ("stale".to_string(), palette.low)
-    } else if !device.connected {
-        ("last seen".to_string(), palette.dim)
-    } else if device.charge == ChargeState::Charging {
-        (
-            format!("{} charging", app.look.glyphs.charging),
+    match status.badge() {
+        Badge::Unreported => ("unreported".to_string(), palette.dim),
+        Badge::Stale => ("stale".to_string(), palette.low),
+        Badge::LastSeen => ("last seen".to_string(), palette.dim),
+        Badge::Charging => (
+            format!("{} charging", look.glyphs.charging),
             palette.charging,
-        )
-    } else if critical {
-        (device.charge.to_string(), palette.alert)
-    } else {
-        (device.charge.to_string(), palette.text)
+        ),
+        Badge::Doing(charge) => (
+            charge.to_string(),
+            if status.alerting {
+                palette.alert
+            } else {
+                palette.text
+            },
+        ),
     }
 }
 
@@ -1448,6 +1448,59 @@ mod tests {
     #[test]
     fn a_dashboard_with_nothing_low_says_so() {
         assert!(screen(&loaded()).contains("all ok"));
+    }
+
+    /// The state column as a pure table over the badge, no frame needed: the
+    /// classification's edge cases live with [`App::status`], and this pins
+    /// what each answer looks like.
+    #[test]
+    fn the_state_column_maps_each_badge_to_its_text_and_colour() {
+        use super::super::status::Link;
+
+        let look = app().look;
+        let palette = look.palette;
+        let of = |link, stale, reported, alerting| Status {
+            link,
+            stale,
+            reported,
+            alerting,
+        };
+        let cases = [
+            (
+                of(Link::LastSeen, true, false, false),
+                "unreported".to_string(),
+                palette.dim,
+            ),
+            (
+                of(Link::LastSeen, true, true, false),
+                "stale".to_string(),
+                palette.low,
+            ),
+            (
+                of(Link::LastSeen, false, true, false),
+                "last seen".to_string(),
+                palette.dim,
+            ),
+            (
+                of(Link::Live(ChargeState::Charging), false, true, true),
+                format!("{} charging", look.glyphs.charging),
+                palette.charging,
+            ),
+            (
+                of(Link::Live(ChargeState::Discharging), false, true, true),
+                ChargeState::Discharging.to_string(),
+                palette.alert,
+            ),
+            (
+                of(Link::Live(ChargeState::Discharging), false, true, false),
+                ChargeState::Discharging.to_string(),
+                palette.text,
+            ),
+        ];
+
+        for (status, text, colour) in cases {
+            assert_eq!(state(&look, status), (text, colour));
+        }
     }
 
     #[test]
