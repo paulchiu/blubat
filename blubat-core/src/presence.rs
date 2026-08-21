@@ -10,7 +10,7 @@
 //! device that reports through `system_profiler` alone still arrives on the
 //! ordinary tick.
 
-#![allow(unsafe_code)]
+#![expect(unsafe_code)]
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::mpsc::Sender;
@@ -90,7 +90,7 @@ fn register(
             Some(matching),
             Some(changed),
             refcon,
-            &mut iterator,
+            &raw mut iterator,
         )
     };
     if result != 0 || iterator == 0 {

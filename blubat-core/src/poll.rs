@@ -163,7 +163,7 @@ where
     // on rather than picking between two receivers.
     let (prompt, prompted) = mpsc::channel();
     let device_prompt = prompt.clone();
-    thread::spawn(move || relay_nudges(nudges, device_prompt));
+    thread::spawn(move || relay_nudges(&nudges, &device_prompt));
 
     thread::spawn(move || {
         slow_tier(
@@ -174,7 +174,7 @@ where
             &prompt,
             &wanted,
             &retiered_slow,
-        )
+        );
     });
     thread::spawn(move || {
         let wires = FastWires {
@@ -185,7 +185,7 @@ where
             retier: &retiered_fast,
         };
 
-        fast_tier(tiers, fast, clock, wires, &readings_file)
+        fast_tier(tiers, fast, clock, &wires, &readings_file);
     });
 
     (
@@ -231,8 +231,8 @@ enum Prompt {
 /// [`presence::watch`] and [`Retier::refresh`] only know how to send a plain
 /// nudge; this is the one place that tags it as [`Prompt::Nudge`] so the fast
 /// tier can tell it apart from the slow tier's own [`Prompt::Ready`].
-fn relay_nudges(nudges: Receiver<()>, prompt: Sender<Prompt>) {
-    for _ in nudges.iter() {
+fn relay_nudges(nudges: &Receiver<()>, prompt: &Sender<Prompt>) {
+    for () in nudges {
         if prompt.send(Prompt::Nudge).is_err() {
             break;
         }
@@ -367,7 +367,7 @@ fn fast_tier(
     mut tiers: Tiers,
     read: impl Fn(Timestamp, &mut Vec<String>) -> Vec<Device>,
     clock: impl Fn() -> Timestamp,
-    wires: FastWires<'_>,
+    wires: &FastWires<'_>,
     readings_file: &Path,
 ) {
     let mut latest = Cached::default();

@@ -518,14 +518,14 @@ mod tests {
 
     const HOUR: f64 = 3_600.0;
 
-    fn trend(rate: f64) -> Option<Trend> {
+    fn trend(rate: f64) -> Trend {
         let direction = match rate {
             rate if rate > 0.0 => Direction::Rising,
             rate if rate < 0.0 => Direction::Falling,
             _ => Direction::Flat,
         };
 
-        Some(Trend { rate, direction })
+        Trend { rate, direction }
     }
 
     fn levels(present: [Option<u8>; 4]) -> Levels {
@@ -538,7 +538,7 @@ mod tests {
     }
 
     fn estimate(level: Option<u8>, rate: f64) -> Option<Estimate> {
-        Estimate::of(level, trend(rate), Thresholds::BUILT_IN)
+        Estimate::of(level, Some(trend(rate)), Thresholds::BUILT_IN)
     }
 
     #[test]
@@ -605,7 +605,7 @@ mod tests {
         };
 
         assert_eq!(
-            Estimate::of(Some(20), trend(10.0), unplug_at_80),
+            Estimate::of(Some(20), Some(trend(10.0)), unplug_at_80),
             Some(Estimate::ToFull(6 * HOUR as i64))
         );
     }
@@ -634,14 +634,14 @@ mod tests {
 
     #[test]
     fn a_rate_is_labelled_by_the_direction_that_makes_it_news() {
-        assert_eq!(rate_label(trend(10.0)), "charge rate");
-        assert_eq!(rate_label(trend(-4.0)), "drain rate");
-        assert_eq!(rate_label(trend(0.0)), "rate");
+        assert_eq!(rate_label(Some(trend(10.0))), "charge rate");
+        assert_eq!(rate_label(Some(trend(-4.0))), "drain rate");
+        assert_eq!(rate_label(Some(trend(0.0))), "rate");
         assert_eq!(rate_label(None), "rate");
 
-        assert_eq!(rate(trend(-4.24)), "4.2%/h");
+        assert_eq!(rate(Some(trend(-4.24))), "4.2%/h");
         assert_eq!(rate(None), theme::UNKNOWN);
-        assert_eq!(direction(trend(10.0)), "rising");
+        assert_eq!(direction(Some(trend(10.0))), "rising");
         assert_eq!(direction(None), theme::UNKNOWN);
     }
 

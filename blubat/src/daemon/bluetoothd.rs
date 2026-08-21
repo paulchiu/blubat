@@ -37,7 +37,7 @@
 //! Settings shows; the case value does not reliably, and a level is only
 //! worth reporting where blubat can stand behind it.
 
-#![allow(unsafe_code)]
+#![expect(unsafe_code)]
 
 use std::io::{Read, Write};
 use std::process::{Command, ExitStatus, Stdio};

@@ -34,7 +34,7 @@
 //! use, so [`sweep`] is exercised below with a fake and none of its tests
 //! need a paired Bose headset or Bluetooth permission of their own.
 
-#![allow(unsafe_code)]
+#![expect(unsafe_code)]
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -163,7 +163,7 @@ impl Channel for IoBluetooth {
         // SAFETY: `query` outlives the call, and its length matches what is
         // handed over.
         let write_status = unsafe {
-            channel.writeSync_length(query.as_mut_ptr() as *mut c_void, query.len() as u16)
+            channel.writeSync_length(query.as_mut_ptr().cast::<c_void>(), query.len() as u16)
         };
         if write_status != 0 {
             // SAFETY: closing a channel this attempt opened.

@@ -134,7 +134,7 @@ impl From<blubat_core::Error> for Failure {
 
 fn main() -> ExitCode {
     match Cli::try_parse() {
-        Ok(cli) => run(cli).map_or_else(fail, |()| ExitCode::SUCCESS),
+        Ok(cli) => run(cli).map_or_else(|failure| fail(&failure), |()| ExitCode::SUCCESS),
         Err(usage) => {
             let _ = usage.print();
 
@@ -225,7 +225,7 @@ impl From<io::Error> for Failure {
     }
 }
 
-fn fail(failure: Failure) -> ExitCode {
+fn fail(failure: &Failure) -> ExitCode {
     eprintln!("blubat: {failure}");
 
     ExitCode::from(failure.code())

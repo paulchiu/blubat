@@ -7,7 +7,7 @@
 //! reading.
 
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
@@ -43,42 +43,28 @@ impl Admission {
 
     /// Whether the reader may read the terminal at this instant.
     fn allowed(&self) -> bool {
-        *self
-            .open
-            .0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        *self.open.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Parks the calling thread until [`Self::resume`] opens the gate again.
     fn wait_until_allowed(&self) {
         let (lock, woken) = &*self.open;
-        let mut allowed = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut allowed = lock.lock().unwrap_or_else(PoisonError::into_inner);
 
         while !*allowed {
-            allowed = woken
-                .wait(allowed)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            allowed = woken.wait(allowed).unwrap_or_else(PoisonError::into_inner);
         }
     }
 
     /// Closes the gate: the reader stops touching the terminal at its next
     /// check, which is at most one [`POLL`] away.
     pub fn suspend(&self) {
-        *self
-            .open
-            .0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+        *self.open.0.lock().unwrap_or_else(PoisonError::into_inner) = false;
     }
 
     /// Opens the gate and wakes a reader parked in [`Self::wait_until_allowed`].
     pub fn resume(&self) {
-        *self
-            .open
-            .0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        *self.open.0.lock().unwrap_or_else(PoisonError::into_inner) = true;
         self.open.1.notify_all();
     }
 }
@@ -153,7 +139,7 @@ fn keypresses(admission: Admission) -> impl Iterator<Item = Event> {
                         Err(_) => return None,
                     }
                 }
-                Ok(false) => continue,
+                Ok(false) => {}
                 Err(_) => return None,
             }
         }

@@ -104,12 +104,12 @@ impl Palette {
         };
 
         Self {
-            accent: colour(theme.accent).unwrap_or(base.accent),
-            ok: colour(theme.ok).unwrap_or(base.ok),
-            charging: colour(theme.ok).unwrap_or(base.charging),
-            low: colour(theme.low).unwrap_or(base.low),
-            critical: colour(theme.critical).unwrap_or(base.critical),
-            alert: colour(theme.critical).unwrap_or(base.alert),
+            accent: theme.accent.map_or(base.accent, colour),
+            ok: theme.ok.map_or(base.ok, colour),
+            charging: theme.ok.map_or(base.charging, colour),
+            low: theme.low.map_or(base.low, colour),
+            critical: theme.critical.map_or(base.critical, colour),
+            alert: theme.critical.map_or(base.alert, colour),
             ..base
         }
     }
@@ -164,8 +164,8 @@ impl Look {
 }
 
 /// One config colour as ratatui draws it.
-fn colour(rgb: Option<Rgb>) -> Option<Color> {
-    rgb.map(|rgb| Color::Rgb(rgb.red, rgb.green, rgb.blue))
+fn colour(rgb: Rgb) -> Color {
+    Color::Rgb(rgb.red, rgb.green, rgb.blue)
 }
 
 /// Stands in for anything no source reported, as the CLI prints it.
