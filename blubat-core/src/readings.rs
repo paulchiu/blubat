@@ -129,6 +129,11 @@ struct Document {
 }
 
 /// Writes the sweep atomically, the same idiom every other state file uses.
+///
+/// # Errors
+///
+/// Returns [`Error::Format`] if the readings cannot be serialised to TOML, or
+/// [`Error::Io`] if the file cannot be written.
 pub fn save(path: &Path, readings: &[Reading]) -> Result<()> {
     let document = Document {
         readings: readings.to_vec(),

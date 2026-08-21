@@ -32,6 +32,7 @@ borrow_as_ptr = { level = "deny", priority = 1 }
 format_collect = { level = "deny", priority = 1 }
 single_option_map = { level = "deny", priority = 1 }
 needless_pass_by_value = { level = "deny", priority = 1 }
+missing_errors_doc = { level = "deny", priority = 1 }
 
 [workspace.package]
 version = "0.17.1"

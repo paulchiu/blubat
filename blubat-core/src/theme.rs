@@ -29,6 +29,11 @@ pub struct Rgb {
 
 impl Rgb {
     /// Parses `#39c5cf`, with or without the hash and in either case.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] when, once an optional leading `#` is
+    /// stripped, the text is not exactly six hexadecimal digits.
     pub fn parse(text: &str) -> Result<Self> {
         let trimmed = text.trim();
         let digits = trimmed.strip_prefix('#').unwrap_or(trimmed);

@@ -31,6 +31,11 @@ pub struct Paths {
 
 impl Paths {
     /// The XDG locations: `~/.config/blubat` and `~/.local/state/blubat`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Path`] when the OS reports no home directory to build
+    /// the XDG bases from.
     pub fn resolve() -> Result<Self> {
         Xdg::new()
             .map_err(|error| Error::Path(error.to_string()))

@@ -49,6 +49,12 @@ impl Watch {
     }
 
     /// Reads one watch file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if the file cannot be read, and [`Error::Format`]
+    /// if it exists but is not a valid watch: bad TOML, an unknown key, or a
+    /// timestamp that does not parse.
     pub fn read(path: &Path) -> Result<Self> {
         Self::parse(&fs::read_to_string(path).map_err(|source| Error::Io {
             path: path.to_path_buf(),
@@ -57,6 +63,11 @@ impl Watch {
     }
 
     /// Writes the watch into `directory`, creating it if needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the watch cannot be serialised to TOML, or
+    /// [`Error::Io`] if the file cannot be written.
     pub fn write(&self, directory: &Path) -> Result<PathBuf> {
         let path = directory.join(self.file_name());
 
