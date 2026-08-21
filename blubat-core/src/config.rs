@@ -48,11 +48,23 @@ pub struct Config {
 
 impl Config {
     /// Parses config text, rejecting unknown keys and unparseable values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] when the text is not TOML, sets a key this
+    /// shape does not define, or gives a duration, colour or event name that
+    /// does not parse.
     pub fn parse(contents: &str) -> Result<Self> {
         toml::from_str(contents).map_err(|error| Error::Format(error.to_string()))
     }
 
     /// Reads the config file. `Ok(None)` when there is none, which is not an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] when the file exists but cannot be read, and
+    /// [`Error::Format`], prefixed with the path, for whatever [`Config::parse`]
+    /// rejects.
     pub fn read(path: &Path) -> Result<Option<Self>> {
         match fs::read_to_string(path) {
             Ok(contents) => Self::parse(&contents)
@@ -67,6 +79,11 @@ impl Config {
     }
 
     /// The config in force: the file's, or the built-in defaults without one.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Config::read`]: an unreadable file, or one
+    /// that fails to parse.
     pub fn load(path: &Path) -> Result<Self> {
         Self::read(path).map(Option::unwrap_or_default)
     }

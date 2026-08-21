@@ -11,6 +11,12 @@ use crate::error::{Error, Result};
 const UNITS: [(char, u64); 3] = [('s', 1), ('m', 60), ('h', 3_600)];
 
 /// Parses a duration written as bare seconds or with an `s`, `m` or `h` suffix.
+///
+/// # Errors
+///
+/// Returns [`Error::Format`] when the text is not digits with an optional
+/// `s`, `m` or `h` suffix, or when the count would overflow a `u64` once
+/// scaled to seconds.
 pub fn parse_duration(text: &str) -> Result<Duration> {
     let text = text.trim();
     let (digits, per_unit) = UNITS

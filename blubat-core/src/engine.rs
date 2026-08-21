@@ -161,6 +161,11 @@ impl Engine {
     }
 
     /// Writes the state file atomically, creating the state directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the state cannot be serialised to TOML, or
+    /// [`Error::Io`] if the state file cannot be written.
     pub fn save(&self, path: &Path) -> Result<()> {
         toml::to_string(self)
             .map_err(|error| Error::Format(format!("state file is unwritable: {error}")))
