@@ -29,6 +29,8 @@ pub enum Command {
     Install,
     /// Stop the LaunchAgent and remove it.
     Uninstall,
+    /// Re-register and restart the LaunchAgent, which an upgraded binary needs.
+    Restart,
     /// Report whether the LaunchAgent is installed, loaded and running.
     Status,
     /// Print what macOS has cached for every paired device, as JSON.
@@ -51,6 +53,7 @@ pub fn run(command: &Command, paths: &Paths) -> Result<(), Failure> {
             launchd::install(&launchd::Cli, paths, &launchd::plist_file()?, &mut out)
         }
         Command::Uninstall => launchd::uninstall(&launchd::Cli, &launchd::plist_file()?, &mut out),
+        Command::Restart => launchd::restart(&launchd::Cli, &launchd::plist_file()?, &mut out),
         Command::Status => launchd::status(&launchd::Cli, &launchd::plist_file()?, &mut out),
         Command::CachedLevels => bluetoothd::print_cache(&mut out),
     }
