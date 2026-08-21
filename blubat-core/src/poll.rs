@@ -54,16 +54,20 @@ pub fn snapshot(readings_file: &Path) -> Snapshot {
 
 /// Polls both tiers on their own threads and delivers merged snapshots.
 ///
-/// Each tier reads once before its first wait, and both threads end once the
-/// returned receiver is dropped, so a caller that stops listening stops the
-/// polling. The channel is unbounded and only ever sent on from the fast tier,
-/// so a consumer that renders slowly is never made to wait on a reading, and a
-/// `system_profiler` call that hangs holds up nothing but its own tier.
+/// Each tier reads once before its first wait, and every thread here ends
+/// once the returned receiver is dropped, so a caller that stops listening
+/// stops the polling. The channel is unbounded and only ever sent on from the
+/// fast tier, so a consumer that renders slowly is never made to wait on a
+/// reading, and a `system_profiler` call that hangs holds up nothing but its
+/// own tier.
 ///
 /// A device arriving or going away cuts the wait short on both tiers, since
 /// that is the moment a held reading is most misleading. The fast tier reads
 /// on every nudge; the slow one reads once and then sits out [`EARLY_FLOOR`],
-/// since a flapping link must not turn into a stream of expensive calls.
+/// since a flapping link must not turn into a stream of expensive calls. The
+/// slow tier's own answer cuts the fast tier's wait short too, so a snapshot
+/// never carries a saved or IOKit-only reading for longer than the slow
+/// source takes to answer, whatever the fast interval is set to.
 ///
 /// Every reading is also merged with whatever the daemon's own sweeps have
 /// most recently left in `readings_file`, re-read on every fast
@@ -154,13 +158,30 @@ where
     let (retier_slow, retiered_slow) = mpsc::channel();
     let slow_clock = clock.clone();
 
-    thread::spawn(move || slow_tier(tiers, slow, slow_clock, &refreshed, &wanted, &retiered_slow));
+    // A nudge and the slow tier's own answer both need to cut the fast
+    // tier's wait short, so both are relayed onto one channel it can block
+    // on rather than picking between two receivers.
+    let (prompt, prompted) = mpsc::channel();
+    let device_prompt = prompt.clone();
+    thread::spawn(move || relay_nudges(nudges, device_prompt));
+
+    thread::spawn(move || {
+        slow_tier(
+            tiers,
+            slow,
+            slow_clock,
+            &refreshed,
+            &prompt,
+            &wanted,
+            &retiered_slow,
+        )
+    });
     thread::spawn(move || {
         let wires = FastWires {
             snapshots: &snapshots,
             cached: &cached,
             polling,
-            nudges: &nudges,
+            prompted: &prompted,
             retier: &retiered_fast,
         };
 
@@ -186,8 +207,36 @@ struct FastWires<'a> {
     snapshots: &'a Sender<Snapshot>,
     cached: &'a Receiver<Cached>,
     polling: Sender<()>,
-    nudges: &'a Receiver<()>,
+    prompted: &'a Receiver<Prompt>,
     retier: &'a Receiver<Tiers>,
+}
+
+/// What has told the fast tier to stop waiting early.
+///
+/// A real nudge and the slow tier's own answer travel over the same channel
+/// so the fast tier's wait can be cut short by either without choosing
+/// between two receivers to block on. [`waited`] is where they part ways
+/// again: only a nudge is worth passing on to the slow tier, since an answer
+/// it already sent has nothing left to hurry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Prompt {
+    /// A device arrived or left, or a caller asked for a manual refresh.
+    Nudge,
+    /// The slow tier just delivered a fresh reading.
+    Ready,
+}
+
+/// Relays every external nudge onto the fast tier's combined wait channel.
+///
+/// [`presence::watch`] and [`Retier::refresh`] only know how to send a plain
+/// nudge; this is the one place that tags it as [`Prompt::Nudge`] so the fast
+/// tier can tell it apart from the slow tier's own [`Prompt::Ready`].
+fn relay_nudges(nudges: Receiver<()>, prompt: Sender<Prompt>) {
+    for _ in nudges.iter() {
+        if prompt.send(Prompt::Nudge).is_err() {
+            break;
+        }
+    }
 }
 
 /// The last `system_profiler` reading, reused until the slow tier replaces it.
@@ -255,7 +304,10 @@ const EARLY_FLOOR: Duration = Duration::from_secs(5);
 ///
 /// Waiting on `wanted` is how this tier sleeps, how the fast tier asks it for
 /// an early read, and how it learns the fast tier has ended, so a shutdown does
-/// not wait out an interval measured in minutes.
+/// not wait out an interval measured in minutes. `prompt` is the other half of
+/// that relationship: every reading, not only an early one, tells the fast
+/// tier to stop waiting and fold it in, rather than leaving a snapshot to
+/// carry a saved or IOKit-only reading until the fast tier's own next tick.
 ///
 /// `tiers` starts as whatever the caller polled with and is replaced by
 /// whatever [`Retier::set`] has most recently sent, picked up at the top of
@@ -266,6 +318,7 @@ fn slow_tier(
     read: impl Fn(Timestamp, Duration, &mut Vec<String>) -> Result<Vec<Device>>,
     clock: impl Fn() -> Timestamp,
     refreshed: &Sender<Cached>,
+    prompt: &Sender<Prompt>,
     wanted: &Receiver<()>,
     retier: &Receiver<Tiers>,
 ) {
@@ -279,6 +332,8 @@ fn slow_tier(
         if refreshed.send(held.clone()).is_err() {
             break;
         }
+        let _ = prompt.send(Prompt::Ready);
+
         if early {
             thread::sleep(EARLY_FLOOR);
             wanted.try_iter().for_each(drop);
@@ -295,12 +350,14 @@ fn slow_tier(
 /// Reads the fast source on every tick and sends the merged snapshot on.
 ///
 /// Takes whatever the slow tier has published without ever waiting for it, so
-/// the first readings carry IOKit alone and fill in once a slow reading lands.
-/// A nudge cuts the tick short here and is passed on to the slow tier, whose
-/// answer lands on the tick after it. Dropping `polling` as this loop ends is
-/// what stops that tier. `readings_file` is re-read on every tick rather than
-/// cached, since it is small and only the daemon's own sweeps, on their own
-/// much slower cadence, ever change it.
+/// the first readings carry IOKit alone; a nudge or the slow tier's own
+/// answer landing both cut the wait short, so a fill-in reading follows
+/// within moments rather than waiting out a fast interval that can run to
+/// minutes. Only a nudge is passed on to the slow tier, since an answer it
+/// only just sent has nothing left to hurry. Dropping `polling` as this loop
+/// ends is what stops that tier. `readings_file` is re-read on every tick
+/// rather than cached, since it is small and only the daemon's own sweeps, on
+/// their own much slower cadence, ever change it.
 ///
 /// `tiers` starts as whatever the caller polled with and is replaced by
 /// whatever [`Retier::set`] has most recently sent, picked up at the top of
@@ -324,30 +381,44 @@ fn fast_tier(
         if wires.snapshots.send(reading).is_err() {
             break;
         }
-        if waited(wires.nudges, tiers.fast) == Wake::Nudged {
+        if waited(wires.prompted, tiers.fast) == Wake::Nudged {
             let _ = wires.polling.send(());
         }
     }
 }
 
-/// Why a tier stopped waiting.
+/// Why the fast tier's wait ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Wake {
     Tick,
     Nudged,
+    /// The slow tier answered. Handled like [`Wake::Nudged`] everywhere
+    /// except forwarding, since an answer that just landed has nothing left
+    /// to ask the slow tier to hurry.
+    Readied,
 }
 
-/// Waits out one tick, cut short by a device arriving or going away.
+/// Waits out one tick, cut short by a nudge or the slow tier answering.
 ///
-/// One nudge stands for however many arrived while the tier was reading, since
-/// they all ask for the same thing. A nudge source that has gone away leaves
-/// the tier on its plain interval rather than spinning on a dead channel.
-fn waited(nudges: &Receiver<()>, interval: Duration) -> Wake {
-    match nudges.recv_timeout(interval) {
-        Ok(()) => {
-            nudges.try_iter().for_each(drop);
+/// One prompt stands for however many arrived while the tier was reading: a
+/// run of nudges all ask for the same thing, a run of answers is already
+/// folded into the latest one by the top of the next loop, and a nudge
+/// anywhere in the run still wins over any answers alongside it, since a
+/// device event queued behind an answer is no less real for having arrived
+/// second. A prompt source that has gone away leaves the tier on its plain
+/// interval rather than spinning on a dead channel.
+fn waited(prompted: &Receiver<Prompt>, interval: Duration) -> Wake {
+    match prompted.recv_timeout(interval) {
+        Ok(first) => {
+            // Drained in full rather than stopping at the first nudge found,
+            // so a flap does not leave leftovers for the next wait to trip
+            // over immediately.
+            let mut nudged = first == Prompt::Nudge;
+            for prompt in prompted.try_iter() {
+                nudged |= prompt == Prompt::Nudge;
+            }
 
-            Wake::Nudged
+            if nudged { Wake::Nudged } else { Wake::Readied }
         }
         Err(RecvTimeoutError::Timeout) => Wake::Tick,
         Err(RecvTimeoutError::Disconnected) => {
@@ -634,6 +705,45 @@ mod tests {
     }
 
     #[test]
+    fn a_slow_reading_reaches_the_fast_tier_without_waiting_out_its_interval() {
+        let slow_reads = Arc::new(AtomicI64::new(0));
+        let (nudge, nudges) = unnudged();
+        let (receiver, _retier) = poll_with(
+            Tiers {
+                fast: Duration::from_secs(3_600),
+                slow: Duration::from_secs(3_600),
+                ..Tiers::default()
+            },
+            |_, _| vec![trackpad()],
+            counting_slow(Arc::clone(&slow_reads)),
+            frozen(),
+            nudge,
+            nudges,
+            no_readings(),
+        );
+
+        // Whether the very first reading already carries the merge, or the
+        // slow tier answers a moment after it, is a race between the two
+        // threads: either order is correct, so this looks across both rather
+        // than asserting one.
+        let merged = (0..2).any(|_| {
+            receiver
+                .recv_timeout(Duration::from_secs(5))
+                .is_ok_and(|reading| reading.devices.len() == 2)
+        });
+
+        assert!(
+            merged,
+            "the slow tier's own answer reached the fast tier long before the hour is up"
+        );
+        assert_eq!(
+            slow_reads.load(Ordering::SeqCst),
+            1,
+            "folding the answer in did not ask the slow tier to read again"
+        );
+    }
+
+    #[test]
     fn a_nudge_reads_both_tiers_without_waiting_out_the_interval() {
         let fast_reads = Arc::new(AtomicI64::new(0));
         let slow_reads = Arc::new(AtomicI64::new(0));
@@ -704,6 +814,61 @@ mod tests {
                 slow_reads.load(Ordering::SeqCst) > 1
             }),
             "and the slow tier was asked for an early read too"
+        );
+    }
+
+    #[test]
+    fn a_nudge_queued_behind_a_slow_answer_still_reaches_the_slow_tier() {
+        let slow_reads = Arc::new(AtomicI64::new(0));
+        let (release_fast, held_fast) = mpsc::channel::<()>();
+        let (nudge, nudges) = mpsc::channel();
+        let (receiver, _retier) = poll_with(
+            Tiers {
+                fast: Duration::from_secs(3_600),
+                slow: Duration::from_secs(3_600),
+                ..Tiers::default()
+            },
+            move |_, _| {
+                // Held open so the slow tier's answer and the nudge below can
+                // both queue up before this tick's own wait ever runs, the
+                // same race a nudge landing behind an answer plays out in.
+                let _ = held_fast.recv();
+                vec![trackpad()]
+            },
+            counting_slow(Arc::clone(&slow_reads)),
+            frozen(),
+            nudge.clone(),
+            nudges,
+            no_readings(),
+        );
+
+        assert!(
+            (0..500).any(|_| {
+                thread::sleep(Duration::from_millis(10));
+                slow_reads.load(Ordering::SeqCst) >= 1
+            }),
+            "the slow tier answers while the fast tier's first read is still held"
+        );
+        // Room for the slow tier's answer to land on the shared wait channel
+        // ahead of the nudge sent next.
+        thread::sleep(Duration::from_millis(100));
+        nudge.send(()).expect("the poller is listening");
+        // Room for the nudge to land behind it before the fast tier is let go.
+        thread::sleep(Duration::from_millis(100));
+        release_fast
+            .send(())
+            .expect("the fast tier is waiting on this");
+
+        receiver
+            .recv()
+            .expect("the first reading, once the fast tier is let go");
+
+        assert!(
+            (0..500).any(|_| {
+                thread::sleep(Duration::from_millis(10));
+                slow_reads.load(Ordering::SeqCst) > 1
+            }),
+            "the nudge queued behind the answer still asked the slow tier to read again"
         );
     }
 
