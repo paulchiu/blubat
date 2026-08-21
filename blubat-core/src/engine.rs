@@ -152,11 +152,11 @@ impl Engine {
     pub fn load(path: &Path) -> (Self, Option<String>) {
         match fs::read_to_string(path) {
             Ok(contents) => toml::from_str(&contents).map_or_else(
-                |error| Self::fresh(format!("{}: {error}", path.display())),
+                |error| Self::fresh(&format!("{}: {error}", path.display())),
                 |engine| (engine, None),
             ),
             Err(error) if error.kind() == ErrorKind::NotFound => (Self::default(), None),
-            Err(error) => Self::fresh(format!("{}: {error}", path.display())),
+            Err(error) => Self::fresh(&format!("{}: {error}", path.display())),
         }
     }
 
@@ -167,7 +167,7 @@ impl Engine {
             .and_then(|contents| atomic::write(path, &contents))
     }
 
-    fn fresh(problem: String) -> (Self, Option<String>) {
+    fn fresh(problem: &str) -> (Self, Option<String>) {
         (
             Self::default(),
             Some(format!("{problem}, starting from fresh event state")),
@@ -750,7 +750,7 @@ mod tests {
         };
 
         let (engine, away) = engine.step(
-            &reading(vec![flat.clone()], 1),
+            &reading(vec![flat], 1),
             &config,
             &AdvertisedThresholds::new(),
             at(1),

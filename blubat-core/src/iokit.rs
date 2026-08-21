@@ -4,7 +4,7 @@
 //! this is both the only source for them and, at well under a millisecond, the
 //! one cheap enough to sit on a poll tick.
 
-#![allow(unsafe_code)]
+#![expect(unsafe_code)]
 
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -140,8 +140,7 @@ fn device(
     let name = properties
         .get("Product")
         .and_then(Property::text)
-        .map(str::to_string)
-        .unwrap_or_else(|| address.to_string());
+        .map_or_else(|| address.to_string(), str::to_string);
 
     Some(Device {
         address,
@@ -188,8 +187,9 @@ fn matching_entries() -> Vec<Properties> {
     let matching: CFRetained<CFDictionary> = unsafe { CFRetained::cast_unchecked(matching) };
 
     let mut iterator: io_iterator_t = 0;
-    let result =
-        unsafe { IOServiceGetMatchingServices(kIOMainPortDefault, Some(matching), &mut iterator) };
+    let result = unsafe {
+        IOServiceGetMatchingServices(kIOMainPortDefault, Some(matching), &raw mut iterator)
+    };
     if result != 0 || iterator == 0 {
         return entries;
     }

@@ -345,7 +345,7 @@ fn field(printed: &str, name: &str) -> Option<String> {
 ///
 /// `bootstrap` and `bootout` name a domain and a service in it; `load` and
 /// `unload` have been deprecated since OS X 10.10.
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 fn domain() -> String {
     // SAFETY: `getuid` reads no memory blubat owns and cannot fail.
     format!("gui/{}", unsafe { libc::getuid() })
@@ -367,7 +367,7 @@ fn home() -> Result<PathBuf, Failure> {
 fn executable() -> Result<PathBuf, Failure> {
     std::env::current_exe()
         .map(|path| path.canonicalize().unwrap_or(path))
-        .map(|path| stable(&path, |shim| shim.exists()))
+        .map(|path| stable(&path, std::path::Path::exists))
         .map_err(|error| Failure::Error(format!("cannot find this blubat: {error}")))
 }
 

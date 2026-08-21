@@ -25,7 +25,7 @@
 //! usefully is simply no reading for that peripheral this sweep, the
 //! one-attempt-no-retry discipline every other daemon sweep keeps.
 
-#![allow(unsafe_code)]
+#![expect(unsafe_code)]
 
 use std::cell::Cell;
 use std::time::{Duration, Instant};
@@ -262,14 +262,14 @@ fn read(
     // SAFETY: connecting to a peripheral macOS already has connected, which
     // is the only kind this sweep ever sees.
     delegate.awaiting(deadline, || unsafe {
-        manager.connectPeripheral_options(peripheral, None)
+        manager.connectPeripheral_options(peripheral, None);
     });
 
     let services = NSArray::from_slice(&[battery_service]);
     // SAFETY: a discovery filtered to the one service, answered on the
     // delegate this attempt just set.
     delegate.awaiting(deadline, || unsafe {
-        peripheral.discoverServices(Some(&services))
+        peripheral.discoverServices(Some(&services));
     });
     // SAFETY: reading what the discovery above left on the peripheral.
     let service = with_uuid(unsafe { peripheral.services() }, battery_service)?;
@@ -278,14 +278,14 @@ fn read(
     let characteristics = NSArray::from_slice(&[&*battery_level]);
     // SAFETY: as above, for the one characteristic inside that service.
     delegate.awaiting(deadline, || unsafe {
-        peripheral.discoverCharacteristics_forService(Some(&characteristics), &service)
+        peripheral.discoverCharacteristics_forService(Some(&characteristics), &service);
     });
     // SAFETY: reading what that discovery left on the service.
     let characteristic = with_uuid(unsafe { service.characteristics() }, &battery_level)?;
 
     // SAFETY: a read of a characteristic this attempt just discovered.
     delegate.awaiting(deadline, || unsafe {
-        peripheral.readValueForCharacteristic(&characteristic)
+        peripheral.readValueForCharacteristic(&characteristic);
     });
 
     // SAFETY: reading the value the callback above announced, absent when

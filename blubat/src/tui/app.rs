@@ -605,7 +605,7 @@ fn reloaded(mut app: App, read: Result<(Config, Duration), String>) -> App {
     match read {
         Ok((config, interval)) => {
             app.look = app.look.reloaded(&config.theme);
-            app.view.hidden = config.dashboard.hidden.clone();
+            app.view.hidden.clone_from(&config.dashboard.hidden);
             app.view.hide_inactive = config.dashboard.hide_inactive;
             app.config = config;
             app.interval = interval;
@@ -1445,7 +1445,7 @@ pub(super) mod tests {
             app(),
             Event::Reading(reading(vec![
                 device("Magic Trackpad", "30-82-16-f2-24-90", Some(85)),
-                low.clone(),
+                low,
                 Device {
                     connected: false,
                     ..device("AirPods Pro", "74-15-f5-02-8e-38", Some(4))
@@ -1557,7 +1557,7 @@ pub(super) mod tests {
         let both = with_a_disconnected_device();
         assert_eq!(names(&both), ["Magic Trackpad", "AirPods Pro"]);
 
-        let hidden = press(both.clone(), "d");
+        let hidden = press(both, "d");
         assert!(hidden.view.hide_inactive);
         assert_eq!(names(&hidden), ["Magic Trackpad"]);
 
@@ -1634,8 +1634,10 @@ pub(super) mod tests {
             app.keys()
                 .iter()
                 .find(|binding| binding.keys == keys)
-                .map(|binding| binding.label)
-                .unwrap_or_else(|| panic!("{keys} is not advertised"))
+                .map_or_else(
+                    || panic!("{keys} is not advertised"),
+                    |binding| binding.label,
+                )
         };
 
         let closed = loaded();
@@ -1812,7 +1814,7 @@ pub(super) mod tests {
     fn j_and_k_in_the_detail_view_clamp_at_the_ends_like_the_dashboards() {
         let opened = key(loaded(), Key::Enter);
 
-        let last = press(opened.clone(), "jjjjj");
+        let last = press(opened, "jjjjj");
         assert_eq!(last.mode, Mode::Detail);
         assert_eq!(
             last.current().map(|device| device.name.as_str()),
@@ -1987,7 +1989,7 @@ pub(super) mod tests {
             "starts from the first frame"
         );
 
-        let after_one = update(refreshing.clone(), Event::Tick(READ_AT));
+        let after_one = update(refreshing, Event::Tick(READ_AT));
         let after_two = update(after_one.clone(), Event::Tick(READ_AT));
         assert_eq!(after_one.refreshing_ticks, 1);
         assert_eq!(after_two.refreshing_ticks, 2);

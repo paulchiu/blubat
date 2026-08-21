@@ -556,7 +556,7 @@ mod tests {
         assert_eq!(
             Outcome {
                 ran: Ran::TimedOut,
-                ..outcome.clone()
+                ..outcome
             }
             .to_string(),
             "low_battery hook `~/bin/nag` for Trackpad: timed out and was killed"

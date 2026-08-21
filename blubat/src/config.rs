@@ -14,6 +14,7 @@
 mod template;
 
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -295,11 +296,13 @@ fn validate(
         }
     }
 
-    let problems: String = config
+    let problems = config
         .problems()
         .iter()
-        .map(|problem| format!("\n  {problem}"))
-        .collect();
+        .fold(String::new(), |mut acc, problem| {
+            let _ = write!(acc, "\n  {problem}");
+            acc
+        });
 
     if problems.is_empty() {
         writeln!(out, "{}: ok", path.display())?;
@@ -341,9 +344,9 @@ mod tests {
     }
 
     /// Runs `validate` against a reading that never touches a real device.
-    fn check(path: &Path, devices: Vec<Device>) -> (Result<(), Failure>, String) {
+    fn check(path: &Path, devices: &[Device]) -> (Result<(), Failure>, String) {
         let mut printed = Vec::new();
-        let outcome = validate(path, &mut printed, || devices.clone());
+        let outcome = validate(path, &mut printed, || devices.to_vec());
 
         (outcome, String::from_utf8(printed).expect("utf8 output"))
     }
@@ -352,7 +355,7 @@ mod tests {
     fn no_config_file_is_a_pass_that_says_so() {
         let scratch = Scratch::new();
 
-        let (outcome, printed) = check(&scratch.config_file(), Vec::new());
+        let (outcome, printed) = check(&scratch.config_file(), &[]);
 
         assert_eq!(outcome, Ok(()));
         assert!(printed.contains("no config file"), "{printed}");
@@ -365,7 +368,7 @@ mod tests {
         let path =
             scratch.write_config("[defaults]\nlow = 25\n\n[notifications]\nsound = \"Ping\"\n");
 
-        let (outcome, printed) = check(&path, Vec::new());
+        let (outcome, printed) = check(&path, &[]);
 
         assert_eq!(outcome, Ok(()));
         assert!(printed.contains("ok"), "{printed}");
@@ -376,7 +379,7 @@ mod tests {
         let scratch = Scratch::new();
         let path = scratch.write_config("[defaults]\nlow = 20\ncritical = \"ten\"\n");
 
-        let (outcome, printed) = check(&path, Vec::new());
+        let (outcome, printed) = check(&path, &[]);
 
         let message = outcome
             .expect_err("a string threshold is not a number")
@@ -391,7 +394,7 @@ mod tests {
         let scratch = Scratch::new();
         let path = scratch.write_config("[defaults]\nlwo = 20\n");
 
-        assert!(check(&path, Vec::new()).0.is_err());
+        assert!(check(&path, &[]).0.is_err());
     }
 
     #[test]
@@ -399,7 +402,7 @@ mod tests {
         let scratch = Scratch::new();
         let path = scratch.write_config("[defaults]\nlow = 20\nhigh = 15\n");
 
-        let message = check(&path, Vec::new())
+        let message = check(&path, &[])
             .0
             .expect_err("low is above high")
             .to_string();
@@ -415,8 +418,8 @@ mod tests {
         let scratch = Scratch::new();
         let path = scratch.write_config("[[device]]\nmatch = \"trackpad\"\nlow = 25\n");
 
-        let (matched, quiet) = check(&path, vec![trackpad()]);
-        let (unmatched, warned) = check(&path, Vec::new());
+        let (matched, quiet) = check(&path, &[trackpad()]);
+        let (unmatched, warned) = check(&path, &[]);
 
         assert_eq!(matched, Ok(()));
         assert!(!quiet.contains("warning"), "{quiet}");

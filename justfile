@@ -18,7 +18,7 @@ test:
 
 # Lint with clippy, warnings are errors
 lint:
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --all-targets --all-features --locked -- -D warnings
 
 # Format code with rustfmt
 fmt:

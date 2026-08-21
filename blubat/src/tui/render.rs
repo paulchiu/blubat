@@ -293,8 +293,7 @@ fn device_table<'a>(app: &'a App, rows: &Rows<'a>, width: u16) -> Table<'a> {
     let header = Row::new(
         columns
             .iter()
-            .map(|column| header_cell(*column, app.view.sort, app.view.direction))
-            .collect::<Vec<_>>(),
+            .map(|column| header_cell(*column, app.view.sort, app.view.direction)),
     )
     .style(palette.dim);
     let widths = columns

@@ -88,7 +88,7 @@ pub fn serve(paths: &Paths) -> Result<(), Failure> {
     let (sweeps, requests) = mpsc::sync_channel(1);
 
     thread::scope(|scope| {
-        let worker = scope.spawn(move || poll_loop(resident, config, paths, out, sweeps));
+        let worker = scope.spawn(move || poll_loop(resident, &config, paths, out, sweeps));
 
         sweep::execute(&Bluetoothd, &IoBluetooth, &CoreBluetooth, requests);
 
@@ -106,9 +106,13 @@ pub fn serve(paths: &Paths) -> Result<(), Failure> {
 /// an earlier one, so this loop drops the new one silently rather than
 /// waiting for room, matching the one-attempt-no-retry discipline every
 /// sweep failure keeps.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "ownership of `sweeps` is what makes returning end the executor loop, as the doc above describes"
+)]
 fn poll_loop(
     mut resident: Resident,
-    config: Config,
+    config: &Config,
     paths: &Paths,
     mut out: impl Write,
     sweeps: mpsc::SyncSender<SweepRequest>,
@@ -131,7 +135,7 @@ fn poll_loop(
             );
         }
 
-        for line in resident.tick(&reading, &config) {
+        for line in resident.tick(&reading, config) {
             log(&mut out, &line);
         }
     }
@@ -201,6 +205,10 @@ fn load(paths: &Paths) -> (Config, Option<String>) {
 /// A hook that went wrong goes to stderr and everything else to stdout, so the
 /// error log is a short list of things to look at rather than a second copy of
 /// the ordinary one.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "matches the `Fn(Outcome) + Send + Sync` shape `hooks::Runner::reporting` fixes for every reporter, dashboard's included"
+)]
 fn report(outcome: Outcome) {
     if outcome.went_wrong() {
         eprintln!("{}", stamped(Timestamp::now(), &outcome.to_string()));

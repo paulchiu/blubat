@@ -212,10 +212,7 @@ mod tests {
             ..live.clone()
         };
 
-        for profiler in [
-            vec![live.clone(), stale.clone()],
-            vec![stale.clone(), live.clone()],
-        ] {
+        for profiler in [vec![live.clone(), stale.clone()], vec![stale, live]] {
             let merged = merged(Vec::new(), profiler);
 
             let [device] = &merged.devices[..] else {

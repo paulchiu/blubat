@@ -4,6 +4,34 @@ members = ["blubat-core", "blubat"]
 
 [workspace.lints.rust]
 unsafe_code = "deny"
+future_incompatible = { level = "warn", priority = -1 }
+nonstandard_style = { level = "deny", priority = -1 }
+
+# Curated rather than clippy::pedantic/clippy::nursery wholesale: those groups measured
+# at 803 warnings here, dominated by cosmetic ones (use_self, doc_markdown,
+# must_use_candidate, redundant_pub_crate, missing_const_for_fn) that would bury real
+# findings. Priorities are set above the groups' implicit 0 so these hold if a group is
+# ever turned on later.
+[workspace.lints.clippy]
+redundant_clone = { level = "deny", priority = 1 }
+needless_collect = { level = "deny", priority = 1 }
+map_unwrap_or = { level = "deny", priority = 1 }
+manual_ok_or = { level = "deny", priority = 1 }
+clone_on_copy = { level = "deny", priority = 1 }
+needless_borrow = { level = "deny", priority = 1 }
+large_enum_variant = { level = "deny", priority = 1 }
+unnecessary_wraps = { level = "deny", priority = 1 }
+assigning_clones = { level = "deny", priority = 1 }
+semicolon_if_nothing_returned = { level = "deny", priority = 1 }
+explicit_iter_loop = { level = "deny", priority = 1 }
+needless_continue = { level = "deny", priority = 1 }
+ignored_unit_patterns = { level = "deny", priority = 1 }
+redundant_closure_for_method_calls = { level = "deny", priority = 1 }
+ptr_as_ptr = { level = "deny", priority = 1 }
+borrow_as_ptr = { level = "deny", priority = 1 }
+format_collect = { level = "deny", priority = 1 }
+single_option_map = { level = "deny", priority = 1 }
+needless_pass_by_value = { level = "deny", priority = 1 }
 
 [workspace.package]
 version = "0.17.1"
