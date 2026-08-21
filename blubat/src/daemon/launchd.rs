@@ -230,6 +230,31 @@ fn bootstrap(launchctl: &dyn Launchctl, plist: &Path, settle: Duration) -> Resul
     Err(refused.unwrap_or_else(|| Failure::Error("launchctl bootstrap was never run".to_string())))
 }
 
+/// `blubat daemon restart`: re-register the agent so an upgraded binary is
+/// picked up.
+///
+/// launchd holds a lightweight code requirement for the binary it last
+/// bootstrapped, and a `brew upgrade` that replaces blubat's binary changes
+/// its ad-hoc signature without launchd noticing: the running agent keeps
+/// executing the old image, and killing it only makes launchd refuse to spawn
+/// the new one, since the swapped binary no longer satisfies the stored
+/// requirement. Booting the agent out and bootstrapping it again is what
+/// refreshes that requirement, the same as `install` does over a plist it is
+/// about to rewrite, except restart leaves the plist as it found it.
+pub fn restart(
+    launchctl: &dyn Launchctl,
+    plist: &Path,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
+    let _ = launchctl.run(&["bootout", &service()]);
+    bootstrap(launchctl, plist, SETTLE)?;
+
+    writeln!(out, "restarted {LABEL}")?;
+    writeln!(out, "  plist   {}", plist.display())?;
+
+    Ok(())
+}
+
 /// `blubat daemon uninstall`: stop the agent and remove its plist.
 ///
 /// An agent that was not loaded is not a failure: the point of the command is
@@ -279,7 +304,9 @@ fn describe(plist: &Path, installed: bool, printed: &Ran) -> Vec<String> {
     let loaded = printed.worked();
     let pid = loaded.then(|| field(&printed.output, "pid")).flatten();
 
-    vec![
+    let running = pid.is_some();
+
+    let mut lines = vec![
         format!("label     {LABEL}"),
         if installed {
             format!("plist     {}", plist.display())
@@ -291,7 +318,17 @@ fn describe(plist: &Path, installed: bool, printed: &Ran) -> Vec<String> {
             || "running   no".to_string(),
             |pid| format!("running   yes, pid {pid}"),
         ),
-    ]
+    ];
+
+    if loaded && !running {
+        lines.push(
+            "          loaded but not running; if a Homebrew upgrade landed since it last \
+             started, try `blubat daemon restart`"
+                .to_string(),
+        );
+    }
+
+    lines
 }
 
 /// One `key = value` field out of a `launchctl print` report.
@@ -653,6 +690,51 @@ mod tests {
     }
 
     #[test]
+    fn restarting_boots_the_agent_out_before_bootstrapping_it_again() {
+        let scratch = Scratch::new();
+        let plist = plist_in(&scratch);
+        let launchctl = Recorder::new();
+        let mut out = Vec::new();
+
+        restart(&launchctl, &plist, &mut out).expect("restarts");
+
+        assert_eq!(launchctl.verbs(), ["bootout", "bootstrap"]);
+        assert!(String::from_utf8_lossy(&out).contains(LABEL));
+    }
+
+    /// The agent is not loaded at all the first time anyone runs this after an
+    /// upgrade lands, and that bootout failing is not this command's problem.
+    #[test]
+    fn restarting_an_agent_that_was_not_loaded_bootstraps_it_anyway() {
+        let scratch = Scratch::new();
+        let launchctl = Recorder::answering(vec![failed("Could not find service")]);
+
+        restart(&launchctl, &plist_in(&scratch), &mut Vec::new())
+            .expect("a missing agent is still bootstrapped");
+
+        assert_eq!(launchctl.verbs(), ["bootout", "bootstrap"]);
+    }
+
+    #[test]
+    fn restarting_surfaces_a_bootstrap_that_keeps_refusing() {
+        let scratch = Scratch::new();
+        let launchctl = Recorder::answering(vec![
+            worked(""),
+            failed("Bootstrap failed: 5: Input/output error"),
+            failed("Bootstrap failed: 5: Input/output error"),
+            failed("Bootstrap failed: 5: Input/output error"),
+        ]);
+
+        let failure = restart(&launchctl, &plist_in(&scratch), &mut Vec::new())
+            .expect_err("bootstrap was refused every time");
+
+        assert!(
+            failure.to_string().contains("Bootstrap failed"),
+            "{failure}"
+        );
+    }
+
+    #[test]
     fn uninstalling_boots_the_agent_out_and_removes_the_plist() {
         let scratch = Scratch::new();
         let plist = plist_in(&scratch);
@@ -700,6 +782,30 @@ mod tests {
 
         assert_eq!(lines[2], "loaded    yes");
         assert_eq!(lines[3], "running   no");
+    }
+
+    /// This is the same report a crash-looping agent stuck on an old, unsigned
+    /// binary prints, so the report points at the fix rather than leaving
+    /// someone to work it out from `launchctl print` themselves.
+    #[test]
+    fn an_agent_loaded_but_not_running_points_at_restart() {
+        let report = worked("com.paulchiu.blubat = {\n\tstate = spawn scheduled\n}");
+
+        let lines = describe(Path::new("/Users/blubat/plist"), true, &report);
+
+        assert!(
+            lines.iter().any(|line| line.contains("daemon restart")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_running_agent_gets_no_restart_hint() {
+        let report = worked("com.paulchiu.blubat = {\n\tstate = running\n\tpid = 4242\n}");
+
+        let lines = describe(Path::new("/Users/blubat/plist"), true, &report);
+
+        assert!(!lines.iter().any(|line| line.contains("daemon restart")));
     }
 
     #[test]

@@ -1,8 +1,8 @@
 # background daemon
 
-This covers the launchd daemon: install, status, uninstall, and how it hands
-over with the dashboard and `wait`. See the [README](../README.md) for
-installing and a quick start.
+This covers the launchd daemon: install, status, uninstall, restart, and how
+it hands over with the dashboard and `wait`. See the [README](../README.md)
+for installing and a quick start.
 
 Notifications and hooks only fire while blubat is running. `blubat daemon
 install` writes a LaunchAgent at
@@ -78,6 +78,36 @@ uninstalling one that was never loaded says so and removes the plist anyway.
 worth running by hand only to watch what the daemon is doing on a terminal.
 Both logs are plain text and appended to, so `tail -f
 ~/.local/state/blubat/daemon.log` follows a daemon already under launchd.
+
+## Upgrading
+
+A `brew upgrade` replaces the binary on disk and changes its ad-hoc code
+signature, but it does not touch the running agent: launchd is still holding
+the old binary's image open and keeps executing it until something stops it.
+Killing that process does not fix it either. launchd keeps a lightweight code
+requirement for whichever binary it last bootstrapped, the swapped binary no
+longer satisfies it, and the agent starts failing to spawn instead of picking
+up the new one: `launchctl print` shows it stuck at `spawn scheduled` with
+`last exit code = 78 (EX_CONFIG)`, and nothing new ever reaches `daemon.log`.
+
+`blubat daemon restart` is the fix: it boots the agent out and bootstraps it
+again from the plist already on disk, which is what makes launchd read the
+new binary's signature and refresh the stored requirement. `daemon install`
+also does this, but rewrites the plist first; restart does not need to, since
+nothing about the plist (the Homebrew shim path, the config, the state
+directory) changes on an upgrade. `daemon status` names this fix directly
+when it finds the agent loaded but not running.
+
+```
+$ blubat daemon restart
+restarted com.paulchiu.blubat
+  plist   /Users/paul/Library/LaunchAgents/com.paulchiu.blubat.plist
+```
+
+Expect a fresh Bluetooth permission prompt on the sweep after an upgrade too.
+TCC ties the grant to the binary's identity, a version change is enough to
+reset it, and the new binary asks again the same way the very first `daemon
+install` did.
 
 ## Handing over with the dashboard
 

@@ -144,10 +144,10 @@ fn incompatible_output_flags_are_an_error_exit() {
 /// because everything past it either holds the terminal forever or asks
 /// launchd to load an agent on the machine running them.
 #[test]
-fn daemon_lists_the_four_things_it_can_be_asked_to_do() {
+fn daemon_lists_the_five_things_it_can_be_asked_to_do() {
     let printed = stdout(&blubat(&["daemon", "--help"]));
 
-    for subcommand in ["run", "install", "uninstall", "status"] {
+    for subcommand in ["run", "install", "uninstall", "restart", "status"] {
         assert!(printed.contains(subcommand), "{subcommand} is missing");
     }
 }
