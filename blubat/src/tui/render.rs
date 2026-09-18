@@ -4,7 +4,7 @@
 //! already says. Every function takes the state borrowed and returns a widget,
 //! so a view can be drawn into a test buffer without a terminal.
 
-use blubat_core::{Device, Thresholds};
+use blubat_core::{Device, Health, Thresholds};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -105,7 +105,10 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(status_line(app, left.width), left);
 
     if right.width == ALERT_WIDTH {
-        frame.render_widget(alert_line(app.critical(), app.look.palette), right);
+        frame.render_widget(
+            alert_line(app.critical(), app.health(), app.look.palette),
+            right,
+        );
     }
 }
 
@@ -115,10 +118,12 @@ fn status_line(app: &App, width: u16) -> Line<'static> {
     let palette = app.look.palette;
     let degraded = degraded(app.degraded(), palette);
     let warnings = warnings(app.warnings().len(), palette);
+    let daemon = daemon(app.health(), palette);
     let spent = NAME.len()
         + GAP.len()
         + degraded.content.chars().count()
-        + warnings.content.chars().count();
+        + warnings.content.chars().count()
+        + daemon.content.chars().count();
     let room = usize::from(width).saturating_sub(spent);
 
     Line::from(vec![
@@ -129,6 +134,7 @@ fn status_line(app: &App, width: u16) -> Line<'static> {
         Span::styled(format!("{GAP}{}", summary(app, room)), palette.dim),
         degraded,
         warnings,
+        daemon,
     ])
 }
 
@@ -203,10 +209,32 @@ fn warnings(count: usize, palette: Palette) -> Span<'static> {
     }
 }
 
+/// Says the daemon behind the reading has stopped doing its job.
+///
+/// Its own marker beside [`degraded`] and [`warnings`], for the same reason
+/// they are separate: a warning is one device that could not be read and a
+/// degraded reading is one source held over, while this is the resident
+/// blubat that feeds them all having gone quiet. Silent while the daemon is
+/// ready, and silent when there is none at all, which is a documented way to
+/// run blubat rather than a fault.
+fn daemon(health: Health, palette: Palette) -> Span<'static> {
+    if health.alarming() {
+        Span::styled(format!("{GAP}daemon {}", health.label()), palette.low)
+    } else {
+        Span::raw("")
+    }
+}
+
 /// Only a live reading can alert, a [`Status`] invariant, so the disconnected
 /// section never shows here.
-fn alert_line(critical: usize, palette: Palette) -> Line<'static> {
+///
+/// `all ok` is a claim about the whole dashboard, so a daemon that has stopped
+/// sweeping withdraws it: the levels on screen may be a day old, and the one
+/// thing this line must never do is vouch for them. The status line names the
+/// daemon's state, so this says nothing rather than repeating it.
+fn alert_line(critical: usize, health: Health, palette: Palette) -> Line<'static> {
     match critical {
+        0 if health.alarming() => Line::default(),
         0 => Line::from(Span::styled("all ok", palette.dim)).right_aligned(),
         count => Line::from(Span::styled(
             format!("{ALERT}{count} critical"),
@@ -719,7 +747,7 @@ fn seconds(duration: std::time::Duration) -> String {
 
 #[cfg(test)]
 mod tests {
-    use blubat_core::{ChargeState, Levels, Raised, Snapshot, Timestamp};
+    use blubat_core::{ChargeState, Heartbeat, Levels, Raised, Snapshot, Timestamp};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::{Buffer, Cell as Drawn};
@@ -800,11 +828,90 @@ mod tests {
         drawn(app, 100, 30).join("\n")
     }
 
+    /// A dashboard over a daemon that beat and last swept this long ago.
+    ///
+    /// Nothing here is critical, so the alert line reads `all ok` until the
+    /// daemon itself gives it a reason not to.
+    fn watched(beat: i64, sweep: Option<i64>) -> App {
+        App {
+            daemon: Some(Heartbeat {
+                beat_at: Timestamp::from_unix(READ_AT.unix() - beat),
+                swept_at: sweep.map(|ago| Timestamp::from_unix(READ_AT.unix() - ago)),
+            }),
+            ..loaded()
+        }
+    }
+
     fn line_containing(app: &App, needle: &str) -> String {
         drawn(app, 100, 30)
             .into_iter()
             .find(|line| line.contains(needle))
             .unwrap_or_else(|| panic!("no line contains `{needle}`"))
+    }
+
+    #[test]
+    fn a_healthy_daemon_adds_nothing_to_the_status_line_and_leaves_all_ok_standing() {
+        let app = watched(0, Some(60));
+
+        assert!(!line_containing(&app, "blubat").contains("daemon"));
+        assert!(screen(&app).contains("all ok"));
+    }
+
+    /// The incident: a loop still coming round over sweeps that had stopped
+    /// landing, which the dashboard used to summarise as `all ok`.
+    #[test]
+    fn a_daemon_whose_sweeps_stopped_landing_is_named_and_stops_the_all_ok() {
+        let app = watched(0, Some(901));
+
+        assert!(
+            line_containing(&app, "blubat").contains("daemon not ready"),
+            "{}",
+            line_containing(&app, "blubat")
+        );
+        assert!(
+            !screen(&app).contains("all ok"),
+            "nothing is ok about a monitor that has stopped monitoring"
+        );
+    }
+
+    #[test]
+    fn a_daemon_that_has_stopped_coming_round_is_named_as_down() {
+        let app = watched(361, Some(60));
+
+        assert!(
+            line_containing(&app, "blubat").contains("daemon down"),
+            "{}",
+            line_containing(&app, "blubat")
+        );
+        assert!(!screen(&app).contains("all ok"));
+    }
+
+    #[test]
+    fn a_machine_with_no_daemon_installed_reads_exactly_as_it_always_did() {
+        let app = loaded();
+
+        assert!(!line_containing(&app, "blubat").contains("daemon"));
+        assert!(
+            screen(&app).contains("all ok"),
+            "no daemon is a documented way to run blubat, not a fault"
+        );
+    }
+
+    /// The daemon's state is the dashboard's one account of itself, so it has
+    /// to survive a device needing attention at the same time.
+    #[test]
+    fn a_critical_device_does_not_hide_a_daemon_that_has_stopped_sweeping() {
+        let app = App {
+            reading: Some(reading(vec![device(
+                "Soundcore Liberty",
+                "d0-03-4b-0b-e6-4e",
+                Some(4),
+            )])),
+            ..watched(0, Some(901))
+        };
+
+        assert!(line_containing(&app, "blubat").contains("daemon not ready"));
+        assert!(screen(&app).contains("1 critical"));
     }
 
     fn typed(name: &str, kind: &str, address: &str, level: Option<u8>) -> Device {

@@ -94,8 +94,19 @@ pub fn run(paths: &Paths) -> Result<(), Failure> {
             Event::Reading(reading) => effects.observe(reading, &app.config),
             _ => Observed::default(),
         };
+        let read_beat = matches!(event, Event::Reading(_));
 
         app = update(app, event);
+
+        // On the reading's own cadence rather than every redraw: the daemon
+        // rewrites this file far more slowly than the loop turns, and how
+        // fresh what it says is moves with the clock in `App::health` anyway.
+        if read_beat {
+            app = update(
+                app,
+                Event::Beat(blubat_core::load_heartbeat(&paths.health_file())),
+            );
+        }
 
         // After the reading they came from, so the detail view's log and the
         // chart under it are drawn from the same tick.
