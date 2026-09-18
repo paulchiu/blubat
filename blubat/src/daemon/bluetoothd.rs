@@ -44,7 +44,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use blubat_core::{Address, SweepReading, Timestamp, bluetoothd_battery_level};
 
@@ -246,11 +246,20 @@ fn settle(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
 struct Capture(File);
 
 impl Capture {
+    /// A refusal to reuse a name, rather than a truncation of whatever is
+    /// already under it, is what keeps this off a planted symlink when
+    /// `TMPDIR` is unset and the temporary directory is the shared `/tmp`.
+    /// The clock is in the name alongside the pid and the counter so that a
+    /// file orphaned by a process killed between opening and unlinking cannot
+    /// make every later sweep refuse for good.
     fn new() -> std::io::Result<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
 
+        let started = SystemTime::UNIX_EPOCH
+            .elapsed()
+            .map_or(0, |since| since.as_nanos());
         let path = std::env::temp_dir().join(format!(
-            "blubat-cached-levels-{}-{}",
+            "blubat-cached-levels-{}-{started}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
