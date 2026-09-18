@@ -33,6 +33,7 @@ mod engine;
 mod error;
 mod event;
 mod gatt;
+mod health;
 mod history;
 mod iokit;
 mod json;
@@ -64,6 +65,9 @@ pub use gatt::{
     BATTERY_LEVEL_UUID as GATT_BATTERY_LEVEL_UUID,
     BATTERY_SERVICE_UUID as GATT_BATTERY_SERVICE_UUID, battery_level as gatt_battery_level,
     candidates as gatt_candidates, matched as gatt_matched,
+};
+pub use health::{
+    Health, Heartbeat, Windows as HealthWindows, load as load_heartbeat, save as save_heartbeat,
 };
 pub use history::{Direction, History, Sample, Trend};
 pub use iokit::advertised;

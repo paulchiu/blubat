@@ -16,6 +16,7 @@ const APP: &str = "blubat";
 const CONFIG_FILE: &str = "config.toml";
 const STATE_FILE: &str = "state.toml";
 const READINGS_FILE: &str = "readings.toml";
+const HEALTH_FILE: &str = "health.toml";
 const WATCHES: &str = "watches";
 const TUI_LOCK: &str = "tui.lock";
 const DAEMON_LOCK: &str = "daemon.lock";
@@ -98,6 +99,12 @@ impl Paths {
         self.state_dir.join(READINGS_FILE)
     }
 
+    /// The daemon's own account of itself: what a frontend reads to tell a
+    /// loop still turning from one that has stopped.
+    pub fn health_file(&self) -> PathBuf {
+        self.state_dir.join(HEALTH_FILE)
+    }
+
     /// The one-shot watches `blubat wait` drops for a running daemon.
     pub fn watch_dir(&self) -> PathBuf {
         self.state_dir.join(WATCHES)
@@ -159,6 +166,10 @@ mod tests {
             PathBuf::from("/home/blubat/.local/state/blubat/readings.toml")
         );
         assert_eq!(
+            paths.health_file(),
+            PathBuf::from("/home/blubat/.local/state/blubat/health.toml")
+        );
+        assert_eq!(
             paths.watch_dir(),
             PathBuf::from("/home/blubat/.local/state/blubat/watches")
         );
@@ -176,6 +187,7 @@ mod tests {
         for path in [
             paths.state_file(),
             paths.readings_file(),
+            paths.health_file(),
             paths.watch_dir(),
             paths.tui_lock(),
             paths.daemon_lock(),
@@ -222,6 +234,8 @@ mod tests {
             paths.config_file().to_path_buf(),
             paths.state_file(),
             paths.readings_file(),
+            paths.health_file(),
+            paths.health_file(),
             paths.watch_dir(),
             paths.tui_lock(),
             paths.daemon_lock(),
@@ -256,6 +270,7 @@ mod tests {
         for path in [
             paths.state_file(),
             paths.readings_file(),
+            paths.health_file(),
             paths.watch_dir(),
             paths.tui_lock(),
             paths.daemon_lock(),
