@@ -4,11 +4,12 @@
 //! field is optional and anything unrecognised is collected into `warnings` and
 //! skipped rather than treated as fatal.
 
-use std::io::Read;
-use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::Value;
 
@@ -30,57 +31,118 @@ pub(crate) fn read(
     parse(&String::from_utf8_lossy(&output), read_at, warnings)
 }
 
+/// How often [`settle`] asks whether the child has exited yet.
+const POLL: Duration = Duration::from_millis(10);
+
 /// Runs `command` and hands back its stdout, giving up after `timeout`.
 ///
-/// Both pipes are drained on their own threads as the child writes them, so a
-/// long reading cannot fill a pipe buffer and stall the process being timed. A
-/// child still running at the deadline is killed rather than waited out, which
-/// is what keeps a wedged call from holding the slow tier open forever.
+/// Each stream is captured into a file rather than a pipe, so nothing in this
+/// process has to keep reading while the child runs: a file has no buffer to
+/// fill and so cannot stall the process being timed, and the descriptors close
+/// when this call returns however it returns. A child still running at the
+/// deadline is killed rather than waited out, which is what keeps a wedged
+/// call from holding the slow tier open forever.
 fn run(mut command: Command, timeout: Duration) -> Result<Vec<u8>> {
+    let captured = |error| Error::Command(format!("system_profiler could not be read: {error}"));
+    let out = Capture::new("out").map_err(captured)?;
+    let err = Capture::new("err").map_err(captured)?;
+
     let mut child = command
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(out.stdio().map_err(captured)?)
+        .stderr(err.stdio().map_err(captured)?)
         .spawn()
         .map_err(|error| Error::Command(format!("system_profiler could not be run: {error}")))?;
 
-    let stdout = drain(child.stdout.take().expect("stdout was piped"));
-    let stderr = drain(child.stderr.take().expect("stderr was piped"));
-
-    let Ok(output) = stdout.recv_timeout(timeout) else {
-        let _ = child.kill();
-        let _ = child.wait();
-
+    let Some(status) = settle(&mut child, timeout) else {
         return Err(Error::Command(format!(
             "system_profiler took longer than {}s and was stopped",
             timeout.as_secs()
         )));
     };
 
-    let status = child.wait().map_err(|error| {
-        Error::Command(format!("system_profiler could not be waited on: {error}"))
-    })?;
     if !status.success() {
         return Err(Error::Command(format!(
             "system_profiler exited with {status}: {}",
-            String::from_utf8_lossy(&stderr.recv().unwrap_or_default()).trim()
+            String::from_utf8_lossy(&err.written()).trim()
         )));
     }
 
-    Ok(output)
+    Ok(out.written())
 }
 
-/// Reads one child pipe to its end on a thread of its own.
-fn drain(mut pipe: impl Read + Send + 'static) -> Receiver<Vec<u8>> {
-    let (read, drained) = mpsc::channel();
+/// Waits for `child` to exit, killing it once `timeout` has gone by.
+///
+/// The wait is on the child itself rather than on its output ending, so a
+/// descendant that inherited the capture and outlives its parent cannot turn
+/// a run that finished into one reported as a timeout.
+fn settle(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + timeout;
 
-    thread::spawn(move || {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < deadline => thread::sleep(POLL),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+
+                return None;
+            }
+        }
+    }
+}
+
+/// One stream of a child's output, held in a file unlinked as soon as it is
+/// open.
+///
+/// Nothing else can reach it, nothing is left behind to clean up, and the
+/// descriptor belongs to this value rather than to a reader that may never
+/// reach the end of what it is reading. `blubat`'s bluetoothd sweep captures
+/// its helper the same way.
+struct Capture(File);
+
+impl Capture {
+    /// Refusing an existing name rather than truncating it is what keeps this
+    /// off a planted symlink where `TMPDIR` is unset and the temporary
+    /// directory is the shared `/tmp`. The clock sits in the name so that a
+    /// file orphaned between opening and unlinking cannot make every later run
+    /// refuse for good.
+    fn new(tag: &str) -> std::io::Result<Self> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+
+        let started = SystemTime::UNIX_EPOCH
+            .elapsed()
+            .map_or(0, |since| since.as_nanos());
+        let path = std::env::temp_dir().join(format!(
+            "blubat-{}-{started}-{}-{tag}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        fs::remove_file(&path)?;
+
+        Ok(Self(file))
+    }
+
+    /// The child's end of the capture, which `spawn` closes in this process.
+    fn stdio(&self) -> std::io::Result<Stdio> {
+        self.0.try_clone().map(Stdio::from)
+    }
+
+    /// Everything written to it, read back once the child has exited. A stream
+    /// that cannot be read back is nothing written, the way an empty one is.
+    fn written(mut self) -> Vec<u8> {
         let mut buffer = Vec::new();
-        let _ = pipe.read_to_end(&mut buffer);
-        let _ = read.send(buffer);
-    });
+        let _ = self.0.seek(SeekFrom::Start(0));
+        let _ = self.0.read_to_end(&mut buffer);
 
-    drained
+        buffer
+    }
 }
 
 /// Parses one `SPBluetoothDataType` document.
@@ -498,5 +560,93 @@ mod tests {
         .expect_err("nothing to run");
 
         assert!(error.to_string().contains("could not be run"), "{error}");
+    }
+
+    /// This process's own open descriptors, which `/dev/fd` lists on macOS.
+    fn open_files() -> usize {
+        std::fs::read_dir("/dev/fd")
+            .expect("/dev/fd is readable")
+            .count()
+    }
+
+    /// Runs, not one run: a single leak is indistinguishable from a descriptor
+    /// another test opened while this one was counting, so the tolerance sits
+    /// well under one per run and well over the handful of those.
+    const RUNS: usize = 20;
+    const NOISE: usize = 8;
+
+    #[test]
+    fn a_timed_out_command_whose_descendant_still_holds_its_output_leaks_nothing() {
+        let before = open_files();
+
+        for _ in 0..RUNS {
+            let error = run(shell("sleep 30 & sleep 30"), Duration::from_millis(100))
+                .expect_err("it never finishes on its own");
+
+            assert!(error.to_string().contains("took longer"), "{error}");
+        }
+
+        let after = open_files();
+
+        assert!(
+            after <= before + NOISE,
+            "{RUNS} timed out runs took this process from {before} open files to {after}"
+        );
+    }
+
+    #[test]
+    fn a_command_that_finished_is_not_timed_out_by_a_descendant_still_holding_its_output() {
+        let output = run(
+            shell("sleep 30 & printf 'done'"),
+            Duration::from_millis(100),
+        )
+        .expect("the command itself finished at once");
+
+        assert_eq!(String::from_utf8_lossy(&output), "done");
+    }
+
+    /// Captures are named for this process, so nothing outside the suite can
+    /// move this count.
+    fn captures_left_in_the_temp_dir() -> usize {
+        let mine = format!("blubat-{}-", std::process::id());
+
+        std::fs::read_dir(std::env::temp_dir())
+            .expect("the temp dir is readable")
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(&mine))
+            .count()
+    }
+
+    /// Creating a capture and unlinking it is two calls, and the tests running
+    /// alongside this one are making captures of their own, so a couple may be
+    /// caught between the two. Three runs that failed to unlink would leave six.
+    const IN_FLIGHT: usize = 2;
+
+    #[test]
+    fn a_run_leaves_no_capture_file_behind_whether_it_finishes_or_is_stopped() {
+        let before = captures_left_in_the_temp_dir();
+
+        let _ = run(shell("printf '{}'"), Duration::from_secs(10));
+        let _ = run(shell("echo trouble >&2; exit 3"), Duration::from_secs(10));
+        let _ = run(shell("sleep 30 & sleep 30"), Duration::from_millis(100));
+
+        let after = captures_left_in_the_temp_dir();
+
+        assert!(
+            after <= before + IN_FLIGHT,
+            "three runs took {:?} from {before} captures to {after}",
+            std::env::temp_dir()
+        );
+    }
+
+    #[test]
+    fn a_reading_larger_than_a_pipe_buffer_comes_back_whole() {
+        let output = run(
+            shell("head -c 300000 /dev/zero | tr '\\0' 'a'"),
+            Duration::from_secs(10),
+        )
+        .expect("it finishes");
+
+        assert_eq!(output.len(), 300_000);
     }
 }
