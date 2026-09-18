@@ -103,6 +103,13 @@ by, so the count on the status line and the banners agree by construction: a
 device configured `critical = 40` is red and counted at 39%, which is also the
 level that raises `critical_battery` for it.
 
+The right of the status line reads `all ok` when nothing is critical, but only
+while the dashboard has something to vouch for. A [daemon](daemon.md) that has
+stopped sweeping, or stopped polling altogether, is named on the left as
+`daemon not ready` or `daemon down`, and `all ok` is withheld: the levels on
+screen may be a day old, and that line must never say otherwise. A machine
+with no daemon installed is not either of those states and changes nothing.
+
 ## Refreshing
 
 `R` forces an immediate read of both device sources: IOKit answers at once
