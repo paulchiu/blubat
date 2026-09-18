@@ -74,7 +74,7 @@ fn health(paths: &Paths) -> Health {
     let config = Config::load(paths.config_file()).unwrap_or_default();
 
     Health::of(
-        blubat_core::load_heartbeat(&paths.health_file()).as_ref(),
+        blubat_core::load_heartbeat(&paths.health_file()),
         Timestamp::now(),
         HealthWindows::of(&config.poll),
     )

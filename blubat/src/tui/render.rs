@@ -828,10 +828,13 @@ mod tests {
         drawn(app, 100, 30).join("\n")
     }
 
-    /// A dashboard over a daemon that beat and last swept this long ago.
+    /// A dashboard over a daemon that beat and last swept this many seconds
+    /// before the frame's own clock.
     ///
-    /// Nothing here is critical, so the alert line reads `all ok` until the
-    /// daemon itself gives it a reason not to.
+    /// The default `[poll]` section gives windows of 360s and 900s, so the
+    /// numbers below sit either side of those two. Nothing here is critical,
+    /// so the alert line reads `all ok` until the daemon gives it a reason
+    /// not to.
     fn watched(beat: i64, sweep: Option<i64>) -> App {
         App {
             daemon: Some(Heartbeat {

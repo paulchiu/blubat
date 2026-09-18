@@ -112,7 +112,7 @@ force, so slowing the daemon down moves what counts as silence with it.
 
 A daemon that is live and not ready is the incident state: the loop is turning
 and nothing it produces is worth trusting. `daemon status` says so and points
-at `daemon.error.log`; the [dashboard](dashboard.md) says `daemon not ready`
+at `daemon.log`; the [dashboard](dashboard.md) says `daemon not ready`
 on its status line and stops claiming `all ok`. One that is not live at all
 reads `daemon down` and points at `blubat daemon restart`.
 

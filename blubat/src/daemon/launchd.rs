@@ -364,7 +364,7 @@ fn vitals(health: Health) -> Vec<String> {
                 || "ready     no, no sweep has landed yet".to_string(),
                 |at| format!("ready     no, last sweep {at}"),
             ),
-            "          polling, but no sweep is reaching disk; see daemon.error.log".to_string(),
+            "          polling, but no sweep is reaching disk; see daemon.log".to_string(),
         ],
         Health::Ready {
             last_beat,
@@ -913,7 +913,7 @@ mod tests {
         assert_eq!(lines[4], "live      yes, last beat 2026-08-02T03:59:59Z");
         assert_eq!(lines[5], "ready     no, last sweep 2026-08-02T03:58:59Z");
         assert!(
-            lines[6].contains("daemon.error.log"),
+            lines[6].contains("daemon.log"),
             "and it points somewhere: {lines:?}"
         );
     }
@@ -962,7 +962,7 @@ mod tests {
         );
         assert!(report.contains("ready     no sweep recorded"), "{report}");
         assert!(
-            !report.contains("daemon.error.log") && !report.contains("daemon restart"),
+            !report.contains("daemon.log") && !report.contains("daemon restart"),
             "nothing to fix on a machine that never installed one: {report}"
         );
     }

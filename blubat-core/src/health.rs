@@ -57,10 +57,13 @@ pub struct Windows {
 
 impl Windows {
     /// The windows a daemon polling on this `[poll]` section is judged by.
+    ///
+    /// Saturating, since the file may name an interval too large to multiply
+    /// and a window is not worth a panic in the dashboard's render path.
     pub fn of(poll: &Poll) -> Self {
         Self {
-            liveness: poll.daemon_interval * MISSED,
-            readiness: poll.profiler_interval * MISSED,
+            liveness: poll.daemon_interval.saturating_mul(MISSED),
+            readiness: poll.profiler_interval.saturating_mul(MISSED),
         }
     }
 }
@@ -93,7 +96,7 @@ impl Health {
     ///
     /// Liveness is answered first: a loop that has stopped coming round is
     /// down whatever its last sweep says, since nothing is left to refresh it.
-    pub fn of(beat: Option<&Heartbeat>, now: Timestamp, windows: Windows) -> Self {
+    pub fn of(beat: Option<Heartbeat>, now: Timestamp, windows: Windows) -> Self {
         let Some(beat) = beat else {
             return Self::Absent;
         };
@@ -179,7 +182,7 @@ mod tests {
     }
 
     fn judged(beat: Heartbeat) -> Health {
-        Health::of(Some(&beat), NOW, windows())
+        Health::of(Some(beat), NOW, windows())
     }
 
     /// A directory that removes itself, so a failing test leaves nothing behind.
@@ -213,6 +216,18 @@ mod tests {
     fn the_windows_are_three_of_the_daemons_own_intervals() {
         assert_eq!(windows().liveness, Duration::from_secs(360));
         assert_eq!(windows().readiness, Duration::from_secs(900));
+    }
+
+    /// `daemon_interval` is whatever the file says, and the file may say
+    /// something absurd; a window is not worth a panic in the render path.
+    #[test]
+    fn an_interval_too_large_to_multiply_saturates_rather_than_overflowing() {
+        let poll = Poll {
+            daemon_interval: Duration::from_secs(u64::MAX),
+            ..Poll::default()
+        };
+
+        assert_eq!(Windows::of(&poll).liveness, Duration::MAX);
     }
 
     #[test]

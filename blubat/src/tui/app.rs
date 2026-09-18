@@ -455,11 +455,7 @@ impl App {
     /// Judged by the `[poll]` section's daemon cadence, not the dashboard's
     /// own: the windows belong to whoever writes the heartbeat.
     pub fn health(&self) -> Health {
-        Health::of(
-            self.daemon.as_ref(),
-            self.now,
-            HealthWindows::of(&self.config.poll),
-        )
+        Health::of(self.daemon, self.now, HealthWindows::of(&self.config.poll))
     }
 
     /// The thresholds one device is judged by, which are also the ones its row
