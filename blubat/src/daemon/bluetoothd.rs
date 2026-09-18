@@ -246,12 +246,11 @@ fn settle(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
 struct Capture(File);
 
 impl Capture {
-    /// A refusal to reuse a name, rather than a truncation of whatever is
-    /// already under it, is what keeps this off a planted symlink when
-    /// `TMPDIR` is unset and the temporary directory is the shared `/tmp`.
-    /// The clock is in the name alongside the pid and the counter so that a
-    /// file orphaned by a process killed between opening and unlinking cannot
-    /// make every later sweep refuse for good.
+    /// Refusing an existing name rather than truncating it is what keeps this
+    /// off a planted symlink where `TMPDIR` is unset and the temporary
+    /// directory is the shared `/tmp`. The clock sits in the name so that a
+    /// file orphaned between opening and unlinking cannot make every later
+    /// sweep refuse for good.
     fn new() -> std::io::Result<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
 

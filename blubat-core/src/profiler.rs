@@ -103,12 +103,11 @@ fn settle(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
 struct Capture(File);
 
 impl Capture {
-    /// A refusal to reuse a name, rather than a truncation of whatever is
-    /// already under it, is what keeps this off a planted symlink when
-    /// `TMPDIR` is unset and the temporary directory is the shared `/tmp`.
-    /// The clock is in the name alongside the pid and the counter so that a
-    /// file orphaned by a process killed between opening and unlinking cannot
-    /// make every later run refuse for good.
+    /// Refusing an existing name rather than truncating it is what keeps this
+    /// off a planted symlink where `TMPDIR` is unset and the temporary
+    /// directory is the shared `/tmp`. The clock sits in the name so that a
+    /// file orphaned between opening and unlinking cannot make every later run
+    /// refuse for good.
     fn new(tag: &str) -> std::io::Result<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -606,8 +605,8 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output), "done");
     }
 
-    /// Captures are named for this process, so counting its own is a count
-    /// nothing running alongside the suite can move.
+    /// Captures are named for this process, so nothing outside the suite can
+    /// move this count.
     fn captures_left_in_the_temp_dir() -> usize {
         let mine = format!("blubat-{}-", std::process::id());
 
@@ -618,6 +617,11 @@ mod tests {
             .count()
     }
 
+    /// Creating a capture and unlinking it is two calls, and the tests running
+    /// alongside this one are making captures of their own, so a couple may be
+    /// caught between the two. Three runs that failed to unlink would leave six.
+    const IN_FLIGHT: usize = 2;
+
     #[test]
     fn a_run_leaves_no_capture_file_behind_whether_it_finishes_or_is_stopped() {
         let before = captures_left_in_the_temp_dir();
@@ -626,7 +630,13 @@ mod tests {
         let _ = run(shell("echo trouble >&2; exit 3"), Duration::from_secs(10));
         let _ = run(shell("sleep 30 & sleep 30"), Duration::from_millis(100));
 
-        assert_eq!(captures_left_in_the_temp_dir(), before);
+        let after = captures_left_in_the_temp_dir();
+
+        assert!(
+            after <= before + IN_FLIGHT,
+            "three runs took {:?} from {before} captures to {after}",
+            std::env::temp_dir()
+        );
     }
 
     #[test]
