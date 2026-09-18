@@ -376,7 +376,7 @@ fn vitals(health: Health) -> Vec<String> {
         Health::Unknown => vec![
             "live      unknown, the heartbeat could not be read".to_string(),
             "ready     unknown, the heartbeat could not be read".to_string(),
-            "          the daemon may well be running; this machine cannot ask".to_string(),
+            "          the daemon may well be running; its record is not saying".to_string(),
         ],
     }
 }
@@ -854,6 +854,18 @@ mod tests {
                 .iter()
                 .any(|line| line.starts_with("live      unknown")),
             "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("ready     unknown")),
+            "both answers come from the record, so neither is known: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("may well be running")),
+            "the report says which way to read it: {lines:?}"
         );
         assert!(
             !lines

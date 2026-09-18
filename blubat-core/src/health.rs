@@ -80,18 +80,9 @@ pub enum Recorded {
     Never,
     /// What the daemon last wrote.
     Beat(Heartbeat),
-    /// It is there, and this process could not read it.
+    /// It is there, and could not be made sense of: it would not open, or
+    /// it is not the TOML the daemon writes.
     Unreadable,
-}
-
-impl Recorded {
-    /// The heartbeat it holds, where it holds one.
-    pub fn beat(self) -> Option<Heartbeat> {
-        match self {
-            Self::Beat(beat) => Some(beat),
-            Self::Never | Self::Unreadable => None,
-        }
-    }
 }
 
 /// What the daemon's own record amounts to, judged against a clock.

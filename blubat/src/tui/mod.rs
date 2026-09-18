@@ -60,8 +60,11 @@ const REDRAW: Duration = Duration::from_millis(250);
 /// second one opened in a second pane does not double every banner.
 pub fn run(paths: &Paths) -> Result<(), Failure> {
     // Held for the whole function, since dropping it hands the effects back.
-    let (dashboard, unlocked) = claim(paths);
-    let owned = dashboard.is_some();
+    let Claim {
+        held: _held,
+        owns,
+        notice: unlocked,
+    } = claim(paths);
     // Best effort: a file that predates the guide is introduced to it here,
     // and the load right after reports a real problem on its own either way.
     let _ = crate::config::annotate(paths.config_file());
@@ -72,7 +75,7 @@ pub fn run(paths: &Paths) -> Result<(), Failure> {
     let (effects, stale_state) = Effects::live(paths, reporter(notes));
     // Nothing can take the lock from a dashboard holding it, so this answer
     // stands for the whole session.
-    let mut effects = effects.deferring_to(move || !owned);
+    let mut effects = effects.deferring_to(move || !owns);
     let mut session = terminal::Session::open()?;
     let editor = EditorCli;
     let mut app = App {
@@ -172,20 +175,43 @@ pub fn run(paths: &Paths) -> Result<(), Failure> {
     Ok(())
 }
 
-/// The lock the dashboard owns the notifications and the hooks by, and the line
-/// to open with when it has none.
+/// What claiming the dashboard lock came to.
+struct Claim {
+    /// The lock, for as long as this dashboard runs, where it was taken.
+    held: Option<lock::Held>,
+    /// Whether this dashboard acts on the events it evaluates.
+    owns: bool,
+    /// The line to open the status line with.
+    notice: Option<String>,
+}
+
+/// Claims the lock the dashboard owns the notifications and the hooks by.
 ///
 /// Not having it is not a reason to refuse to draw: the dashboard is a monitor
 /// first. It hands the banners and the hooks to whichever blubat does hold it
 /// and says so on the status line.
-fn claim(paths: &Paths) -> (Option<lock::Held>, Option<String>) {
+///
+/// A lock that could not be claimed at all is not the same as one another
+/// blubat holds, and this dashboard keeps the side effects under that doubt.
+/// The daemon resolves the same doubt the other way, so deferring here too
+/// would leave a machine where nothing announces anything.
+fn claim(paths: &Paths) -> Claim {
     match lock::take(&paths.tui_lock()) {
-        Ok(Some(held)) => (Some(held), None),
-        Ok(None) => (
-            None,
-            Some("another blubat owns the notifications and hooks".to_string()),
-        ),
-        Err(problem) => (None, Some(problem)),
+        Ok(Some(held)) => Claim {
+            held: Some(held),
+            owns: true,
+            notice: None,
+        },
+        Ok(None) => Claim {
+            held: None,
+            owns: false,
+            notice: Some("another blubat owns the notifications and hooks".to_string()),
+        },
+        Err(problem) => Claim {
+            held: None,
+            owns: true,
+            notice: Some(problem),
+        },
     }
 }
 
@@ -251,6 +277,8 @@ fn next(events: &Receiver<Event>) -> Option<Event> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use crate::scratch::Scratch;
 
     use super::*;
@@ -266,19 +294,22 @@ mod tests {
         let scratch = Scratch::new();
         let paths = scratch.paths();
 
-        let (first, quiet) = claim(&paths);
-        let (second, deferring) = claim(&paths);
+        let first = claim(&paths);
+        let second = claim(&paths);
 
-        assert!(first.is_some());
-        assert_eq!(quiet, None);
-        assert!(second.is_none(), "the first one up keeps them");
+        assert!(first.held.is_some());
+        assert!(first.owns);
+        assert_eq!(first.notice, None);
+        assert!(second.held.is_none(), "the first one up keeps them");
+        assert!(!second.owns);
         assert!(
-            deferring.is_some_and(|line| line.contains("another blubat")),
+            second
+                .notice
+                .is_some_and(|line| line.contains("another blubat")),
             "and the second one says so"
         );
-        assert_eq!(
-            lock::held(&paths.tui_lock()),
-            Some(true),
+        assert!(
+            matches!(lock::held(&paths.tui_lock()), lock::Holder::Blubat),
             "the file the daemon checks is the file the dashboard took"
         );
     }
@@ -288,11 +319,36 @@ mod tests {
         let scratch = Scratch::new();
         let paths = scratch.paths();
 
-        let (first, _) = claim(&paths);
+        let first = claim(&paths);
         drop(first);
 
-        assert_eq!(lock::held(&paths.tui_lock()), Some(false));
-        assert!(claim(&paths).0.is_some());
+        assert!(matches!(
+            lock::held(&paths.tui_lock()),
+            lock::Holder::Nobody
+        ));
+        assert!(claim(&paths).held.is_some());
+    }
+
+    /// The daemon leaves the side effects to a dashboard whenever it cannot
+    /// read the lock, so a dashboard that cannot read it either must keep
+    /// them: two blubats deferring to each other announce nothing at all.
+    #[test]
+    fn a_dashboard_that_cannot_claim_the_lock_keeps_the_side_effects_rather_than_going_quiet() {
+        let scratch = Scratch::new();
+        let paths = scratch.paths();
+        fs::create_dir_all(paths.tui_lock()).expect("a directory where the lock file belongs");
+
+        let claimed = claim(&paths);
+
+        assert!(claimed.held.is_none(), "there was no lock to be had");
+        assert!(
+            claimed.owns,
+            "a dashboard nobody can tell about must not be the quiet one"
+        );
+        assert!(
+            claimed.notice.is_some(),
+            "and it says why on the status line"
+        );
     }
 
     #[test]

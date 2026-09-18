@@ -404,9 +404,9 @@ pub struct App {
     /// Set by `c` and cleared by what the loop makes of it: the reducer can no
     /// more suspend the terminal and spawn an editor than it can touch a file.
     pub edit_config: bool,
-    /// What the daemon last wrote about itself, absent where none has ever
-    /// run. Kept raw rather than judged, so [`App::health`] answers against
-    /// this frame's own clock rather than the one the file was read on.
+    /// What the daemon's record came to when it was last read. Kept raw rather
+    /// than judged, so [`App::health`] answers against this frame's own clock
+    /// rather than the one the file was read on.
     pub daemon: Recorded,
 }
 

@@ -889,6 +889,23 @@ mod tests {
         assert!(!screen(&app).contains("all ok"));
     }
 
+    /// A record nobody could read says nothing about the daemon, so the line
+    /// must not call it stopped; it still withdraws `all ok`, because the
+    /// levels on screen cannot be vouched for either.
+    #[test]
+    fn a_daemon_whose_record_could_not_be_read_is_named_as_unknown_rather_than_down() {
+        let app = App {
+            daemon: Recorded::Unreadable,
+            ..loaded()
+        };
+
+        let line = line_containing(&app, "blubat");
+
+        assert!(line.contains("daemon unknown"), "{line}");
+        assert!(!line.contains("daemon down"), "{line}");
+        assert!(!screen(&app).contains("all ok"));
+    }
+
     #[test]
     fn a_machine_with_no_daemon_installed_reads_exactly_as_it_always_did() {
         let app = loaded();

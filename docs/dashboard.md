@@ -107,8 +107,10 @@ The right of the status line reads `all ok` when nothing is critical, but only
 while the dashboard has something to vouch for. A [daemon](daemon.md) that has
 stopped sweeping, or stopped polling altogether, is named on the left as
 `daemon not ready` or `daemon down`, and `all ok` is withheld: the levels on
-screen may be a day old, and that line must never say otherwise. A machine
-with no daemon installed is not either of those states and changes nothing.
+screen may be a day old, and that line must never say otherwise. A daemon
+whose record cannot be read is named `daemon unknown` and withholds it too,
+for the same reason: nothing here can vouch for what is on screen. A machine
+with no daemon installed is none of those states and changes nothing.
 
 ## Refreshing
 

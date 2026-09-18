@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 
-use blubat_core::{Config, Heartbeat, Paths, Snapshot, Timestamp};
+use blubat_core::{Config, Heartbeat, Paths, Recorded, Snapshot, Timestamp};
 
 use crate::effects::Effects;
 use crate::hooks::Outcome;
@@ -71,23 +71,20 @@ impl Dashboard {
     /// nobody reads; said at all, because otherwise a lock that can never be
     /// opened disables the banners for good with nothing written down.
     fn asked(&mut self) -> Option<String> {
-        let held = lock::held(&self.lock);
-        self.owns.store(held.unwrap_or(true), Ordering::SeqCst);
+        let holder = lock::held(&self.lock);
+        self.owns.store(holder.or(true), Ordering::SeqCst);
 
-        match (held, self.said) {
-            (None, false) => {
-                self.said = true;
-                Some(format!(
-                    "{}: cannot be read, so the side effects are left to the dashboard",
-                    self.lock.display()
-                ))
-            }
-            (None, true) => None,
-            (Some(_), _) => {
-                self.said = false;
-                None
-            }
-        }
+        let Some(error) = holder.unknown() else {
+            self.said = false;
+            return None;
+        };
+
+        (!std::mem::replace(&mut self.said, true)).then(|| {
+            format!(
+                "{}: {error}, so the side effects are left to the dashboard",
+                self.lock.display()
+            )
+        })
     }
 }
 
@@ -176,7 +173,11 @@ fn poll_loop(
 ) -> Result<(), Failure> {
     let health_file = paths.health_file();
     let mut swept_at = None;
-    let mut landed = resumed(&health_file);
+    let (mut landed, lost) = resumed(&health_file);
+
+    if let Some(problem) = lost {
+        log(&mut out, &problem);
+    }
 
     for reading in blubat_core::poll(config.poll.daemon_tiers(), &paths.readings_file()) {
         if sweep::due(
@@ -299,15 +300,24 @@ fn beat(path: &Path, beat_at: Timestamp, swept_at: Option<Timestamp>) -> Option<
         .map(|error| error.to_string())
 }
 
-/// The last sweep the previous run got to, read back at startup.
+/// The last sweep the previous run got to, and what was wrong with the record.
 ///
-/// Readiness survives a restart on purpose: a daemon that had stopped
-/// sweeping must not read as ready again merely because launchd started a
-/// fresh process over it.
-fn resumed(path: &Path) -> Option<Timestamp> {
-    blubat_core::load_heartbeat(path)
-        .beat()
-        .and_then(|beat| beat.swept_at)
+/// Readiness survives a restart on purpose: a daemon that had stopped sweeping
+/// must not read as ready again merely because launchd started a fresh process
+/// over it. A record that could not be read is said out loud, since the first
+/// pass overwrites it and takes the previous run's account with it.
+fn resumed(path: &Path) -> (Option<Timestamp>, Option<String>) {
+    match blubat_core::load_heartbeat(path) {
+        Recorded::Beat(beat) => (beat.swept_at, None),
+        Recorded::Never => (None, None),
+        Recorded::Unreadable => (
+            None,
+            Some(format!(
+                "{}: could not be read, so the last sweep it recorded is lost",
+                path.display()
+            )),
+        ),
+    }
 }
 
 /// One log line, stamped so a log read weeks later says when.
@@ -616,7 +626,7 @@ mod tests {
         beat(&file, Timestamp::from_unix(READ_AT), Some(swept));
 
         assert_eq!(
-            resumed(&file),
+            resumed(&file).0,
             Some(swept),
             "a fresh process over a daemon that had stopped sweeping is not ready either"
         );
@@ -624,7 +634,26 @@ mod tests {
 
     #[test]
     fn a_first_ever_run_has_no_sweep_to_take_up() {
-        assert_eq!(resumed(&Scratch::new().paths().health_file()), None);
+        assert_eq!(resumed(&Scratch::new().paths().health_file()), (None, None));
+    }
+
+    /// The first pass overwrites the record, so a run that could not read it
+    /// loses the previous run's account of itself; going quiet about that
+    /// leaves `no sweep has ever landed` standing for a read that never
+    /// happened.
+    #[test]
+    fn a_record_the_restarted_daemon_could_not_read_is_said_rather_than_read_as_no_sweep() {
+        let scratch = Scratch::new();
+        let file = scratch.paths().health_file();
+        scratch.unopenable(&file);
+
+        let (landed, lost) = resumed(&file);
+
+        assert_eq!(landed, None);
+        assert!(
+            lost.is_some_and(|line| line.contains("health.toml")),
+            "a record that was lost rather than never written says so"
+        );
     }
 
     #[test]
