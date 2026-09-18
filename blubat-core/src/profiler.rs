@@ -606,6 +606,29 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output), "done");
     }
 
+    /// Captures are named for this process, so counting its own is a count
+    /// nothing running alongside the suite can move.
+    fn captures_left_in_the_temp_dir() -> usize {
+        let mine = format!("blubat-{}-", std::process::id());
+
+        std::fs::read_dir(std::env::temp_dir())
+            .expect("the temp dir is readable")
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(&mine))
+            .count()
+    }
+
+    #[test]
+    fn a_run_leaves_no_capture_file_behind_whether_it_finishes_or_is_stopped() {
+        let before = captures_left_in_the_temp_dir();
+
+        let _ = run(shell("printf '{}'"), Duration::from_secs(10));
+        let _ = run(shell("echo trouble >&2; exit 3"), Duration::from_secs(10));
+        let _ = run(shell("sleep 30 & sleep 30"), Duration::from_millis(100));
+
+        assert_eq!(captures_left_in_the_temp_dir(), before);
+    }
+
     #[test]
     fn a_reading_larger_than_a_pipe_buffer_comes_back_whole() {
         let output = run(
