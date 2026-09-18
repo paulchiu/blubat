@@ -167,6 +167,16 @@ fn poll_loop(
     Err(Failure::Error(stopped.to_string()))
 }
 
+/// Whether a dashboard owns the side effects, which the daemon then leaves
+/// alone.
+///
+/// Doubt counts as a dashboard. Staying quiet under it costs a banner the
+/// dashboard is posting anyway, where acting duplicates every banner and, on
+/// the way, hands the engine a state file it has just failed to read.
+fn dashboard_owns(lock: &Path) -> bool {
+    lock::held(lock).unwrap_or(true)
+}
+
 /// The loop's state, wired to the files and sinks it acts through.
 ///
 /// The one place that decides the daemon defers to `tui.lock` and drains the
@@ -176,7 +186,7 @@ fn resident(paths: &Paths, effects: Effects, notifier: Box<dyn Notifier>) -> Res
     let dashboard = paths.tui_lock();
 
     Resident {
-        effects: effects.deferring_to(move || lock::held(&dashboard)),
+        effects: effects.deferring_to(move || dashboard_owns(&dashboard)),
         watches: Watches::default(),
         notifier,
         directory: paths.watch_dir(),
@@ -406,6 +416,24 @@ mod tests {
             1,
             "nothing is holding the lock the file was written for"
         );
+    }
+
+    /// The daemon's half of the same question the dashboard lock answers, at
+    /// the loop that acts on it: a lock it cannot read must read as one a
+    /// dashboard is holding, or a daemon short of descriptors announces over a
+    /// dashboard that is still up.
+    #[test]
+    fn a_dashboard_lock_the_daemon_cannot_read_keeps_the_side_effects_off_it() {
+        let scratch = Scratch::new();
+        let (mut resident, banners, hooks) = resident(&scratch);
+        let config = config();
+        scratch.unopenable(&scratch.paths().tui_lock());
+
+        resident.tick(&reading(Some(50), 0), &config);
+        resident.tick(&reading(Some(19), 1), &config);
+
+        assert!(banners.posted().is_empty(), "{:?}", banners.posted());
+        assert!(hooks.commands().is_empty(), "{:?}", hooks.commands());
     }
 
     #[test]

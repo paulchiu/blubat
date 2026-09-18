@@ -235,7 +235,6 @@ mod tests {
             paths.state_file(),
             paths.readings_file(),
             paths.health_file(),
-            paths.health_file(),
             paths.watch_dir(),
             paths.tui_lock(),
             paths.daemon_lock(),

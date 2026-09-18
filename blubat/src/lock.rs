@@ -52,13 +52,23 @@ pub fn take(path: &Path) -> Result<Option<Held>, String> {
     Ok(Some(Held { file }))
 }
 
-/// Whether a live blubat is holding `path`.
+/// Whether a live blubat is holding `path`, or `None` where that cannot be told.
 ///
 /// A shared lock is enough to answer, and is refused only by the exclusive lock
 /// a holder took: two blubats asking at once do not refuse each other, and the
 /// answer is given up again as soon as it has been read.
-pub fn held(path: &Path) -> bool {
-    File::open(path).is_ok_and(|file| !free(&file))
+///
+/// A file that is not there is nobody holding it, which is the ordinary answer
+/// on a machine with no dashboard open. Every other reason it would not open is
+/// no answer at all, a process out of descriptors being unable to open
+/// anything. Which way to be wrong under that is the caller's, since the two
+/// asking want opposite defaults.
+pub fn held(path: &Path) -> Option<bool> {
+    match File::open(path) {
+        Ok(file) => Some(!free(&file)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(false),
+        Err(_) => None,
+    }
 }
 
 /// Whether nothing is holding `file`, asked by taking a shared lock and giving
@@ -125,10 +135,14 @@ mod tests {
 
         let held = take(&path).expect("a directory it can create");
         assert!(held.is_some());
-        assert!(super::held(&path), "this process is holding it");
+        assert_eq!(super::held(&path), Some(true), "this process is holding it");
 
         drop(held);
-        assert!(!super::held(&path), "and every exit path gives it up");
+        assert_eq!(
+            super::held(&path),
+            Some(false),
+            "and every exit path gives it up"
+        );
     }
 
     #[test]
@@ -168,7 +182,11 @@ mod tests {
         fs::create_dir_all(path.parent().expect("a parent")).expect("a state directory");
         fs::write(&path, STALE).expect("a lock left behind");
 
-        assert!(!held(&path), "a killed dashboard must not silence a daemon");
+        assert_eq!(
+            held(&path),
+            Some(false),
+            "a killed dashboard must not silence a daemon"
+        );
         assert!(take(&path).expect("a lock").is_some());
     }
 
@@ -176,7 +194,15 @@ mod tests {
     fn a_lock_nothing_has_ever_written_is_absent_rather_than_an_error() {
         let scratch = Scratch::new();
 
-        assert!(!held(&scratch.join("never-written.lock")));
+        assert_eq!(held(&scratch.join("never-written.lock")), Some(false));
+    }
+
+    #[test]
+    fn a_lock_that_cannot_be_opened_is_unknown_rather_than_free() {
+        let scratch = Scratch::new();
+        let path = scratch.unopenable(&lock(&scratch));
+
+        assert_eq!(held(&path), None, "an answer nobody can read is not a no");
     }
 
     #[test]
