@@ -263,7 +263,9 @@ fn beat(path: &Path, beat_at: Timestamp, swept_at: Option<Timestamp>) -> Option<
 /// sweeping must not read as ready again merely because launchd started a
 /// fresh process over it.
 fn resumed(path: &Path) -> Option<Timestamp> {
-    blubat_core::load_heartbeat(path).and_then(|beat| beat.swept_at)
+    blubat_core::load_heartbeat(path)
+        .beat()
+        .and_then(|beat| beat.swept_at)
 }
 
 /// One log line, stamped so a log read weeks later says when.
@@ -517,7 +519,7 @@ mod tests {
         assert_eq!(problem, None);
         assert_eq!(
             blubat_core::load_heartbeat(&file),
-            Some(Heartbeat {
+            blubat_core::Recorded::Beat(Heartbeat {
                 beat_at: Timestamp::from_unix(READ_AT),
                 swept_at: Some(swept),
             })

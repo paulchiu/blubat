@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use blubat_core::{
-    Advertised, AdvertisedThresholds, Config, Device, Health, HealthWindows, Heartbeat, History,
+    Advertised, AdvertisedThresholds, Config, Device, Health, HealthWindows, History, Recorded,
     Raised, Snapshot, Thresholds, Timestamp,
 };
 
@@ -345,7 +345,7 @@ pub enum Event {
     /// Something the loop did that the user needs telling about.
     Note(Notice),
     /// What the daemon last recorded about itself, re-read with each reading.
-    Beat(Option<Heartbeat>),
+    Beat(Recorded),
 }
 
 /// Everything the dashboard draws, and nothing else.
@@ -407,7 +407,7 @@ pub struct App {
     /// What the daemon last wrote about itself, absent where none has ever
     /// run. Kept raw rather than judged, so [`App::health`] answers against
     /// this frame's own clock rather than the one the file was read on.
-    pub daemon: Option<Heartbeat>,
+    pub daemon: Recorded,
 }
 
 impl App {
@@ -441,7 +441,7 @@ impl App {
             refreshing_ticks: 0,
             save_dashboard: None,
             edit_config: false,
-            daemon: None,
+            daemon: Recorded::Never,
         }
     }
 

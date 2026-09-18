@@ -373,6 +373,11 @@ fn vitals(health: Health) -> Vec<String> {
             format!("live      yes, last beat {last_beat}"),
             format!("ready     yes, last sweep {last_sweep}"),
         ],
+        Health::Unknown => vec![
+            "live      unknown, the heartbeat could not be read".to_string(),
+            "ready     unknown, the heartbeat could not be read".to_string(),
+            "          the daemon may well be running; this machine cannot ask".to_string(),
+        ],
     }
 }
 
@@ -834,6 +839,24 @@ mod tests {
         assert_eq!(lines[1], "plist     /Users/blubat/plist");
         assert_eq!(lines[2], "loaded    yes");
         assert_eq!(lines[3], "running   yes, pid 4242");
+    }
+
+    /// The record being unreadable says nothing about the daemon, so the
+    /// report must not spend its two lines calling a healthy one stopped.
+    #[test]
+    fn a_record_nobody_could_read_is_reported_as_unknown_rather_than_stopped() {
+        let report = worked("com.paulchiu.blubat = {\n\tpid = 4242\n}");
+
+        let lines = described(&report, Health::Unknown);
+
+        assert!(
+            lines.iter().any(|line| line.starts_with("live      unknown")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("stopped coming round")),
+            "{lines:?}"
+        );
     }
 
     #[test]

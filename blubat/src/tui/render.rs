@@ -747,7 +747,7 @@ fn seconds(duration: std::time::Duration) -> String {
 
 #[cfg(test)]
 mod tests {
-    use blubat_core::{ChargeState, Heartbeat, Levels, Raised, Snapshot, Timestamp};
+    use blubat_core::{ChargeState, Heartbeat, Levels, Raised, Recorded, Snapshot, Timestamp};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::{Buffer, Cell as Drawn};
@@ -837,7 +837,7 @@ mod tests {
     /// not to.
     fn watched(beat: i64, sweep: Option<i64>) -> App {
         App {
-            daemon: Some(Heartbeat {
+            daemon: Recorded::Beat(Heartbeat {
                 beat_at: Timestamp::from_unix(READ_AT.unix() - beat),
                 swept_at: sweep.map(|ago| Timestamp::from_unix(READ_AT.unix() - ago)),
             }),

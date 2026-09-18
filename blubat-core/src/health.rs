@@ -15,6 +15,7 @@
 //! own and nothing has to notice on its behalf.
 
 use std::fs;
+use std::io;
 use std::path::Path;
 use std::time::Duration;
 
@@ -68,6 +69,31 @@ impl Windows {
     }
 }
 
+/// What the heartbeat file amounted to when it was read.
+///
+/// A file that is not there and a file that cannot be read are kept apart,
+/// because they mean opposite things: the first is a machine with no daemon,
+/// the second is a machine whose daemon cannot be asked about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Recorded {
+    /// Nothing has ever been written there.
+    Never,
+    /// What the daemon last wrote.
+    Beat(Heartbeat),
+    /// It is there, and this process could not read it.
+    Unreadable,
+}
+
+impl Recorded {
+    /// The heartbeat it holds, where it holds one.
+    pub fn beat(self) -> Option<Heartbeat> {
+        match self {
+            Self::Beat(beat) => Some(beat),
+            Self::Never | Self::Unreadable => None,
+        }
+    }
+}
+
 /// What the daemon's own record amounts to, judged against a clock.
 ///
 /// Shaped so the impossible combinations cannot be built: a ready daemon
@@ -89,6 +115,10 @@ pub enum Health {
         last_beat: Timestamp,
         last_sweep: Timestamp,
     },
+    /// The daemon left a record that could not be read, so nothing here is
+    /// known either way. Distinct from [`Health::Down`], which is a daemon
+    /// this machine did manage to ask about.
+    Unknown,
 }
 
 impl Health {
@@ -96,9 +126,11 @@ impl Health {
     ///
     /// Liveness is answered first: a loop that has stopped coming round is
     /// down whatever its last sweep says, since nothing is left to refresh it.
-    pub fn of(beat: Option<Heartbeat>, now: Timestamp, windows: Windows) -> Self {
-        let Some(beat) = beat else {
-            return Self::Absent;
+    pub fn of(recorded: Recorded, now: Timestamp, windows: Windows) -> Self {
+        let beat = match recorded {
+            Recorded::Never => return Self::Absent,
+            Recorded::Unreadable => return Self::Unknown,
+            Recorded::Beat(beat) => beat,
         };
 
         if beat.beat_at.plus(windows.liveness) < now {
@@ -124,7 +156,7 @@ impl Health {
     /// [`Health::Absent`] is not: a machine with no daemon installed is a
     /// documented way to run blubat, not a daemon that has gone wrong.
     pub fn alarming(self) -> bool {
-        matches!(self, Self::Down { .. } | Self::NotReady { .. })
+        matches!(self, Self::Down { .. } | Self::NotReady { .. } | Self::Unknown)
     }
 
     /// The state in a word, for a surface that has room for one.
@@ -134,6 +166,7 @@ impl Health {
             Self::Down { .. } => "down",
             Self::NotReady { .. } => "not ready",
             Self::Ready { .. } => "ready",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -150,11 +183,18 @@ pub fn save(path: &Path, beat: &Heartbeat) -> Result<()> {
         .and_then(|contents| atomic::write(path, &contents))
 }
 
-/// Loads the heartbeat, treating anything unusable as no daemon at all.
-pub fn load(path: &Path) -> Option<Heartbeat> {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|contents| toml::from_str(&contents).ok())
+/// Loads the heartbeat, keeping a file that is not there apart from one that
+/// cannot be made sense of.
+///
+/// Only the first means no daemon. Reading the second the same way reports a
+/// daemon that may be running perfectly as one that has stopped, in the
+/// surface that exists to answer exactly that question.
+pub fn load(path: &Path) -> Recorded {
+    match fs::read_to_string(path) {
+        Ok(contents) => toml::from_str(&contents).map_or(Recorded::Unreadable, Recorded::Beat),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Recorded::Never,
+        Err(_) => Recorded::Unreadable,
+    }
 }
 
 #[cfg(test)]
@@ -182,7 +222,7 @@ mod tests {
     }
 
     fn judged(beat: Heartbeat) -> Health {
-        Health::of(Some(beat), NOW, windows())
+        Health::of(Recorded::Beat(beat), NOW, windows())
     }
 
     /// A directory that removes itself, so a failing test leaves nothing behind.
@@ -212,6 +252,24 @@ mod tests {
         }
     }
 
+    /// Descriptor exhaustion is the shape this guards, which a test cannot
+    /// arrange; a file the process cannot open reaches the same branch.
+    #[test]
+    fn a_heartbeat_that_cannot_be_read_is_unknown_rather_than_a_daemon_that_is_down() {
+        let scratch = Scratch::new();
+        fs::create_dir_all(&scratch.0).expect("a scratch directory");
+        let path = scratch.health_file();
+        std::os::unix::fs::symlink("health.toml", &path).expect("a link to itself");
+
+        let health = Health::of(load(&path), NOW, windows());
+
+        assert_eq!(health, Health::Unknown);
+        assert!(
+            health.alarming(),
+            "a record nobody can read is worth saying out loud"
+        );
+    }
+
     #[test]
     fn the_windows_are_three_of_the_daemons_own_intervals() {
         assert_eq!(windows().liveness, Duration::from_secs(360));
@@ -232,7 +290,7 @@ mod tests {
 
     #[test]
     fn nothing_ever_written_is_absent_rather_than_unhealthy() {
-        let health = Health::of(None, NOW, windows());
+        let health = Health::of(Recorded::Never, NOW, windows());
 
         assert_eq!(health, Health::Absent);
         assert!(
@@ -312,17 +370,22 @@ mod tests {
 
         save(&scratch.health_file(), &beat).expect("writes");
 
-        assert_eq!(load(&scratch.health_file()), Some(beat));
+        assert_eq!(load(&scratch.health_file()), Recorded::Beat(beat));
     }
 
     #[test]
-    fn a_missing_or_unusable_file_is_no_daemon_rather_than_an_error() {
+    fn a_file_nothing_has_ever_written_is_no_daemon_rather_than_an_error() {
         let scratch = Scratch::new();
 
-        assert_eq!(load(&scratch.health_file()), None);
+        assert_eq!(load(&scratch.health_file()), Recorded::Never);
+    }
 
+    #[test]
+    fn a_file_that_is_there_but_makes_no_sense_is_unreadable_rather_than_absent() {
+        let scratch = Scratch::new();
         fs::create_dir_all(&scratch.0).expect("a scratch directory");
         fs::write(scratch.health_file(), "not toml at all {{").expect("a written file");
-        assert_eq!(load(&scratch.health_file()), None);
+
+        assert_eq!(load(&scratch.health_file()), Recorded::Unreadable);
     }
 }
