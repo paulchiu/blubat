@@ -14,11 +14,11 @@
 //! not a dashboard happens to be up.
 
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
-use blubat_core::{Config, Paths, Snapshot, Timestamp};
+use blubat_core::{Config, Heartbeat, Paths, Snapshot, Timestamp};
 
 use crate::effects::Effects;
 use crate::hooks::Outcome;
@@ -86,11 +86,13 @@ pub fn serve(paths: &Paths) -> Result<(), Failure> {
     );
 
     let (sweeps, requests) = mpsc::sync_channel(1);
+    let (saved, landings) = mpsc::channel();
 
     thread::scope(|scope| {
-        let worker = scope.spawn(move || poll_loop(resident, &config, paths, out, sweeps));
+        let worker =
+            scope.spawn(move || poll_loop(resident, &config, paths, out, sweeps, landings));
 
-        sweep::execute(&Bluetoothd, &IoBluetooth, &CoreBluetooth, requests);
+        sweep::execute(&Bluetoothd, &IoBluetooth, &CoreBluetooth, requests, &saved);
 
         worker.join().expect("the poll loop thread panicked")
     })
@@ -106,6 +108,12 @@ pub fn serve(paths: &Paths) -> Result<(), Failure> {
 /// an earlier one, so this loop drops the new one silently rather than
 /// waiting for room, matching the one-attempt-no-retry discipline every
 /// sweep failure keeps.
+///
+/// Every pass ends by writing the heartbeat this loop is the sole author of.
+/// `landings` carries back the moment each sweep's readings actually reached
+/// disk, so the two halves of the record are written by one thread and can
+/// never race: liveness is this loop coming round, readiness is what the
+/// executor last managed.
 #[expect(
     clippy::needless_pass_by_value,
     reason = "ownership of `sweeps` is what makes returning end the executor loop, as the doc above describes"
@@ -116,8 +124,11 @@ fn poll_loop(
     paths: &Paths,
     mut out: impl Write,
     sweeps: mpsc::SyncSender<SweepRequest>,
+    landings: mpsc::Receiver<Timestamp>,
 ) -> Result<(), Failure> {
+    let health_file = paths.health_file();
     let mut swept_at = None;
+    let mut landed = resumed(&health_file);
 
     for reading in blubat_core::poll(config.poll.daemon_tiers(), &paths.readings_file()) {
         if sweep::due(
@@ -137,6 +148,12 @@ fn poll_loop(
 
         for line in resident.tick(&reading, config) {
             log(&mut out, &line);
+        }
+
+        landed = landings.try_iter().last().or(landed);
+
+        if let Some(problem) = beat(&health_file, reading.read_at, landed) {
+            log(&mut out, &problem);
         }
     }
 
@@ -215,6 +232,28 @@ fn report(outcome: Outcome) {
     } else {
         println!("{}", stamped(Timestamp::now(), &outcome.to_string()));
     }
+}
+
+/// Writes down what this pass amounts to: that the loop came round, and when
+/// a sweep's readings last landed.
+///
+/// Hands back the line to log when the file could not be written. A heartbeat
+/// nothing can write is the shape of the very failure this record exists to
+/// expose, so it is said out loud rather than dropped the way a failed sweep
+/// save is.
+fn beat(path: &Path, beat_at: Timestamp, swept_at: Option<Timestamp>) -> Option<String> {
+    blubat_core::save_heartbeat(path, &Heartbeat { beat_at, swept_at })
+        .err()
+        .map(|error| error.to_string())
+}
+
+/// The last sweep the previous run got to, read back at startup.
+///
+/// Readiness survives a restart on purpose: a daemon that had stopped
+/// sweeping must not read as ready again merely because launchd started a
+/// fresh process over it.
+fn resumed(path: &Path) -> Option<Timestamp> {
+    blubat_core::load_heartbeat(path).and_then(|beat| beat.swept_at)
 }
 
 /// One log line, stamped so a log read weeks later says when.
@@ -437,6 +476,57 @@ mod tests {
         );
 
         drop(open);
+    }
+
+    #[test]
+    fn a_pass_writes_down_that_it_came_round_and_when_its_last_sweep_landed() {
+        let scratch = Scratch::new();
+        let file = scratch.paths().health_file();
+        let swept = Timestamp::from_unix(READ_AT - 60);
+
+        let problem = beat(&file, Timestamp::from_unix(READ_AT), Some(swept));
+
+        assert_eq!(problem, None);
+        assert_eq!(
+            blubat_core::load_heartbeat(&file),
+            Some(Heartbeat {
+                beat_at: Timestamp::from_unix(READ_AT),
+                swept_at: Some(swept),
+            })
+        );
+    }
+
+    #[test]
+    fn a_heartbeat_that_cannot_be_written_is_reported_rather_than_passing_silently() {
+        let scratch = Scratch::new();
+        let file = scratch.paths().health_file();
+        fs::create_dir_all(&file).expect("a directory where the file should be");
+
+        let problem = beat(&file, Timestamp::from_unix(READ_AT), None);
+
+        assert!(
+            problem.is_some_and(|line| line.contains("health.toml")),
+            "the line has to name the file nobody could write"
+        );
+    }
+
+    #[test]
+    fn a_restarted_daemon_takes_up_the_previous_runs_last_sweep() {
+        let scratch = Scratch::new();
+        let file = scratch.paths().health_file();
+        let swept = Timestamp::from_unix(READ_AT - 3600);
+        beat(&file, Timestamp::from_unix(READ_AT), Some(swept));
+
+        assert_eq!(
+            resumed(&file),
+            Some(swept),
+            "a fresh process over a daemon that had stopped sweeping is not ready either"
+        );
+    }
+
+    #[test]
+    fn a_first_ever_run_has_no_sweep_to_take_up() {
+        assert_eq!(resumed(&Scratch::new().paths().health_file()), None);
     }
 
     #[test]
