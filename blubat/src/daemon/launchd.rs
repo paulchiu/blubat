@@ -17,7 +17,7 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-use blubat_core::Paths;
+use blubat_core::{Health, Paths};
 
 use crate::Failure;
 
@@ -278,29 +278,33 @@ pub fn uninstall(
     Ok(())
 }
 
-/// `blubat daemon status`: whether the agent is installed, loaded and running.
+/// `blubat daemon status`: whether the agent is installed, loaded and running,
+/// and whether the daemon behind it is actually doing its job.
 pub fn status(
     launchctl: &dyn Launchctl,
     plist: &Path,
+    health: Health,
     out: &mut impl Write,
 ) -> Result<(), Failure> {
     let printed = launchctl
         .run(&["print", &service()])
         .map_err(Failure::Error)?;
 
-    for line in describe(plist, plist.exists(), &printed) {
+    for line in describe(plist, plist.exists(), &printed, health) {
         writeln!(out, "{line}")?;
     }
 
     Ok(())
 }
 
-/// What the plist on disk and `launchctl print` say between them.
+/// What the plist on disk, `launchctl print` and the daemon's own record say
+/// between them.
 ///
 /// Loaded and running are separate answers: an agent can be bootstrapped and
 /// still be between restarts, and a plist can sit on disk with nothing loaded
-/// from it after a boot that never ran it.
-fn describe(plist: &Path, installed: bool, printed: &Ran) -> Vec<String> {
+/// from it after a boot that never ran it. Live and ready are two more, and
+/// the only two launchd cannot answer at all.
+fn describe(plist: &Path, installed: bool, printed: &Ran, health: Health) -> Vec<String> {
     let loaded = printed.worked();
     let pid = loaded.then(|| field(&printed.output, "pid")).flatten();
 
@@ -328,7 +332,48 @@ fn describe(plist: &Path, installed: bool, printed: &Ran) -> Vec<String> {
         );
     }
 
+    lines.extend(vitals(health));
+
     lines
+}
+
+/// The two answers launchd has no idea about: whether the loop is still coming
+/// round, and whether its last sweep actually landed.
+///
+/// A daemon can be running by every measure launchd has while every sweep it
+/// makes fails, which is the state this whole report used to call `running
+/// yes` and leave at that.
+fn vitals(health: Health) -> Vec<String> {
+    match health {
+        Health::Absent => vec![
+            "live      no heartbeat recorded".to_string(),
+            "ready     no sweep recorded".to_string(),
+        ],
+        Health::Down { last_beat } => vec![
+            format!("live      no, last beat {last_beat}"),
+            "ready     no, the loop has stopped coming round".to_string(),
+            "          the process is up but no longer polling; try `blubat daemon restart`"
+                .to_string(),
+        ],
+        Health::NotReady {
+            last_beat,
+            last_sweep,
+        } => vec![
+            format!("live      yes, last beat {last_beat}"),
+            last_sweep.map_or_else(
+                || "ready     no, no sweep has landed yet".to_string(),
+                |at| format!("ready     no, last sweep {at}"),
+            ),
+            "          polling, but no sweep is reaching disk; see daemon.error.log".to_string(),
+        ],
+        Health::Ready {
+            last_beat,
+            last_sweep,
+        } => vec![
+            format!("live      yes, last beat {last_beat}"),
+            format!("ready     yes, last sweep {last_sweep}"),
+        ],
+    }
 }
 
 /// One `key = value` field out of a `launchctl print` report.
@@ -445,6 +490,8 @@ fn escaped(path: &Path) -> String {
 mod tests {
     use std::sync::Mutex;
 
+    use blubat_core::Timestamp;
+
     use crate::scratch::Scratch;
 
     use super::*;
@@ -503,6 +550,21 @@ mod tests {
     /// Where the plist goes, under a directory that is not `~/Library`.
     fn plist_in(scratch: &Scratch) -> PathBuf {
         scratch.join("LaunchAgents").join(format!("{LABEL}.plist"))
+    }
+
+    const BEAT_AT: Timestamp = Timestamp::from_unix(1_785_643_199);
+    const SWEPT_AT: Timestamp = Timestamp::from_unix(1_785_643_139);
+
+    /// The report an installed plist and this `launchctl print` make together.
+    fn described(printed: &Ran, health: Health) -> Vec<String> {
+        describe(Path::new("/Users/blubat/plist"), true, printed, health)
+    }
+
+    fn ready() -> Health {
+        Health::Ready {
+            last_beat: BEAT_AT,
+            last_sweep: SWEPT_AT,
+        }
     }
 
     fn worked(output: &str) -> Ran {
@@ -766,7 +828,7 @@ mod tests {
             "com.paulchiu.blubat = {\n\tactive count = 1\n\tstate = running\n\tpid = 4242\n}",
         );
 
-        let lines = describe(Path::new("/Users/blubat/plist"), true, &report);
+        let lines = described(&report, ready());
 
         assert_eq!(lines[0], "label     com.paulchiu.blubat");
         assert_eq!(lines[1], "plist     /Users/blubat/plist");
@@ -778,7 +840,7 @@ mod tests {
     fn an_agent_loaded_but_between_restarts_is_loaded_and_not_running() {
         let report = worked("com.paulchiu.blubat = {\n\tstate = waiting\n}");
 
-        let lines = describe(Path::new("/Users/blubat/plist"), true, &report);
+        let lines = described(&report, Health::Absent);
 
         assert_eq!(lines[2], "loaded    yes");
         assert_eq!(lines[3], "running   no");
@@ -791,7 +853,7 @@ mod tests {
     fn an_agent_loaded_but_not_running_points_at_restart() {
         let report = worked("com.paulchiu.blubat = {\n\tstate = spawn scheduled\n}");
 
-        let lines = describe(Path::new("/Users/blubat/plist"), true, &report);
+        let lines = described(&report, Health::Absent);
 
         assert!(
             lines.iter().any(|line| line.contains("daemon restart")),
@@ -803,7 +865,7 @@ mod tests {
     fn a_running_agent_gets_no_restart_hint() {
         let report = worked("com.paulchiu.blubat = {\n\tstate = running\n\tpid = 4242\n}");
 
-        let lines = describe(Path::new("/Users/blubat/plist"), true, &report);
+        let lines = described(&report, ready());
 
         assert!(!lines.iter().any(|line| line.contains("daemon restart")));
     }
@@ -814,12 +876,95 @@ mod tests {
         let launchctl = Recorder::answering(vec![failed("Could not find service in domain")]);
         let mut out = Vec::new();
 
-        status(&launchctl, &plist_in(&scratch), &mut out).expect("a report either way");
+        status(&launchctl, &plist_in(&scratch), Health::Absent, &mut out)
+            .expect("a report either way");
 
         let report = String::from_utf8_lossy(&out);
         assert!(report.contains("not installed"), "{report}");
         assert!(report.contains("loaded    no"), "{report}");
         assert!(report.contains("running   no"), "{report}");
+    }
+
+    #[test]
+    fn a_running_agent_answers_liveness_and_readiness_of_its_own() {
+        let report = worked("com.paulchiu.blubat = {\n\tstate = running\n\tpid = 4242\n}");
+
+        let lines = described(&report, ready());
+
+        assert_eq!(lines[4], "live      yes, last beat 2026-08-02T03:59:59Z");
+        assert_eq!(lines[5], "ready     yes, last sweep 2026-08-02T03:58:59Z");
+    }
+
+    /// The incident this half of the report grew for: a process launchd was
+    /// happy to call running, whose every sweep had been failing for a day.
+    #[test]
+    fn a_daemon_whose_sweeps_stopped_landing_reads_as_live_and_not_ready() {
+        let report = worked("com.paulchiu.blubat = {\n\tstate = running\n\tpid = 1688\n}");
+
+        let lines = described(
+            &report,
+            Health::NotReady {
+                last_beat: BEAT_AT,
+                last_sweep: Some(SWEPT_AT),
+            },
+        );
+
+        assert_eq!(lines[3], "running   yes, pid 1688");
+        assert_eq!(lines[4], "live      yes, last beat 2026-08-02T03:59:59Z");
+        assert_eq!(lines[5], "ready     no, last sweep 2026-08-02T03:58:59Z");
+        assert!(
+            lines[6].contains("daemon.error.log"),
+            "and it points somewhere: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_daemon_that_has_never_swept_says_so_rather_than_naming_a_moment() {
+        let lines = described(
+            &worked("com.paulchiu.blubat = {\n\tstate = running\n\tpid = 4242\n}"),
+            Health::NotReady {
+                last_beat: BEAT_AT,
+                last_sweep: None,
+            },
+        );
+
+        assert_eq!(lines[5], "ready     no, no sweep has landed yet");
+    }
+
+    #[test]
+    fn a_daemon_that_has_stopped_coming_round_reads_as_not_live() {
+        let lines = described(
+            &worked("com.paulchiu.blubat = {\n\tstate = running\n\tpid = 4242\n}"),
+            Health::Down { last_beat: BEAT_AT },
+        );
+
+        assert_eq!(lines[4], "live      no, last beat 2026-08-02T03:59:59Z");
+        assert_eq!(lines[5], "ready     no, the loop has stopped coming round");
+        assert!(
+            lines[6].contains("blubat daemon restart"),
+            "and it points somewhere: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_machine_no_daemon_has_ever_run_on_reports_nothing_recorded_rather_than_a_fault() {
+        let scratch = Scratch::new();
+        let launchctl = Recorder::answering(vec![failed("Could not find service in domain")]);
+        let mut out = Vec::new();
+
+        status(&launchctl, &plist_in(&scratch), Health::Absent, &mut out)
+            .expect("a report either way");
+
+        let report = String::from_utf8_lossy(&out);
+        assert!(
+            report.contains("live      no heartbeat recorded"),
+            "{report}"
+        );
+        assert!(report.contains("ready     no sweep recorded"), "{report}");
+        assert!(
+            !report.contains("daemon.error.log") && !report.contains("daemon restart"),
+            "nothing to fix on a machine that never installed one: {report}"
+        );
     }
 
     #[test]

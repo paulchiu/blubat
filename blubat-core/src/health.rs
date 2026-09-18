@@ -77,9 +77,15 @@ pub enum Health {
     /// No beat inside the liveness window: loaded, perhaps, but not polling.
     Down { last_beat: Timestamp },
     /// Beating, but no sweep has landed inside the readiness window.
-    NotReady { last_sweep: Option<Timestamp> },
+    NotReady {
+        last_beat: Timestamp,
+        last_sweep: Option<Timestamp>,
+    },
     /// Beating, and sweeping.
-    Ready { last_sweep: Timestamp },
+    Ready {
+        last_beat: Timestamp,
+        last_sweep: Timestamp,
+    },
 }
 
 impl Health {
@@ -100,9 +106,13 @@ impl Health {
 
         match beat.swept_at {
             Some(swept_at) if swept_at.plus(windows.readiness) >= now => Self::Ready {
+                last_beat: beat.beat_at,
                 last_sweep: swept_at,
             },
-            last_sweep => Self::NotReady { last_sweep },
+            last_sweep => Self::NotReady {
+                last_beat: beat.beat_at,
+                last_sweep,
+            },
         }
     }
 
@@ -223,6 +233,7 @@ mod tests {
         assert_eq!(
             health,
             Health::Ready {
+                last_beat: ago(60),
                 last_sweep: ago(300)
             }
         );
@@ -236,6 +247,7 @@ mod tests {
         assert_eq!(
             health,
             Health::NotReady {
+                last_beat: ago(60),
                 last_sweep: Some(ago(901))
             }
         );
@@ -246,7 +258,10 @@ mod tests {
     fn a_daemon_that_has_never_swept_is_not_ready() {
         assert_eq!(
             judged(beating(ago(60), None)),
-            Health::NotReady { last_sweep: None }
+            Health::NotReady {
+                last_beat: ago(60),
+                last_sweep: None
+            }
         );
     }
 
@@ -266,6 +281,7 @@ mod tests {
         assert_eq!(
             judged(beating(ago(360), Some(ago(60)))),
             Health::Ready {
+                last_beat: ago(360),
                 last_sweep: ago(60)
             }
         );

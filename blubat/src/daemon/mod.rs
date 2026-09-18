@@ -13,7 +13,7 @@ mod watches;
 
 use std::io;
 
-use blubat_core::Paths;
+use blubat_core::{Config, Health, HealthWindows, Paths, Timestamp};
 
 use crate::Failure;
 
@@ -54,7 +54,28 @@ pub fn run(command: &Command, paths: &Paths) -> Result<(), Failure> {
         }
         Command::Uninstall => launchd::uninstall(&launchd::Cli, &launchd::plist_file()?, &mut out),
         Command::Restart => launchd::restart(&launchd::Cli, &launchd::plist_file()?, &mut out),
-        Command::Status => launchd::status(&launchd::Cli, &launchd::plist_file()?, &mut out),
+        Command::Status => launchd::status(
+            &launchd::Cli,
+            &launchd::plist_file()?,
+            health(paths),
+            &mut out,
+        ),
         Command::CachedLevels => bluetoothd::print_cache(&mut out),
     }
+}
+
+/// What the daemon's own record says about it right now.
+///
+/// The windows come from the file rather than from the defaults, since a
+/// `[poll]` section that slows the daemon down moves what counts as silence
+/// with it. A config that will not parse is no reason to withhold the answer,
+/// so the built-in cadence stands in for one.
+fn health(paths: &Paths) -> Health {
+    let config = Config::load(paths.config_file()).unwrap_or_default();
+
+    Health::of(
+        blubat_core::load_heartbeat(&paths.health_file()).as_ref(),
+        Timestamp::now(),
+        HealthWindows::of(&config.poll),
+    )
 }
