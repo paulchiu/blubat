@@ -8,8 +8,8 @@
 use std::time::Duration;
 
 use blubat_core::{
-    Advertised, AdvertisedThresholds, Config, Device, Health, HealthWindows, History, Recorded,
-    Raised, Snapshot, Thresholds, Timestamp,
+    Advertised, AdvertisedThresholds, Config, Device, Health, HealthWindows, History, Raised,
+    Recorded, Snapshot, Thresholds, Timestamp,
 };
 
 use super::journal::Journal;

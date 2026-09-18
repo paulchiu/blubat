@@ -156,7 +156,10 @@ impl Health {
     /// [`Health::Absent`] is not: a machine with no daemon installed is a
     /// documented way to run blubat, not a daemon that has gone wrong.
     pub fn alarming(self) -> bool {
-        matches!(self, Self::Down { .. } | Self::NotReady { .. } | Self::Unknown)
+        matches!(
+            self,
+            Self::Down { .. } | Self::NotReady { .. } | Self::Unknown
+        )
     }
 
     /// The state in a word, for a surface that has room for one.

@@ -850,11 +850,15 @@ mod tests {
         let lines = described(&report, Health::Unknown);
 
         assert!(
-            lines.iter().any(|line| line.starts_with("live      unknown")),
+            lines
+                .iter()
+                .any(|line| line.starts_with("live      unknown")),
             "{lines:?}"
         );
         assert!(
-            !lines.iter().any(|line| line.contains("stopped coming round")),
+            !lines
+                .iter()
+                .any(|line| line.contains("stopped coming round")),
             "{lines:?}"
         );
     }
