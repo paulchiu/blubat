@@ -123,6 +123,14 @@ blubat without a daemon is a documented way to use it, not a fault. The last
 sweep survives a restart, though, so restarting a daemon whose sweeps had
 stopped landing does not make it read as ready until one actually lands.
 
+A file that is there but cannot be made sense of, because it will not open or
+because it is not the TOML the daemon writes, is a fourth state and not the
+same as any of them. Both answers read `unknown`, on the dashboard's status
+line and in `daemon status`, and `all ok` is withheld: the daemon may well be
+running, and this machine cannot tell either way. The record is saying nothing
+rather than saying the daemon has stopped, which is the one reading that would
+be wrong in both directions.
+
 ## Upgrading
 
 A `brew upgrade` replaces the binary on disk and changes its ad-hoc code

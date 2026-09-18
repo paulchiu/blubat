@@ -70,7 +70,7 @@ fn handled(args: &Args, paths: &Paths, read: impl Fn() -> Snapshot) -> Result<()
 /// there waits for something nobody will ever pick up, where waiting here costs
 /// a reading a minute.
 fn daemon_is_running(paths: &Paths) -> bool {
-    lock::held(&paths.daemon_lock()).unwrap_or(false)
+    lock::held(&paths.daemon_lock()).or(false)
 }
 
 /// Drops a one-shot watch file for a running daemon to pick up.

@@ -8,8 +8,8 @@
 use std::time::Duration;
 
 use blubat_core::{
-    Advertised, AdvertisedThresholds, Config, Device, Health, HealthWindows, Heartbeat, History,
-    Raised, Snapshot, Thresholds, Timestamp,
+    Advertised, AdvertisedThresholds, Config, Device, Health, HealthWindows, History, Raised,
+    Recorded, Snapshot, Thresholds, Timestamp,
 };
 
 use super::journal::Journal;
@@ -345,7 +345,7 @@ pub enum Event {
     /// Something the loop did that the user needs telling about.
     Note(Notice),
     /// What the daemon last recorded about itself, re-read with each reading.
-    Beat(Option<Heartbeat>),
+    Beat(Recorded),
 }
 
 /// Everything the dashboard draws, and nothing else.
@@ -404,10 +404,10 @@ pub struct App {
     /// Set by `c` and cleared by what the loop makes of it: the reducer can no
     /// more suspend the terminal and spawn an editor than it can touch a file.
     pub edit_config: bool,
-    /// What the daemon last wrote about itself, absent where none has ever
-    /// run. Kept raw rather than judged, so [`App::health`] answers against
-    /// this frame's own clock rather than the one the file was read on.
-    pub daemon: Option<Heartbeat>,
+    /// What the daemon's record came to when it was last read. Kept raw rather
+    /// than judged, so [`App::health`] answers against this frame's own clock
+    /// rather than the one the file was read on.
+    pub daemon: Recorded,
 }
 
 impl App {
@@ -441,7 +441,7 @@ impl App {
             refreshing_ticks: 0,
             save_dashboard: None,
             edit_config: false,
-            daemon: None,
+            daemon: Recorded::Never,
         }
     }
 

@@ -5,7 +5,7 @@
 //! path wants the same thing, which is somewhere private that removes itself
 //! however the test ends.
 
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -55,6 +55,40 @@ impl Scratch {
         std::os::unix::fs::symlink(name, path).expect("a link to nowhere but itself");
 
         path.to_path_buf()
+    }
+
+    /// A path inside it that opens but that the kernel will not lock.
+    ///
+    /// A lock table that is full is the shape the callers guard against, which
+    /// a test cannot arrange. `flock` refuses a FIFO outright, which reaches
+    /// the same branch. The returned handle keeps a writer open, without which
+    /// opening the FIFO to read would block for one.
+    #[expect(unsafe_code)]
+    pub fn unlockable(&self, path: &Path) -> (PathBuf, File) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("a parent directory");
+        }
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+            .expect("a path with no interior nul");
+
+        // SAFETY: `mkfifo` is given a nul-terminated path this process owns and
+        // writes nothing back through it.
+        let made = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
+        assert_eq!(
+            made,
+            0,
+            "{}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        );
+
+        let open = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .expect("a fifo held open at both ends");
+
+        (path.to_path_buf(), open)
     }
 
     /// blubat's whole layout under this directory.

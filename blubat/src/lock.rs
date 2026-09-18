@@ -40,11 +40,20 @@ impl Drop for Held {
 /// The first blubat to take it owns the side effects and every one after it
 /// defers, which is what two dashboards opened in two panes come to: the second
 /// draws the same devices and announces none of them.
+///
+/// # Errors
+///
+/// Returns the reason where the file could not be opened or written, or where
+/// the kernel would not say whether the lock was free. A dashboard that cannot
+/// find out is told, rather than quietly demoted to a second instance that
+/// announces nothing.
 pub fn take(path: &Path) -> Result<Option<Held>, String> {
     let file = opened(path).map_err(|error| format!("{}: {error}", path.display()))?;
 
-    if !locked(&file, libc::LOCK_EX) {
-        return Ok(None);
+    match locked(&file, libc::LOCK_EX) {
+        Ok(true) => {}
+        Ok(false) => return Ok(None),
+        Err(error) => return Err(format!("{}: {error}", path.display())),
     }
 
     stamp(&file, std::process::id()).map_err(|error| format!("{}: {error}", path.display()))?;
@@ -52,35 +61,68 @@ pub fn take(path: &Path) -> Result<Option<Held>, String> {
     Ok(Some(Held { file }))
 }
 
-/// Whether a live blubat is holding `path`, or `None` where that cannot be told.
+/// What asking who holds a lock came to.
+#[derive(Debug)]
+pub enum Holder {
+    /// A live blubat is holding it.
+    Blubat,
+    /// Nobody is, which is what a lock file nothing has written yet says too.
+    Nobody,
+    /// The question could not be answered, for this reason.
+    Unknown(io::Error),
+}
+
+impl Holder {
+    /// Whether to act as though a blubat holds it, answering `doubt` where
+    /// that cannot be told.
+    ///
+    /// The two callers pass opposite defaults, since being wrong costs them
+    /// opposite things.
+    pub fn or(&self, doubt: bool) -> bool {
+        match *self {
+            Self::Blubat => true,
+            Self::Nobody => false,
+            Self::Unknown(_) => doubt,
+        }
+    }
+
+    /// Why it could not be answered, where it could not.
+    pub fn unknown(&self) -> Option<&io::Error> {
+        match *self {
+            Self::Unknown(ref error) => Some(error),
+            Self::Blubat | Self::Nobody => None,
+        }
+    }
+}
+
+/// Who is holding `path`.
 ///
 /// A shared lock is enough to answer, and is refused only by the exclusive lock
 /// a holder took: two blubats asking at once do not refuse each other, and the
 /// answer is given up again as soon as it has been read.
 ///
 /// A file that is not there is nobody holding it, which is the ordinary answer
-/// on a machine with no dashboard open. Every other reason it would not open is
-/// no answer at all, a process out of descriptors being unable to open
-/// anything. Which way to be wrong under that is the caller's, since the two
-/// asking want opposite defaults.
-pub fn held(path: &Path) -> Option<bool> {
+/// on a machine with no dashboard open. Every other failure is no answer at
+/// all, a process out of descriptors being unable to open anything.
+pub fn held(path: &Path) -> Holder {
     match File::open(path) {
-        Ok(file) => Some(!free(&file)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(false),
-        Err(_) => None,
+        Ok(file) => free(&file),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Holder::Nobody,
+        Err(error) => Holder::Unknown(error),
     }
 }
 
-/// Whether nothing is holding `file`, asked by taking a shared lock and giving
-/// it straight back.
-fn free(file: &File) -> bool {
-    let taken = locked(file, libc::LOCK_SH);
-
-    if taken {
-        release(file);
+/// Who is holding `file`, asked by taking a shared lock and giving it straight
+/// back.
+fn free(file: &File) -> Holder {
+    match locked(file, libc::LOCK_SH) {
+        Ok(true) => {
+            release(file);
+            Holder::Nobody
+        }
+        Ok(false) => Holder::Blubat,
+        Err(error) => Holder::Unknown(error),
     }
-
-    taken
 }
 
 /// The lock file, created where there is none and left as it is where there is.
@@ -100,16 +142,39 @@ fn stamp(mut file: &File, pid: u32) -> io::Result<()> {
     file.write_all(format!("{pid}\n").as_bytes())
 }
 
-fn release(file: &File) {
-    locked(file, libc::LOCK_UN);
+/// Whether a `flock` that did not succeed was another holder refusing it.
+///
+/// Only `EWOULDBLOCK` is. Every other errno is the kernel declining to answer,
+/// which is not the same as a lock nobody holds and must not read as one.
+fn refused(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(libc::EWOULDBLOCK)
 }
 
-/// Takes `operation` on `file` without waiting, answering whether it was given.
+fn release(file: &File) {
+    let _ = locked(file, libc::LOCK_UN);
+}
+
+/// Takes `operation` on `file` without waiting: `Ok(true)` where it was given,
+/// `Ok(false)` where another holder refused it.
+///
+/// # Errors
+///
+/// Returns the OS error where the kernel could not say either way.
 #[expect(unsafe_code)]
-fn locked(file: &File, operation: i32) -> bool {
+fn locked(file: &File, operation: i32) -> io::Result<bool> {
     // SAFETY: `flock` is given a descriptor this process owns and reads no
     // memory blubat owns. Non-blocking, so it cannot hold the caller up.
-    unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) == 0 }
+    if unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } == 0 {
+        return Ok(true);
+    }
+
+    let error = io::Error::last_os_error();
+
+    if refused(&error) {
+        Ok(false)
+    } else {
+        Err(error)
+    }
 }
 
 #[cfg(test)]
@@ -135,12 +200,14 @@ mod tests {
 
         let held = take(&path).expect("a directory it can create");
         assert!(held.is_some());
-        assert_eq!(super::held(&path), Some(true), "this process is holding it");
+        assert!(
+            matches!(super::held(&path), Holder::Blubat),
+            "this process is holding it"
+        );
 
         drop(held);
-        assert_eq!(
-            super::held(&path),
-            Some(false),
+        assert!(
+            matches!(super::held(&path), Holder::Nobody),
             "and every exit path gives it up"
         );
     }
@@ -182,9 +249,8 @@ mod tests {
         fs::create_dir_all(path.parent().expect("a parent")).expect("a state directory");
         fs::write(&path, STALE).expect("a lock left behind");
 
-        assert_eq!(
-            held(&path),
-            Some(false),
+        assert!(
+            matches!(held(&path), Holder::Nobody),
             "a killed dashboard must not silence a daemon"
         );
         assert!(take(&path).expect("a lock").is_some());
@@ -194,7 +260,10 @@ mod tests {
     fn a_lock_nothing_has_ever_written_is_absent_rather_than_an_error() {
         let scratch = Scratch::new();
 
-        assert_eq!(held(&scratch.join("never-written.lock")), Some(false));
+        assert!(matches!(
+            held(&scratch.join("never-written.lock")),
+            Holder::Nobody
+        ));
     }
 
     #[test]
@@ -202,7 +271,35 @@ mod tests {
         let scratch = Scratch::new();
         let path = scratch.unopenable(&lock(&scratch));
 
-        assert_eq!(held(&path), None, "an answer nobody can read is not a no");
+        assert!(
+            matches!(held(&path), Holder::Unknown(_)),
+            "an answer nobody can read is not a no"
+        );
+    }
+
+    /// A full lock table is the shape this guards, which a test cannot
+    /// arrange; a file the kernel refuses to lock at all reaches the same
+    /// branch, and is the half of the question `open` succeeding leaves open.
+    #[test]
+    fn a_lock_the_kernel_will_not_lock_is_unknown_rather_than_free() {
+        let scratch = Scratch::new();
+        let (path, _open) = scratch.unlockable(&lock(&scratch));
+
+        assert!(
+            matches!(held(&path), Holder::Unknown(_)),
+            "a refusal to answer is not an answer that nobody holds it"
+        );
+    }
+
+    #[test]
+    fn a_lock_the_kernel_will_not_lock_comes_back_as_the_reason_rather_than_as_taken() {
+        let scratch = Scratch::new();
+        let (path, _open) = scratch.unlockable(&lock(&scratch));
+
+        assert!(
+            take(&path).is_err(),
+            "a dashboard that cannot find out is told, not quietly demoted"
+        );
     }
 
     #[test]

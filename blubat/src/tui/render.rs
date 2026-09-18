@@ -747,7 +747,7 @@ fn seconds(duration: std::time::Duration) -> String {
 
 #[cfg(test)]
 mod tests {
-    use blubat_core::{ChargeState, Heartbeat, Levels, Raised, Snapshot, Timestamp};
+    use blubat_core::{ChargeState, Heartbeat, Levels, Raised, Recorded, Snapshot, Timestamp};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::{Buffer, Cell as Drawn};
@@ -837,7 +837,7 @@ mod tests {
     /// not to.
     fn watched(beat: i64, sweep: Option<i64>) -> App {
         App {
-            daemon: Some(Heartbeat {
+            daemon: Recorded::Beat(Heartbeat {
                 beat_at: Timestamp::from_unix(READ_AT.unix() - beat),
                 swept_at: sweep.map(|ago| Timestamp::from_unix(READ_AT.unix() - ago)),
             }),
@@ -886,6 +886,23 @@ mod tests {
             "{}",
             line_containing(&app, "blubat")
         );
+        assert!(!screen(&app).contains("all ok"));
+    }
+
+    /// A record nobody could read says nothing about the daemon, so the line
+    /// must not call it stopped; it still withdraws `all ok`, because the
+    /// levels on screen cannot be vouched for either.
+    #[test]
+    fn a_daemon_whose_record_could_not_be_read_is_named_as_unknown_rather_than_down() {
+        let app = App {
+            daemon: Recorded::Unreadable,
+            ..loaded()
+        };
+
+        let line = line_containing(&app, "blubat");
+
+        assert!(line.contains("daemon unknown"), "{line}");
+        assert!(!line.contains("daemon down"), "{line}");
         assert!(!screen(&app).contains("all ok"));
     }
 
