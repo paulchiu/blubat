@@ -179,7 +179,10 @@ blubat writes one thing into the config file and nothing else: `h` on the
 the file, its comments included, exactly as it was. Everything else it
 creates is its own state, under `~/.local/state/blubat/`: the event engine's
 `state.toml`, the daemon's own `readings.toml` handoff from its bluetoothd,
-BMAP and GATT sweeps, the `watches/` directory `blubat wait` may drop into,
+BMAP and GATT sweeps, the `health.toml` that daemon rewrites each pass so
+anything else can tell a loop still turning from one that has stopped (see
+[daemon.md](daemon.md#liveness-and-readiness)), the `watches/` directory
+`blubat wait` may drop into,
 the `tui.lock` and `daemon.lock` files its resident modes hold while they
 run, and the two logs
 the daemon writes under launchd. The one file outside both is the LaunchAgent

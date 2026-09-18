@@ -8,8 +8,8 @@
 use std::time::Duration;
 
 use blubat_core::{
-    Advertised, AdvertisedThresholds, Config, Device, History, Raised, Snapshot, Thresholds,
-    Timestamp,
+    Advertised, AdvertisedThresholds, Config, Device, Health, HealthWindows, Heartbeat, History,
+    Raised, Snapshot, Thresholds, Timestamp,
 };
 
 use super::journal::Journal;
@@ -344,6 +344,8 @@ pub enum Event {
     Raised(Vec<Raised>),
     /// Something the loop did that the user needs telling about.
     Note(Notice),
+    /// What the daemon last recorded about itself, re-read with each reading.
+    Beat(Option<Heartbeat>),
 }
 
 /// Everything the dashboard draws, and nothing else.
@@ -402,6 +404,10 @@ pub struct App {
     /// Set by `c` and cleared by what the loop makes of it: the reducer can no
     /// more suspend the terminal and spawn an editor than it can touch a file.
     pub edit_config: bool,
+    /// What the daemon last wrote about itself, absent where none has ever
+    /// run. Kept raw rather than judged, so [`App::health`] answers against
+    /// this frame's own clock rather than the one the file was read on.
+    pub daemon: Option<Heartbeat>,
 }
 
 impl App {
@@ -435,7 +441,21 @@ impl App {
             refreshing_ticks: 0,
             save_dashboard: None,
             edit_config: false,
+            daemon: None,
         }
+    }
+
+    /// What the daemon's own record amounts to this frame.
+    ///
+    /// Derived per frame rather than stored, the way [`App::status`] is: the
+    /// record only changes when a reading lands, but whether it is still fresh
+    /// changes with every tick of the clock, so a daemon that dies while the
+    /// dashboard is open is seen without the file having to change.
+    ///
+    /// Judged by the `[poll]` section's daemon cadence, not the dashboard's
+    /// own: the windows belong to whoever writes the heartbeat.
+    pub fn health(&self) -> Health {
+        Health::of(self.daemon, self.now, HealthWindows::of(&self.config.poll))
     }
 
     /// The thresholds one device is judged by, which are also the ones its row
@@ -562,6 +582,7 @@ pub fn update(app: App, event: Event) -> App {
             notice: Some(notice),
             ..app
         },
+        Event::Beat(daemon) => App { daemon, ..app },
     };
 
     onto_a_row(app)

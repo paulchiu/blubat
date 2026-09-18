@@ -66,18 +66,62 @@ label     com.paulchiu.blubat
 plist     /Users/paul/Library/LaunchAgents/com.paulchiu.blubat.plist
 loaded    yes
 running   yes, pid 4242
+live      yes, last beat 2026-09-18T04:18:17Z
+ready     yes, last sweep 2026-09-18T04:18:00Z
 
 $ blubat daemon uninstall
 removed com.paulchiu.blubat
 ```
 
-`daemon status` answers the three separate questions in order, since a daemon
-can be installed without being loaded and loaded without currently running:
-uninstalling one that was never loaded says so and removes the plist anyway.
+`daemon status` answers five separate questions in order, since a daemon can
+be installed without being loaded, loaded without currently running, and
+running without still doing anything: uninstalling one that was never loaded
+says so and removes the plist anyway. The last two answers are
+[health](#liveness-and-readiness), and they are the only two launchd cannot
+give.
 `daemon run` is the resident loop itself, which launchd starts and which is
 worth running by hand only to watch what the daemon is doing on a terminal.
 Both logs are plain text and appended to, so `tail -f
 ~/.local/state/blubat/daemon.log` follows a daemon already under launchd.
+
+## Liveness and readiness
+
+A process existing is not the same as a process working. A daemon once kept
+its loop turning for 28 hours while every sweep it made failed: launchd
+reported it running, `daemon status` agreed, `readings.toml` had not been
+written since the previous day, and the dashboard's status line said `all ok`.
+A monitor that cannot notice it has stopped monitoring is worth fixing on its
+own, whatever made the sweeps fail.
+
+So the daemon writes `health.toml` beside its other state on every poll pass,
+holding two moments: when the loop last came round, and when a sweep's
+readings last actually reached disk. Everything else reads that file rather
+than asking launchd for a pid, because a daemon wedged badly enough to stop
+sweeping is wedged badly enough to stop writing here: the record goes stale on
+its own, and nothing has to notice on its behalf.
+
+Those two moments answer the two questions separately:
+
+- **live**: the poll loop beat inside the last three `daemon_interval`s.
+- **ready**: a sweep saved its readings inside the last three
+  `profiler_interval`s.
+
+Three of each, rather than one, because a pass runs late whenever the machine
+sleeps or a source is slow. Both windows come from the `[poll]` section in
+force, so slowing the daemon down moves what counts as silence with it.
+
+A daemon that is live and not ready is the incident state: the loop is turning
+and nothing it produces is worth trusting. `daemon status` says so and points
+at `daemon.log`; the [dashboard](dashboard.md) says `daemon not ready`
+on its status line and stops claiming `all ok`. One that is not live at all
+reads `daemon down` and points at `blubat daemon restart`.
+
+A machine with no daemon installed has never written the file, which is
+neither of those states. `daemon status` reports `no heartbeat recorded` with
+nothing to fix, and the dashboard shows exactly what it always did: running
+blubat without a daemon is a documented way to use it, not a fault. The last
+sweep survives a restart, though, so restarting a daemon whose sweeps had
+stopped landing does not make it read as ready until one actually lands.
 
 ## Upgrading
 

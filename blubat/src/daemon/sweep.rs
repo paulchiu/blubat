@@ -14,7 +14,7 @@
 //! that will not answer costs the peripherals nothing.
 
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::mpsc::{Receiver, Sender, SyncSender};
 use std::time::Duration;
 
 use blubat_core::{Device, SweepReading, Timestamp, carry_forward_readings};
@@ -115,27 +115,36 @@ pub(crate) fn swept(
 /// loop; see either module's doc for the live finding that established this.
 /// The loop ends on its own once every [`SyncSender`] offering requests has
 /// gone, which is the poll loop's worker thread finishing or dying, and
-/// `serve` joins that thread immediately after to recover its result. A save
-/// that fails is as silent as an empty sweep; the next pass folds in over
-/// whatever is on disk either way.
+/// `serve` joins that thread immediately after to recover its result. The next
+/// pass folds in over whatever is on disk either way, so a save that fails
+/// costs this pass and nothing more.
+///
+/// Only a save that worked is reported on `saved`, since that moment is what
+/// the poll loop's heartbeat records as the daemon's readiness: a pass that
+/// swept every source and then could not write the file left nothing fresher
+/// behind than the one before it.
 pub(crate) fn execute(
     cache: &dyn Cache,
     channel: &dyn Channel,
     peripherals: &dyn Peripherals,
     requests: Receiver<SweepRequest>,
+    saved: &Sender<Timestamp>,
 ) {
     for request in requests {
         let previous = blubat_core::load_readings(&request.readings_file);
+        let read_at = Timestamp::now();
         let readings = swept(
             cache,
             channel,
             peripherals,
             &request.devices,
-            Timestamp::now(),
+            read_at,
             request.timeout,
             previous,
         );
-        let _ = blubat_core::save_readings(&request.readings_file, &readings);
+        if blubat_core::save_readings(&request.readings_file, &readings).is_ok() {
+            let _ = saved.send(read_at);
+        }
     }
 }
 
@@ -144,6 +153,8 @@ mod tests {
     use std::sync::Mutex;
 
     use blubat_core::{Address, ChargeState, Levels, Source};
+
+    use crate::scratch::Scratch;
 
     use super::*;
 
@@ -438,6 +449,58 @@ mod tests {
         assert!(
             !second[0].connected,
             "gone from the device list means last seen, not connected"
+        );
+    }
+
+    /// One request through the real executor, with the file it folds into
+    /// named by the caller so both outcomes of the save can be exercised.
+    fn executed(readings_file: PathBuf) -> Vec<Timestamp> {
+        let (sweeps, requests) = std::sync::mpsc::sync_channel(1);
+        let (saved, landings) = std::sync::mpsc::channel();
+        offer(
+            &sweeps,
+            SweepRequest {
+                devices: vec![bose()],
+                readings_file,
+                timeout: Duration::ZERO,
+            },
+        );
+        drop(sweeps);
+
+        execute(
+            &FakeCache::default(),
+            &FakeChannel::answering(vec![Some(76)]),
+            &FakePeripherals::default(),
+            requests,
+            &saved,
+        );
+
+        landings.try_iter().collect()
+    }
+
+    #[test]
+    fn a_pass_whose_readings_reach_disk_reports_when_they_landed() {
+        let scratch = Scratch::new();
+        let file = scratch.paths().readings_file();
+        let before = Timestamp::now();
+
+        let landings = executed(file.clone());
+
+        assert_eq!(landings.len(), 1);
+        assert!(landings[0] >= before, "{:?}", landings[0]);
+        assert_eq!(blubat_core::load_readings(&file).len(), 1);
+    }
+
+    #[test]
+    fn a_pass_whose_readings_could_not_be_saved_reports_no_landing() {
+        let scratch = Scratch::new();
+        let file = scratch.paths().readings_file();
+        std::fs::create_dir_all(&file).expect("a directory where the file should be");
+
+        assert_eq!(
+            executed(file),
+            [],
+            "nothing fresher reached disk, so readiness cannot move"
         );
     }
 
