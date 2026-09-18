@@ -167,6 +167,17 @@ fn poll_loop(
     Err(Failure::Error(stopped.to_string()))
 }
 
+/// Whether a dashboard owns the side effects, which the daemon then leaves
+/// alone.
+///
+/// A lock that cannot be read counts as one a dashboard is holding. Staying
+/// quiet under that doubt costs a banner the dashboard is posting anyway;
+/// acting under it duplicates every banner and, on the way, hands the engine a
+/// state file it has just failed to read.
+fn dashboard_owns(lock: &Path) -> bool {
+    lock::held(lock).unwrap_or(true)
+}
+
 /// The loop's state, wired to the files and sinks it acts through.
 ///
 /// The one place that decides the daemon defers to `tui.lock` and drains the
@@ -176,7 +187,7 @@ fn resident(paths: &Paths, effects: Effects, notifier: Box<dyn Notifier>) -> Res
     let dashboard = paths.tui_lock();
 
     Resident {
-        effects: effects.deferring_to(move || lock::held(&dashboard)),
+        effects: effects.deferring_to(move || dashboard_owns(&dashboard)),
         watches: Watches::default(),
         notifier,
         directory: paths.watch_dir(),
@@ -282,6 +293,30 @@ mod tests {
 
     const TRACKPAD: &str = "Paul\u{2019}s Magic Trackpad";
     const READ_AT: i64 = 1_785_643_199;
+
+    #[test]
+    fn a_dashboard_lock_that_cannot_be_read_is_left_alone_rather_than_taken_over() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = Scratch::new();
+        let lock = scratch.paths().tui_lock();
+        fs::create_dir_all(lock.parent().expect("a parent")).expect("a state directory");
+        fs::write(&lock, "1\n").expect("a lock file");
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o000))
+            .expect("a lock nothing may open");
+
+        assert!(
+            dashboard_owns(&lock),
+            "a daemon out of descriptors must not announce over a live dashboard"
+        );
+    }
+
+    #[test]
+    fn a_dashboard_lock_nobody_holds_leaves_the_side_effects_to_the_daemon() {
+        let scratch = Scratch::new();
+
+        assert!(!dashboard_owns(&scratch.paths().tui_lock()));
+    }
 
     fn reading(level: Option<u8>, second: i64) -> Snapshot {
         let read_at = Timestamp::from_unix(READ_AT + second);

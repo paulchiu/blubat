@@ -65,7 +65,7 @@ fn handled(args: &Args, paths: &Paths, read: impl Fn() -> Snapshot) -> Result<()
 /// is one file read rather than a `launchctl` call: an agent that is loaded but
 /// between restarts is not one that will pick a watch up.
 fn daemon_is_running(paths: &Paths) -> bool {
-    lock::held(&paths.daemon_lock())
+    lock::held(&paths.daemon_lock()).unwrap_or(false)
 }
 
 /// Drops a one-shot watch file for a running daemon to pick up.
@@ -187,6 +187,23 @@ mod tests {
 
     const TRACKPAD: &str = "Paul\u{2019}s Magic Trackpad";
     const EARBUDS: &str = "Soundcore Liberty 3 Pro";
+
+    /// The opposite default to the daemon's, and for the opposite reason:
+    /// handing a watch to a daemon that turns out not to be there waits for
+    /// something nobody will ever pick up, where polling costs one reading.
+    #[test]
+    fn a_daemon_lock_that_cannot_be_read_is_waited_on_by_polling_instead() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = Scratch::new();
+        let lock = scratch.paths().daemon_lock();
+        fs::create_dir_all(lock.parent().expect("a parent")).expect("a state directory");
+        fs::write(&lock, "1\n").expect("a lock file");
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o000))
+            .expect("a lock nothing may open");
+
+        assert!(!daemon_is_running(&scratch.paths()));
+    }
 
     fn args(device: &str, until: u8, timeout: Option<Duration>) -> Args {
         Args {

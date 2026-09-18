@@ -277,7 +277,7 @@ mod tests {
             "and the second one says so"
         );
         assert!(
-            lock::held(&paths.tui_lock()),
+            lock::held(&paths.tui_lock()) == Some(true),
             "the file the daemon checks is the file the dashboard took"
         );
     }
@@ -290,7 +290,7 @@ mod tests {
         let (first, _) = claim(&paths);
         drop(first);
 
-        assert!(!lock::held(&paths.tui_lock()));
+        assert_eq!(lock::held(&paths.tui_lock()), Some(false));
         assert!(claim(&paths).0.is_some());
     }
 
