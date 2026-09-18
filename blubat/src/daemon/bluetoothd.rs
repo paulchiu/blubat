@@ -39,11 +39,12 @@
 
 #![expect(unsafe_code)]
 
-use std::io::{Read, Write};
-use std::process::{Command, ExitStatus, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use blubat_core::{Address, SweepReading, Timestamp, bluetoothd_battery_level};
 
@@ -188,45 +189,96 @@ impl Cache for Bluetoothd {
     }
 }
 
+/// How often [`settle`] asks whether the helper has exited yet.
+const POLL: Duration = Duration::from_millis(10);
+
 /// Runs `command` and hands back its stdout, giving up after `timeout`.
 ///
 /// The same shape `blubat_core::profiler` runs `system_profiler` in: stdout is
-/// drained on a thread of its own so a child cannot stall on a full pipe, and
-/// one still running at the deadline is killed rather than waited out. What it
-/// wrote on stderr is nobody's to report, since a failed sweep says nothing.
+/// captured into a file rather than a pipe, so nothing here has to keep
+/// reading while the helper runs and the descriptor closes when this returns
+/// however it returns, and a helper still running at the deadline is killed
+/// rather than waited out. What it wrote on stderr is nobody's to report,
+/// since a failed sweep says nothing.
 fn run(mut command: Command, timeout: Duration) -> Option<String> {
+    let out = Capture::new().ok()?;
+
     let mut child = command
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(out.stdio().ok()?)
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
 
-    let stdout = drain(child.stdout.take().expect("stdout was piped"));
+    settle(&mut child, timeout).filter(ExitStatus::success)?;
 
-    let Ok(output) = stdout.recv_timeout(timeout) else {
-        let _ = child.kill();
-        let _ = child.wait();
-
-        return None;
-    };
-
-    child.wait().ok().filter(ExitStatus::success)?;
-
-    String::from_utf8(output).ok()
+    String::from_utf8(out.written()).ok()
 }
 
-/// Reads one child pipe to its end on a thread of its own.
-fn drain(mut pipe: impl Read + Send + 'static) -> Receiver<Vec<u8>> {
-    let (read, drained) = mpsc::channel();
+/// Waits for `child` to exit, killing it once `timeout` has gone by.
+///
+/// The wait is on the child itself rather than on its output ending, so a
+/// descendant that inherited the capture and outlives its parent cannot turn
+/// a sweep that finished into one reported as a timeout.
+fn settle(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + timeout;
 
-    thread::spawn(move || {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < deadline => thread::sleep(POLL),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+
+                return None;
+            }
+        }
+    }
+}
+
+/// The helper's stdout, held in a file unlinked as soon as it is open.
+///
+/// Nothing else can reach it, nothing is left behind to clean up, and the
+/// descriptor belongs to this value rather than to a reader that may never
+/// reach the end of what it is reading. `blubat_core::profiler` captures
+/// `system_profiler` the same way.
+struct Capture(File);
+
+impl Capture {
+    fn new() -> std::io::Result<Self> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+
+        let path = std::env::temp_dir().join(format!(
+            "blubat-cached-levels-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        fs::remove_file(&path)?;
+
+        Ok(Self(file))
+    }
+
+    /// The helper's end of the capture, which `spawn` closes in this process.
+    fn stdio(&self) -> std::io::Result<Stdio> {
+        self.0.try_clone().map(Stdio::from)
+    }
+
+    /// Everything written to it, read back once the helper has exited. Output
+    /// that cannot be read back is nothing written, which parses to no devices
+    /// the way every other failure in this source does.
+    fn written(mut self) -> Vec<u8> {
         let mut buffer = Vec::new();
-        let _ = pipe.read_to_end(&mut buffer);
-        let _ = read.send(buffer);
-    });
+        let _ = self.0.seek(SeekFrom::Start(0));
+        let _ = self.0.read_to_end(&mut buffer);
 
-    drained
+        buffer
+    }
 }
 
 /// Runs the sweep across every connected device the cache has a level for.
@@ -460,5 +512,44 @@ mod tests {
         let missing = Command::new("/nonexistent/blubat-not-a-command");
 
         assert_eq!(run(missing, Duration::from_secs(10)), None);
+    }
+
+    /// This process's own open descriptors, which `/dev/fd` lists on macOS.
+    fn open_files() -> usize {
+        std::fs::read_dir("/dev/fd")
+            .expect("/dev/fd is readable")
+            .count()
+    }
+
+    /// Runs, not one run: a single leak is indistinguishable from a descriptor
+    /// another test opened while this one was counting, so the tolerance sits
+    /// well under one per run and well over the handful of those.
+    const RUNS: usize = 20;
+    const NOISE: usize = 8;
+
+    #[test]
+    fn a_timed_out_helper_whose_descendant_still_holds_its_output_leaks_nothing() {
+        let before = open_files();
+
+        for _ in 0..RUNS {
+            assert_eq!(
+                run(helper("sleep 30 & sleep 30"), Duration::from_millis(100)),
+                None
+            );
+        }
+
+        let after = open_files();
+
+        assert!(
+            after <= before + NOISE,
+            "{RUNS} timed out runs took this process from {before} open files to {after}"
+        );
+    }
+
+    #[test]
+    fn a_helper_that_finished_is_not_timed_out_by_a_descendant_still_holding_its_output() {
+        let written = run(helper("sleep 30 & printf '[]'"), Duration::from_millis(100));
+
+        assert_eq!(written.as_deref(), Some("[]"));
     }
 }
