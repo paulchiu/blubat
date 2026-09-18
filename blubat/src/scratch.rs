@@ -41,6 +41,22 @@ impl Scratch {
         self.0.join(name)
     }
 
+    /// A path inside it that nothing can open, whatever it is run as.
+    ///
+    /// Descriptor exhaustion is the shape the callers guard against, which a
+    /// test cannot arrange. A symlink pointing at itself reaches the same
+    /// branch: every open of it fails, and unlike a file with its permissions
+    /// taken away, root is refused too.
+    pub fn unopenable(&self, path: &Path) -> PathBuf {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("a parent directory");
+        }
+        let name = path.file_name().expect("a named file");
+        std::os::unix::fs::symlink(name, path).expect("a link to nowhere but itself");
+
+        path.to_path_buf()
+    }
+
     /// blubat's whole layout under this directory.
     pub fn paths(&self) -> Paths {
         Paths::rooted(&self.0)

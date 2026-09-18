@@ -64,6 +64,11 @@ fn handled(args: &Args, paths: &Paths, read: impl Fn() -> Snapshot) -> Result<()
 /// The daemon holds a lock naming its process for as long as it runs, so this
 /// is one file read rather than a `launchctl` call: an agent that is loaded but
 /// between restarts is not one that will pick a watch up.
+///
+/// A lock that cannot be read counts as no daemon, the opposite of the default
+/// the daemon itself takes: a watch handed to one that turns out not to be
+/// there waits for something nobody will ever pick up, where waiting here costs
+/// a reading a minute.
 fn daemon_is_running(paths: &Paths) -> bool {
     lock::held(&paths.daemon_lock()).unwrap_or(false)
 }
@@ -187,23 +192,6 @@ mod tests {
 
     const TRACKPAD: &str = "Paul\u{2019}s Magic Trackpad";
     const EARBUDS: &str = "Soundcore Liberty 3 Pro";
-
-    /// The opposite default to the daemon's, and for the opposite reason:
-    /// handing a watch to a daemon that turns out not to be there waits for
-    /// something nobody will ever pick up, where polling costs one reading.
-    #[test]
-    fn a_daemon_lock_that_cannot_be_read_is_waited_on_by_polling_instead() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let scratch = Scratch::new();
-        let lock = scratch.paths().daemon_lock();
-        fs::create_dir_all(lock.parent().expect("a parent")).expect("a state directory");
-        fs::write(&lock, "1\n").expect("a lock file");
-        fs::set_permissions(&lock, fs::Permissions::from_mode(0o000))
-            .expect("a lock nothing may open");
-
-        assert!(!daemon_is_running(&scratch.paths()));
-    }
 
     fn args(device: &str, until: u8, timeout: Option<Duration>) -> Args {
         Args {
@@ -454,6 +442,31 @@ mod tests {
                 .count(),
             0,
             "nothing was registered for a daemon that is not there"
+        );
+    }
+
+    /// The same doubt the daemon resolves the other way, at the branch that
+    /// acts on it: an unreadable lock must not send the watch to a daemon that
+    /// may not be there, since nothing would ever drain it.
+    #[test]
+    fn a_daemon_lock_the_wait_cannot_read_is_waited_out_here_instead() {
+        let scratch = Scratch::new();
+        let paths = scratch.paths();
+        scratch.unopenable(&paths.daemon_lock());
+        fs::create_dir_all(paths.watch_dir()).expect("a state directory");
+
+        let failure = handled(&args("trackpad", 100, Some(Duration::ZERO)), &paths, || {
+            snapshot(Some(85), true)
+        })
+        .expect_err("it timed out here rather than being handed over");
+
+        assert!(failure.to_string().contains("gave up waiting"), "{failure}");
+        assert_eq!(
+            fs::read_dir(paths.watch_dir())
+                .expect("a watch directory")
+                .count(),
+            0,
+            "a daemon nobody can see is not one to hand a watch to"
         );
     }
 

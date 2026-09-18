@@ -60,10 +60,9 @@ pub fn take(path: &Path) -> Result<Option<Held>, String> {
 ///
 /// A file that is not there is nobody holding it, which is the ordinary answer
 /// on a machine with no dashboard open. Every other reason it would not open is
-/// no answer at all: a process out of descriptors cannot open anything, and
-/// reading that as a free lock is what once had the daemon take the side
-/// effects back off a dashboard that was still running. Which way to be wrong
-/// is left to the caller, since the two asking want opposite defaults.
+/// no answer at all, a process out of descriptors being unable to open
+/// anything. Which way to be wrong under that is the caller's, since the two
+/// asking want opposite defaults.
 pub fn held(path: &Path) -> Option<bool> {
     match File::open(path) {
         Ok(file) => Some(!free(&file)),
@@ -116,7 +115,6 @@ fn locked(file: &File, operation: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     use crate::scratch::Scratch;
 
@@ -199,16 +197,10 @@ mod tests {
         assert_eq!(held(&scratch.join("never-written.lock")), Some(false));
     }
 
-    /// Descriptor exhaustion is the shape this guards, which a test cannot
-    /// arrange; a lock file the process may not open reaches the same branch.
     #[test]
     fn a_lock_that_cannot_be_opened_is_unknown_rather_than_free() {
         let scratch = Scratch::new();
-        let path = lock(&scratch);
-        fs::create_dir_all(path.parent().expect("a parent")).expect("a state directory");
-        fs::write(&path, STALE).expect("a lock file");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o000))
-            .expect("a lock nothing may open");
+        let path = scratch.unopenable(&lock(&scratch));
 
         assert_eq!(held(&path), None, "an answer nobody can read is not a no");
     }

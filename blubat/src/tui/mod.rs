@@ -276,8 +276,9 @@ mod tests {
             deferring.is_some_and(|line| line.contains("another blubat")),
             "and the second one says so"
         );
-        assert!(
-            lock::held(&paths.tui_lock()) == Some(true),
+        assert_eq!(
+            lock::held(&paths.tui_lock()),
+            Some(true),
             "the file the daemon checks is the file the dashboard took"
         );
     }

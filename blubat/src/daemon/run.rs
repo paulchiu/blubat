@@ -170,10 +170,9 @@ fn poll_loop(
 /// Whether a dashboard owns the side effects, which the daemon then leaves
 /// alone.
 ///
-/// A lock that cannot be read counts as one a dashboard is holding. Staying
-/// quiet under that doubt costs a banner the dashboard is posting anyway;
-/// acting under it duplicates every banner and, on the way, hands the engine a
-/// state file it has just failed to read.
+/// Doubt counts as a dashboard. Staying quiet under it costs a banner the
+/// dashboard is posting anyway, where acting duplicates every banner and, on
+/// the way, hands the engine a state file it has just failed to read.
 fn dashboard_owns(lock: &Path) -> bool {
     lock::held(lock).unwrap_or(true)
 }
@@ -293,30 +292,6 @@ mod tests {
 
     const TRACKPAD: &str = "Paul\u{2019}s Magic Trackpad";
     const READ_AT: i64 = 1_785_643_199;
-
-    #[test]
-    fn a_dashboard_lock_that_cannot_be_read_is_left_alone_rather_than_taken_over() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let scratch = Scratch::new();
-        let lock = scratch.paths().tui_lock();
-        fs::create_dir_all(lock.parent().expect("a parent")).expect("a state directory");
-        fs::write(&lock, "1\n").expect("a lock file");
-        fs::set_permissions(&lock, fs::Permissions::from_mode(0o000))
-            .expect("a lock nothing may open");
-
-        assert!(
-            dashboard_owns(&lock),
-            "a daemon out of descriptors must not announce over a live dashboard"
-        );
-    }
-
-    #[test]
-    fn a_dashboard_lock_nobody_holds_leaves_the_side_effects_to_the_daemon() {
-        let scratch = Scratch::new();
-
-        assert!(!dashboard_owns(&scratch.paths().tui_lock()));
-    }
 
     fn reading(level: Option<u8>, second: i64) -> Snapshot {
         let read_at = Timestamp::from_unix(READ_AT + second);
@@ -441,6 +416,24 @@ mod tests {
             1,
             "nothing is holding the lock the file was written for"
         );
+    }
+
+    /// The daemon's half of the same question the dashboard lock answers, at
+    /// the loop that acts on it: a lock it cannot read must read as one a
+    /// dashboard is holding, or a daemon short of descriptors announces over a
+    /// dashboard that is still up.
+    #[test]
+    fn a_dashboard_lock_the_daemon_cannot_read_keeps_the_side_effects_off_it() {
+        let scratch = Scratch::new();
+        let (mut resident, banners, hooks) = resident(&scratch);
+        let config = config();
+        scratch.unopenable(&scratch.paths().tui_lock());
+
+        resident.tick(&reading(Some(50), 0), &config);
+        resident.tick(&reading(Some(19), 1), &config);
+
+        assert!(banners.posted().is_empty(), "{:?}", banners.posted());
+        assert!(hooks.commands().is_empty(), "{:?}", hooks.commands());
     }
 
     #[test]
