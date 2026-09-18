@@ -15,7 +15,8 @@
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
 
 use blubat_core::{Config, Heartbeat, Paths, Snapshot, Timestamp};
@@ -41,6 +42,53 @@ struct Resident {
     notifier: Box<dyn Notifier>,
     /// Where `blubat wait` leaves the watches it hands over.
     directory: PathBuf,
+    dashboard: Dashboard,
+}
+
+/// The dashboard lock, re-read once a pass, and what is worth saying about it.
+struct Dashboard {
+    lock: PathBuf,
+    /// What the last read concluded, which is what [`Effects`] defers to.
+    owns: Arc<AtomicBool>,
+    /// Whether the lock being unreadable has been said since it last read.
+    said: bool,
+}
+
+impl Dashboard {
+    fn new(lock: PathBuf) -> Self {
+        Self {
+            lock,
+            owns: Arc::new(AtomicBool::new(false)),
+            said: false,
+        }
+    }
+
+    /// Re-reads the lock, answering with the one line worth logging.
+    ///
+    /// Doubt counts as a dashboard, which costs a banner the dashboard is
+    /// posting anyway. Said once rather than every pass, because the daemon
+    /// stays this way until something changes and a line a minute is a log
+    /// nobody reads; said at all, because otherwise a lock that can never be
+    /// opened disables the banners for good with nothing written down.
+    fn asked(&mut self) -> Option<String> {
+        let held = lock::held(&self.lock);
+        self.owns.store(held.unwrap_or(true), Ordering::SeqCst);
+
+        match (held, self.said) {
+            (None, false) => {
+                self.said = true;
+                Some(format!(
+                    "{}: cannot be read, so the side effects are left to the dashboard",
+                    self.lock.display()
+                ))
+            }
+            (None, true) => None,
+            (Some(_), _) => {
+                self.said = false;
+                None
+            }
+        }
+    }
 }
 
 /// `blubat daemon run`: poll and act until the process is stopped.
@@ -167,29 +215,21 @@ fn poll_loop(
     Err(Failure::Error(stopped.to_string()))
 }
 
-/// Whether a dashboard owns the side effects, which the daemon then leaves
-/// alone.
-///
-/// Doubt counts as a dashboard. Staying quiet under it costs a banner the
-/// dashboard is posting anyway, where acting duplicates every banner and, on
-/// the way, hands the engine a state file it has just failed to read.
-fn dashboard_owns(lock: &Path) -> bool {
-    lock::held(lock).unwrap_or(true)
-}
-
 /// The loop's state, wired to the files and sinks it acts through.
 ///
 /// The one place that decides the daemon defers to `tui.lock` and drains the
 /// watch directory, so `serve` and the tests exercise the same wiring rather
 /// than each naming these paths for themselves.
 fn resident(paths: &Paths, effects: Effects, notifier: Box<dyn Notifier>) -> Resident {
-    let dashboard = paths.tui_lock();
+    let dashboard = Dashboard::new(paths.tui_lock());
+    let owns = Arc::clone(&dashboard.owns);
 
     Resident {
-        effects: effects.deferring_to(move || dashboard_owns(&dashboard)),
+        effects: effects.deferring_to(move || owns.load(Ordering::SeqCst)),
         watches: Watches::default(),
         notifier,
         directory: paths.watch_dir(),
+        dashboard,
     }
 }
 
@@ -201,7 +241,9 @@ impl Resident {
     /// announces nothing about them, so deferring these to one would park every
     /// handed-over wait for as long as it stays open.
     fn tick(&mut self, reading: &Snapshot, config: &Config) -> Vec<String> {
-        let mut lines = self.effects.observe(reading, config).problems;
+        let mut lines: Vec<String> = self.dashboard.asked().into_iter().collect();
+
+        lines.extend(self.effects.observe(reading, config).problems);
 
         lines.extend(self.watches.adopt(&self.directory));
         lines.extend(self.watches.settle(
@@ -436,6 +478,32 @@ mod tests {
 
         assert!(banners.posted().is_empty(), "{:?}", banners.posted());
         assert!(hooks.commands().is_empty(), "{:?}", hooks.commands());
+    }
+
+    /// Going quiet is the safe default, but going quiet for good with nothing
+    /// written down is how a daemon stops notifying and nobody finds out.
+    #[test]
+    fn a_dashboard_lock_the_daemon_cannot_read_is_said_once_rather_than_every_pass() {
+        let scratch = Scratch::new();
+        let (mut resident, _, _) = resident(&scratch);
+        let config = config();
+        scratch.unopenable(&scratch.paths().tui_lock());
+
+        let first = resident.tick(&reading(Some(50), 0), &config);
+        let second = resident.tick(&reading(Some(19), 1), &config);
+
+        assert_eq!(
+            first
+                .iter()
+                .filter(|line| line.contains("tui.lock"))
+                .count(),
+            1,
+            "{first:?}"
+        );
+        assert!(
+            second.iter().all(|line| !line.contains("tui.lock")),
+            "a log line every pass is a log nobody reads: {second:?}"
+        );
     }
 
     #[test]

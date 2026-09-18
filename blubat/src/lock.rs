@@ -40,11 +40,20 @@ impl Drop for Held {
 /// The first blubat to take it owns the side effects and every one after it
 /// defers, which is what two dashboards opened in two panes come to: the second
 /// draws the same devices and announces none of them.
+///
+/// # Errors
+///
+/// Returns the reason where the file could not be opened or written, or where
+/// the kernel would not say whether the lock was free. A dashboard that cannot
+/// find out is told, rather than quietly demoted to a second instance that
+/// announces nothing.
 pub fn take(path: &Path) -> Result<Option<Held>, String> {
     let file = opened(path).map_err(|error| format!("{}: {error}", path.display()))?;
 
-    if !locked(&file, libc::LOCK_EX) {
-        return Ok(None);
+    match locked(&file, libc::LOCK_EX) {
+        Ok(true) => {}
+        Ok(false) => return Ok(None),
+        Err(error) => return Err(format!("{}: {error}", path.display())),
     }
 
     stamp(&file, std::process::id()).map_err(|error| format!("{}: {error}", path.display()))?;
@@ -65,22 +74,23 @@ pub fn take(path: &Path) -> Result<Option<Held>, String> {
 /// asking want opposite defaults.
 pub fn held(path: &Path) -> Option<bool> {
     match File::open(path) {
-        Ok(file) => Some(!free(&file)),
+        Ok(file) => free(&file).map(|free| !free),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Some(false),
         Err(_) => None,
     }
 }
 
 /// Whether nothing is holding `file`, asked by taking a shared lock and giving
-/// it straight back.
-fn free(file: &File) -> bool {
-    let taken = locked(file, libc::LOCK_SH);
-
-    if taken {
-        release(file);
+/// it straight back, or `None` where the kernel would not say.
+fn free(file: &File) -> Option<bool> {
+    match locked(file, libc::LOCK_SH) {
+        Ok(true) => {
+            release(file);
+            Some(true)
+        }
+        Ok(false) => Some(false),
+        Err(_) => None,
     }
-
-    taken
 }
 
 /// The lock file, created where there is none and left as it is where there is.
@@ -100,16 +110,39 @@ fn stamp(mut file: &File, pid: u32) -> io::Result<()> {
     file.write_all(format!("{pid}\n").as_bytes())
 }
 
-fn release(file: &File) {
-    locked(file, libc::LOCK_UN);
+/// Whether a `flock` that did not succeed was another holder refusing it.
+///
+/// Only `EWOULDBLOCK` is. Every other errno is the kernel declining to answer,
+/// which is not the same as a lock nobody holds and must not read as one.
+fn refused(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(libc::EWOULDBLOCK)
 }
 
-/// Takes `operation` on `file` without waiting, answering whether it was given.
+fn release(file: &File) {
+    let _ = locked(file, libc::LOCK_UN);
+}
+
+/// Takes `operation` on `file` without waiting: `Ok(true)` where it was given,
+/// `Ok(false)` where another holder refused it.
+///
+/// # Errors
+///
+/// Returns the OS error where the kernel could not say either way.
 #[expect(unsafe_code)]
-fn locked(file: &File, operation: i32) -> bool {
+fn locked(file: &File, operation: i32) -> io::Result<bool> {
     // SAFETY: `flock` is given a descriptor this process owns and reads no
     // memory blubat owns. Non-blocking, so it cannot hold the caller up.
-    unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) == 0 }
+    if unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } == 0 {
+        return Ok(true);
+    }
+
+    let error = io::Error::last_os_error();
+
+    if refused(&error) {
+        Ok(false)
+    } else {
+        Err(error)
+    }
 }
 
 #[cfg(test)]
@@ -203,6 +236,24 @@ mod tests {
         let path = scratch.unopenable(&lock(&scratch));
 
         assert_eq!(held(&path), None, "an answer nobody can read is not a no");
+    }
+
+    /// Descriptor exhaustion and a lock table that is full are the shapes this
+    /// guards, neither of which a test can arrange; the classification they
+    /// reach is checked here against the errno each one reports.
+    #[test]
+    fn only_a_holder_refusing_is_an_answer_and_every_other_errno_is_none() {
+        assert!(
+            refused(&io::Error::from_raw_os_error(libc::EWOULDBLOCK)),
+            "somebody else holds it"
+        );
+
+        for errno in [libc::ENOLCK, libc::EINTR, libc::EOPNOTSUPP, libc::EBADF] {
+            assert!(
+                !refused(&io::Error::from_raw_os_error(errno)),
+                "errno {errno} is the kernel unable to answer, not a lock nobody holds"
+            );
+        }
     }
 
     #[test]
