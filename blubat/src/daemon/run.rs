@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
+use std::time::Duration;
 
 use blubat_core::{Config, Heartbeat, Paths, Recorded, Snapshot, Timestamp};
 
@@ -132,10 +133,14 @@ pub fn serve(paths: &Paths) -> Result<(), Failure> {
 
     let (sweeps, requests) = mpsc::sync_channel(1);
     let (saved, landings) = mpsc::channel();
+    let arrivals = relay(
+        blubat_core::poll(config.poll.daemon_tiers(), &paths.readings_file()),
+        landings,
+    );
 
     thread::scope(|scope| {
         let worker =
-            scope.spawn(move || poll_loop(resident, &config, paths, out, sweeps, landings));
+            scope.spawn(move || poll_loop(resident, &config, paths, out, sweeps, arrivals));
 
         sweep::execute(&Bluetoothd, &IoBluetooth, &CoreBluetooth, requests, &saved);
 
@@ -143,22 +148,65 @@ pub fn serve(paths: &Paths) -> Result<(), Failure> {
     })
 }
 
+/// What the loop waits on, from whichever of its two sources reached it first.
+enum Arrival {
+    /// A reading to act on.
+    Reading(Snapshot),
+    /// A sweep whose readings reached disk at this moment.
+    Landing(Timestamp),
+    /// The poller has stopped delivering, which is this daemon's one way out.
+    Stopped,
+}
+
+/// Both sources folded onto the one channel the loop waits on.
+///
+/// `mpsc` cannot wait on two receivers, and the loop has to hear a sweep land
+/// as it lands: readiness is what that record says, so recording it at the
+/// next reading instead leaves a daemon that is ready reading as though it is
+/// not for a whole interval. Each source gets a thread whose only job is to
+/// put what it takes onto the channel the loop does wait on.
+///
+/// The readings running out is announced rather than left to the channel
+/// closing, because the executor's own sender outlives this loop: waiting for
+/// every sender to go would be waiting forever.
+fn relay(
+    readings: mpsc::Receiver<Snapshot>,
+    landings: mpsc::Receiver<Timestamp>,
+) -> mpsc::Receiver<Arrival> {
+    let (arrivals, incoming) = mpsc::channel();
+    let landed = arrivals.clone();
+
+    thread::spawn(move || {
+        for at in landings {
+            if landed.send(Arrival::Landing(at)).is_err() {
+                break;
+            }
+        }
+    });
+    thread::spawn(move || {
+        for reading in readings {
+            if arrivals.send(Arrival::Reading(reading)).is_err() {
+                return;
+            }
+        }
+
+        let _ = arrivals.send(Arrival::Stopped);
+    });
+
+    incoming
+}
+
 /// The poll loop, on a worker thread of its own: every reading, the sweeps
 /// it schedules, and everything a reading sets off in [`Resident`].
 ///
-/// Only the offering of a sweep differs from what used to run inline on the
-/// daemon's main thread; everything else here is unchanged, moved wholesale
-/// so the main thread is free to be the sweep executor instead. A sweep
-/// already offered and not yet taken means the executor is still busy with
-/// an earlier one, so this loop drops the new one silently rather than
-/// waiting for room, matching the one-attempt-no-retry discipline every
-/// sweep failure keeps.
+/// A sweep already offered and not yet taken means the executor is still busy
+/// with an earlier one, so this loop drops the new one silently rather than
+/// waiting for room, matching the one-attempt-no-retry discipline every sweep
+/// failure keeps.
 ///
-/// Every pass ends by writing the heartbeat this loop is the sole author of.
-/// `landings` carries back the moment each sweep's readings actually reached
-/// disk, so the two halves of the record are written by one thread and can
-/// never race: liveness is this loop coming round, readiness is what the
-/// executor last managed.
+/// Both halves of the heartbeat are written here and nowhere else, so they can
+/// never race: liveness is this loop coming round, readiness is the moment a
+/// sweep's readings reached disk.
 #[expect(
     clippy::needless_pass_by_value,
     reason = "ownership of `sweeps` is what makes returning end the executor loop, as the doc above describes"
@@ -169,39 +217,48 @@ fn poll_loop(
     paths: &Paths,
     mut out: impl Write,
     sweeps: mpsc::SyncSender<SweepRequest>,
-    landings: mpsc::Receiver<Timestamp>,
+    arrivals: mpsc::Receiver<Arrival>,
 ) -> Result<(), Failure> {
     let health_file = paths.health_file();
-    let mut swept_at = None;
     let (mut landed, lost) = resumed(&health_file);
+    let mut swept_at = carried(landed, Timestamp::now(), config.poll.daemon_interval);
 
     if let Some(problem) = lost {
         log(&mut out, &problem);
     }
 
-    for reading in blubat_core::poll(config.poll.daemon_tiers(), &paths.readings_file()) {
-        if sweep::due(
-            &mut swept_at,
-            reading.read_at,
-            config.poll.profiler_interval,
-        ) {
-            sweep::offer(
-                &sweeps,
-                SweepRequest {
-                    devices: reading.devices.clone(),
-                    readings_file: paths.readings_file(),
-                    timeout: config.poll.profiler_timeout,
-                },
-            );
-        }
+    for arrival in arrivals {
+        let problem = match arrival {
+            Arrival::Stopped => break,
+            Arrival::Landing(at) => {
+                landed = Some(at);
+                beat(&health_file, Timestamp::now(), landed)
+            }
+            Arrival::Reading(reading) => {
+                if sweep::due(
+                    &mut swept_at,
+                    reading.read_at,
+                    config.poll.profiler_interval,
+                ) {
+                    sweep::offer(
+                        &sweeps,
+                        SweepRequest {
+                            devices: reading.devices.clone(),
+                            readings_file: paths.readings_file(),
+                            timeout: config.poll.profiler_timeout,
+                        },
+                    );
+                }
 
-        for line in resident.tick(&reading, config) {
-            log(&mut out, &line);
-        }
+                for line in resident.tick(&reading, config) {
+                    log(&mut out, &line);
+                }
 
-        landed = landings.try_iter().last().or(landed);
+                beat(&health_file, reading.read_at, landed)
+            }
+        };
 
-        if let Some(problem) = beat(&health_file, reading.read_at, landed) {
+        if let Some(problem) = problem {
             log(&mut out, &problem);
         }
     }
@@ -298,6 +355,19 @@ fn beat(path: &Path, beat_at: Timestamp, swept_at: Option<Timestamp>) -> Option<
     blubat_core::save_heartbeat(path, &Heartbeat { beat_at, swept_at })
         .err()
         .map(|error| error.to_string())
+}
+
+/// The sweep this run starts from: the previous run's, while it is recent
+/// enough to stand for one this run would make.
+///
+/// A restart is usually someone after a fresher answer, so anything older is
+/// swept over again on the first reading. A sweep from moments ago is not,
+/// since repeating it costs every headset a connection to say what is already
+/// on disk.
+fn carried(landed: Option<Timestamp>, now: Timestamp, within: Duration) -> Option<Timestamp> {
+    let within = i64::try_from(within.as_secs()).unwrap_or(i64::MAX);
+
+    landed.filter(|at| now.unix() - at.unix() < within)
 }
 
 /// The last sweep the previous run got to, and what was wrong with the record.
@@ -417,6 +487,46 @@ mod tests {
         lock::take(&scratch.paths().tui_lock())
             .expect("a lock")
             .expect("nobody else holding it")
+    }
+
+    /// A reading taken now, for the launch decisions made against the clock
+    /// rather than against a fixed moment.
+    fn reading_now() -> Snapshot {
+        Snapshot {
+            read_at: Timestamp::now(),
+            ..reading(Some(50), 0)
+        }
+    }
+
+    /// A record left by a previous run whose last sweep landed `ago` ago.
+    fn recorded(scratch: &Scratch, ago: i64) {
+        let now = Timestamp::now();
+        beat(
+            &scratch.paths().health_file(),
+            now,
+            Some(Timestamp::from_unix(now.unix() - ago)),
+        );
+    }
+
+    /// One run of the real loop over the arrivals handed to it: the record it
+    /// left behind, and every sweep it asked for.
+    fn looped(scratch: &Scratch, arrivals: Vec<Arrival>) -> (Recorded, Vec<SweepRequest>) {
+        let paths = scratch.paths();
+        let (resident, _, _) = resident(scratch);
+        let (sweeps, requests) = mpsc::sync_channel(1);
+        let (incoming, waiting) = mpsc::channel();
+
+        for arrival in arrivals {
+            incoming.send(arrival).expect("a queued arrival");
+        }
+        drop(incoming);
+
+        let _ = poll_loop(resident, &config(), &paths, Vec::new(), sweeps, waiting);
+
+        (
+            blubat_core::load_heartbeat(&paths.health_file()),
+            requests.try_iter().collect(),
+        )
     }
 
     #[test]
@@ -654,6 +764,95 @@ mod tests {
             lost.is_some_and(|line| line.contains("health.toml")),
             "a record that was lost rather than never written says so"
         );
+    }
+
+    /// A sweep lands seconds into a launch and the next reading is a whole
+    /// interval away, so recording it there leaves a daemon that is ready
+    /// reading as not ready for that whole interval.
+    #[test]
+    fn a_sweep_that_lands_between_readings_is_recorded_when_it_lands() {
+        let scratch = Scratch::new();
+        let landing = Timestamp::from_unix(READ_AT);
+
+        let (recorded, _) = looped(&scratch, vec![Arrival::Landing(landing)]);
+
+        let Recorded::Beat(beat) = recorded else {
+            panic!("the landing was never written down: {recorded:?}");
+        };
+        assert_eq!(beat.swept_at, Some(landing));
+    }
+
+    /// A restart moments after a sweep would otherwise cost every headset a
+    /// fresh connection to say what is already on disk.
+    #[test]
+    fn a_launch_over_a_sweep_from_moments_ago_takes_it_up_rather_than_sweeping_again() {
+        let scratch = Scratch::new();
+        recorded(&scratch, 10);
+
+        let (_, sweeps) = looped(&scratch, vec![Arrival::Reading(reading_now())]);
+
+        assert_eq!(sweeps.len(), 0, "a sweep from ten seconds ago still stands");
+    }
+
+    /// 200 seconds sits between the two intervals this config polls on: past
+    /// the pass that would have refreshed it, and not yet due on the sweep
+    /// cadence, which is the whole window a launch has to decide for itself.
+    #[test]
+    fn a_launch_over_a_sweep_older_than_a_pass_sweeps_rather_than_waiting_out_the_cadence() {
+        let scratch = Scratch::new();
+        recorded(&scratch, 200);
+
+        let (_, sweeps) = looped(&scratch, vec![Arrival::Reading(reading_now())]);
+
+        assert_eq!(sweeps.len(), 1);
+    }
+
+    #[test]
+    fn a_first_ever_launch_sweeps_on_its_first_reading() {
+        let (_, sweeps) = looped(&Scratch::new(), vec![Arrival::Reading(reading_now())]);
+
+        assert_eq!(sweeps.len(), 1, "there is nothing on disk to take up");
+    }
+
+    /// Reaching here means the process is loaded and monitoring nothing, and
+    /// launchd restarts the agent only on an unsuccessful exit.
+    #[test]
+    fn the_readings_running_out_ends_the_daemon_rather_than_carrying_on() {
+        let scratch = Scratch::new();
+        let paths = scratch.paths();
+        let (resident, _, _) = resident(&scratch);
+        let (sweeps, _requests) = mpsc::sync_channel(1);
+        let (incoming, waiting) = mpsc::channel();
+        incoming.send(Arrival::Stopped).expect("a queued arrival");
+        incoming
+            .send(Arrival::Landing(Timestamp::from_unix(READ_AT)))
+            .expect("a queued arrival");
+        drop(incoming);
+
+        let outcome = poll_loop(resident, &config(), &paths, Vec::new(), sweeps, waiting);
+
+        assert!(outcome.is_err());
+        assert_eq!(
+            blubat_core::load_heartbeat(&paths.health_file()),
+            Recorded::Never,
+            "what arrived after the poller stopped is no longer this loop's to act on"
+        );
+    }
+
+    /// The executor's own sender outlives the loop, so a channel that closed
+    /// only once every sender had gone would never close at all.
+    #[test]
+    fn the_readings_running_out_reaches_the_loop_while_the_sweeps_are_still_wired_up() {
+        let (readings, delivered) = mpsc::channel();
+        let (_saved, landings) = mpsc::channel::<Timestamp>();
+        let arrivals = relay(delivered, landings);
+
+        drop(readings);
+
+        assert!(matches!(
+            arrivals.recv_timeout(Duration::from_secs(5)),
+            Ok(Arrival::Stopped)
+        ));
     }
 
     #[test]
