@@ -67,8 +67,8 @@ pub use gatt::{
     candidates as gatt_candidates, matched as gatt_matched,
 };
 pub use health::{
-    Health, Heartbeat, Recorded, Windows as HealthWindows, load as load_heartbeat, open_files,
-    save as save_heartbeat,
+    Health, Heartbeat, Recorded, Reported, Windows as HealthWindows, load as load_heartbeat,
+    open_files, save as save_heartbeat,
 };
 pub use history::{Direction, History, Sample, Trend};
 pub use iokit::advertised;

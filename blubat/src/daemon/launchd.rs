@@ -17,7 +17,7 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-use blubat_core::{Health, Paths};
+use blubat_core::{Health, Paths, Reported};
 
 use crate::Failure;
 
@@ -283,14 +283,14 @@ pub fn uninstall(
 pub fn status(
     launchctl: &dyn Launchctl,
     plist: &Path,
-    health: Health,
+    reported: Reported,
     out: &mut impl Write,
 ) -> Result<(), Failure> {
     let printed = launchctl
         .run(&["print", &service()])
         .map_err(Failure::Error)?;
 
-    for line in describe(plist, plist.exists(), &printed, health) {
+    for line in describe(plist, plist.exists(), &printed, reported) {
         writeln!(out, "{line}")?;
     }
 
@@ -304,7 +304,7 @@ pub fn status(
 /// still be between restarts, and a plist can sit on disk with nothing loaded
 /// from it after a boot that never ran it. Live and ready are two more, and
 /// the only two launchd cannot answer at all.
-fn describe(plist: &Path, installed: bool, printed: &Ran, health: Health) -> Vec<String> {
+fn describe(plist: &Path, installed: bool, printed: &Ran, reported: Reported) -> Vec<String> {
     let loaded = printed.worked();
     let pid = loaded.then(|| field(&printed.output, "pid")).flatten();
 
@@ -332,7 +332,14 @@ fn describe(plist: &Path, installed: bool, printed: &Ran, health: Health) -> Vec
         );
     }
 
-    lines.extend(vitals(health));
+    lines.extend(vitals(reported.health));
+    // Only where one was recorded: a count that was never taken is not a
+    // count of nothing.
+    lines.extend(
+        reported
+            .open_files
+            .map(|count| format!("files     {count} descriptors held")),
+    );
 
     lines
 }
@@ -561,8 +568,30 @@ mod tests {
     const SWEPT_AT: Timestamp = Timestamp::from_unix(1_785_643_139);
 
     /// The report an installed plist and this `launchctl print` make together.
-    fn described(printed: &Ran, health: Health) -> Vec<String> {
-        describe(Path::new("/Users/blubat/plist"), true, printed, health)
+    fn described(printed: &Ran, reported: Reported) -> Vec<String> {
+        describe(Path::new("/Users/blubat/plist"), true, printed, reported)
+    }
+
+    /// A report over this verdict with no descriptor count recorded.
+    fn judged(health: Health) -> Reported {
+        Reported {
+            health,
+            open_files: None,
+        }
+    }
+
+    /// The one line of a report written under `label`, absent where the report
+    /// has nothing to say under it.
+    fn labelled(lines: &[String], label: &str) -> Option<String> {
+        lines.iter().find(|line| line.starts_with(label)).cloned()
+    }
+
+    /// A ready daemon that recorded this many descriptors on its last pass.
+    fn holding(open_files: Option<usize>) -> Reported {
+        Reported {
+            health: ready(),
+            open_files,
+        }
     }
 
     fn ready() -> Health {
@@ -833,12 +862,35 @@ mod tests {
             "com.paulchiu.blubat = {\n\tactive count = 1\n\tstate = running\n\tpid = 4242\n}",
         );
 
-        let lines = described(&report, ready());
+        let lines = described(&report, holding(None));
 
         assert_eq!(lines[0], "label     com.paulchiu.blubat");
         assert_eq!(lines[1], "plist     /Users/blubat/plist");
         assert_eq!(lines[2], "loaded    yes");
         assert_eq!(lines[3], "running   yes, pid 4242");
+    }
+
+    #[test]
+    fn a_report_names_the_descriptors_the_daemon_recorded_holding() {
+        let report = worked("com.paulchiu.blubat = {\n\tpid = 4242\n}");
+
+        let lines = described(&report, holding(Some(2536)));
+
+        assert_eq!(
+            labelled(&lines, "files").as_deref(),
+            Some("files     2536 descriptors held")
+        );
+    }
+
+    /// A record from a blubat that predates the count, or one whose count
+    /// could not be taken, has nothing to say here rather than a zero.
+    #[test]
+    fn a_report_says_nothing_about_descriptors_where_none_were_recorded() {
+        let report = worked("com.paulchiu.blubat = {\n\tpid = 4242\n}");
+
+        let lines = described(&report, holding(None));
+
+        assert_eq!(labelled(&lines, "files"), None);
     }
 
     /// The record being unreadable says nothing about the daemon, so the
@@ -847,7 +899,7 @@ mod tests {
     fn a_record_nobody_could_read_is_reported_as_unknown_rather_than_stopped() {
         let report = worked("com.paulchiu.blubat = {\n\tpid = 4242\n}");
 
-        let lines = described(&report, Health::Unknown);
+        let lines = described(&report, judged(Health::Unknown));
 
         assert!(
             lines
@@ -879,7 +931,7 @@ mod tests {
     fn an_agent_loaded_but_between_restarts_is_loaded_and_not_running() {
         let report = worked("com.paulchiu.blubat = {\n\tstate = waiting\n}");
 
-        let lines = described(&report, Health::Absent);
+        let lines = described(&report, judged(Health::Absent));
 
         assert_eq!(lines[2], "loaded    yes");
         assert_eq!(lines[3], "running   no");
@@ -892,7 +944,7 @@ mod tests {
     fn an_agent_loaded_but_not_running_points_at_restart() {
         let report = worked("com.paulchiu.blubat = {\n\tstate = spawn scheduled\n}");
 
-        let lines = described(&report, Health::Absent);
+        let lines = described(&report, judged(Health::Absent));
 
         assert!(
             lines.iter().any(|line| line.contains("daemon restart")),
@@ -904,7 +956,7 @@ mod tests {
     fn a_running_agent_gets_no_restart_hint() {
         let report = worked("com.paulchiu.blubat = {\n\tstate = running\n\tpid = 4242\n}");
 
-        let lines = described(&report, ready());
+        let lines = described(&report, holding(None));
 
         assert!(!lines.iter().any(|line| line.contains("daemon restart")));
     }
@@ -915,8 +967,13 @@ mod tests {
         let launchctl = Recorder::answering(vec![failed("Could not find service in domain")]);
         let mut out = Vec::new();
 
-        status(&launchctl, &plist_in(&scratch), Health::Absent, &mut out)
-            .expect("a report either way");
+        status(
+            &launchctl,
+            &plist_in(&scratch),
+            judged(Health::Absent),
+            &mut out,
+        )
+        .expect("a report either way");
 
         let report = String::from_utf8_lossy(&out);
         assert!(report.contains("not installed"), "{report}");
@@ -928,7 +985,7 @@ mod tests {
     fn a_running_agent_answers_liveness_and_readiness_of_its_own() {
         let report = worked("com.paulchiu.blubat = {\n\tstate = running\n\tpid = 4242\n}");
 
-        let lines = described(&report, ready());
+        let lines = described(&report, holding(None));
 
         assert_eq!(lines[4], "live      yes, last beat 2026-08-02T03:59:59Z");
         assert_eq!(lines[5], "ready     yes, last sweep 2026-08-02T03:58:59Z");
@@ -942,10 +999,10 @@ mod tests {
 
         let lines = described(
             &report,
-            Health::NotReady {
+            judged(Health::NotReady {
                 last_beat: BEAT_AT,
                 last_sweep: Some(SWEPT_AT),
-            },
+            }),
         );
 
         assert_eq!(lines[3], "running   yes, pid 1688");
@@ -961,10 +1018,10 @@ mod tests {
     fn a_daemon_that_has_never_swept_says_so_rather_than_naming_a_moment() {
         let lines = described(
             &worked("com.paulchiu.blubat = {\n\tstate = running\n\tpid = 4242\n}"),
-            Health::NotReady {
+            judged(Health::NotReady {
                 last_beat: BEAT_AT,
                 last_sweep: None,
-            },
+            }),
         );
 
         assert_eq!(lines[5], "ready     no, no sweep has landed yet");
@@ -974,7 +1031,7 @@ mod tests {
     fn a_daemon_that_has_stopped_coming_round_reads_as_not_live() {
         let lines = described(
             &worked("com.paulchiu.blubat = {\n\tstate = running\n\tpid = 4242\n}"),
-            Health::Down { last_beat: BEAT_AT },
+            judged(Health::Down { last_beat: BEAT_AT }),
         );
 
         assert_eq!(lines[4], "live      no, last beat 2026-08-02T03:59:59Z");
@@ -991,8 +1048,13 @@ mod tests {
         let launchctl = Recorder::answering(vec![failed("Could not find service in domain")]);
         let mut out = Vec::new();
 
-        status(&launchctl, &plist_in(&scratch), Health::Absent, &mut out)
-            .expect("a report either way");
+        status(
+            &launchctl,
+            &plist_in(&scratch),
+            judged(Health::Absent),
+            &mut out,
+        )
+        .expect("a report either way");
 
         let report = String::from_utf8_lossy(&out);
         assert!(

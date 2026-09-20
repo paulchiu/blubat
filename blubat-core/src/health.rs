@@ -169,6 +169,33 @@ impl Health {
     }
 }
 
+/// What this machine's record says about its daemon: the verdict, and the
+/// measurement behind it that is a fact rather than a judgement.
+///
+/// The count sits beside [`Health`] rather than inside it because it says
+/// nothing about whether the daemon is well: a climbing count is the thing a
+/// reader judges for themselves, across passes, which no single reading can
+/// answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reported {
+    pub health: Health,
+    /// Descriptors the daemon held when it last came round.
+    pub open_files: Option<usize>,
+}
+
+impl Reported {
+    /// What the daemon last wrote, judged against this clock and these windows.
+    pub fn of(recorded: Recorded, now: Timestamp, windows: Windows) -> Self {
+        Self {
+            health: Health::of(recorded, now, windows),
+            open_files: match recorded {
+                Recorded::Beat(beat) => beat.open_files,
+                Recorded::Never | Recorded::Unreadable => None,
+            },
+        }
+    }
+}
+
 /// Where macOS lists the descriptors the calling process holds.
 const DESCRIPTORS: &str = "/dev/fd";
 
