@@ -349,8 +349,14 @@ fn report(outcome: Outcome) {
     }
 }
 
-/// Writes down what this pass amounts to: that the loop came round, and when
-/// a sweep's readings last landed.
+/// Writes down what this pass amounts to: that the loop came round, when a
+/// sweep's readings last landed, and how many descriptors the process was
+/// holding while it did.
+///
+/// The count is taken here rather than handed in because the moment worth
+/// measuring is the one being written down. One figure says little; the
+/// series across passes is what shows a descriptor leak while the daemon is
+/// still working, rather than once it has run out.
 ///
 /// Hands back the line to log when the file could not be written. A heartbeat
 /// nothing can write is the shape of the very failure this record exists to
@@ -362,7 +368,7 @@ fn beat(path: &Path, beat_at: Timestamp, swept_at: Option<Timestamp>) -> Option<
         &Heartbeat {
             beat_at,
             swept_at,
-            open_files: None,
+            open_files: blubat_core::open_files(),
         },
     )
     .err()
@@ -741,15 +747,13 @@ mod tests {
 
         let problem = beat(&file, Timestamp::from_unix(READ_AT), Some(swept));
 
+        let Recorded::Beat(beat) = blubat_core::load_heartbeat(&file) else {
+            panic!("a pass leaves a heartbeat behind");
+        };
+
         assert_eq!(problem, None);
-        assert_eq!(
-            blubat_core::load_heartbeat(&file),
-            blubat_core::Recorded::Beat(Heartbeat {
-                beat_at: Timestamp::from_unix(READ_AT),
-                swept_at: Some(swept),
-                open_files: None,
-            })
-        );
+        assert_eq!(beat.beat_at, Timestamp::from_unix(READ_AT));
+        assert_eq!(beat.swept_at, Some(swept));
     }
 
     #[test]
@@ -825,6 +829,32 @@ mod tests {
         );
     }
 
+    /// Descriptors, not one descriptor: the suite's other tests open and close
+    /// files on their own threads while the loop counts, so the tolerance sits
+    /// well under what this test holds open and well over that noise.
+    const HELD: usize = 20;
+    const NOISE: usize = 8;
+
+    #[test]
+    fn a_pass_writes_down_how_many_descriptors_the_process_was_holding() {
+        let scratch = Scratch::new();
+        let held: Vec<fs::File> = (0..HELD)
+            .map(|_| fs::File::open(std::env::temp_dir()).expect("an opened directory"))
+            .collect();
+
+        let (_, recorded, _) = looped(&scratch, vec![Arrival::Reading(reading_now())]);
+
+        drop(held);
+        let Recorded::Beat(beat) = recorded else {
+            panic!("a pass leaves a heartbeat behind");
+        };
+        let counted = beat.open_files.expect("a count of the process");
+        assert!(
+            counted >= HELD - NOISE,
+            "the loop held {HELD} files open and wrote down {counted} descriptors"
+        );
+    }
+
     #[test]
     fn a_reading_writes_down_that_the_loop_came_round() {
         let scratch = Scratch::new();
@@ -833,14 +863,12 @@ mod tests {
 
         let (_, recorded, _) = looped(&scratch, vec![Arrival::Reading(reading)]);
 
-        assert_eq!(
-            recorded,
-            Recorded::Beat(Heartbeat {
-                beat_at: came_round,
-                swept_at: None,
-                open_files: None,
-            })
-        );
+        let Recorded::Beat(beat) = recorded else {
+            panic!("a pass leaves a heartbeat behind");
+        };
+
+        assert_eq!(beat.beat_at, came_round);
+        assert_eq!(beat.swept_at, None);
     }
 
     /// The two sources reach the loop over threads it does not own, so the
