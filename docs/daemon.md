@@ -68,6 +68,7 @@ loaded    yes
 running   yes, pid 4242
 live      yes, last beat 2026-09-18T04:18:17Z
 ready     yes, last sweep 2026-09-18T04:18:00Z
+files     16 descriptors held
 
 $ blubat daemon uninstall
 removed com.paulchiu.blubat
@@ -78,7 +79,9 @@ be installed without being loaded, loaded without currently running, and
 running without still doing anything: uninstalling one that was never loaded
 says so and removes the plist anyway. The last two answers are
 [health](#liveness-and-readiness), and they are the only two launchd cannot
-give.
+give. The `files` line answers nothing; it is a
+[measurement](#descriptors) of the daemon, and absent from a report whose
+record does not carry one.
 `daemon run` is the resident loop itself, which launchd starts and which is
 worth running by hand only to watch what the daemon is doing on a terminal.
 Both logs are plain text and appended to, so `tail -f
@@ -94,9 +97,10 @@ A monitor that cannot notice it has stopped monitoring is worth fixing on its
 own, whatever made the sweeps fail.
 
 So the daemon writes `health.toml` beside its other state on every poll pass,
-and again the moment a sweep's readings reach disk, holding two moments: when
-the loop last came round, and when a sweep's readings last actually reached
-disk. Writing a landing as it lands rather than at the next pass is what keeps
+and again the moment a sweep's readings reach disk, holding two moments and
+one measurement: when the loop last came round, when a sweep's readings last
+actually reached disk, and how many descriptors the process was holding as it
+wrote that down. Writing a landing as it lands rather than at the next pass is what keeps
 a daemon that has just started from reading as not ready for a whole
 `daemon_interval` after it already is. Everything else reads that file rather
 than asking launchd for a pid, because a daemon wedged badly enough to stop
@@ -136,6 +140,29 @@ line and in `daemon status`, and `all ok` is withheld: the daemon may well be
 running, and this machine cannot tell either way. The record is saying nothing
 rather than saying the daemon has stopped, which is the one reading that would
 be wrong in both directions.
+
+## Descriptors
+
+`health.toml` also records `open_files`, the number of descriptors the process
+held on the pass it was written, and `daemon status` reads it back as the
+`files` line.
+
+It is there because of how a leak ends. A daemon once accumulated `/dev/null`
+descriptors at roughly one a sweep for eighteen days, and nothing noticed
+until it reached its per-process limit and every sweep after that failed with
+`os error 24`. The count had been climbing the whole time with nowhere to be
+seen, so the leak was only ever visible as the failure it eventually caused.
+
+One figure says nothing on its own: a healthy daemon holds a dozen or two.
+The series across passes is the instrument. A count that keeps climbing pass
+after pass is a leak while the daemon is still working, which is early enough
+to do something about.
+
+The count is taken from `/dev/fd`, and the read of that directory is itself
+one of the descriptors counted, so the figure runs one high. A record written
+by a blubat that predates the count, or one whose count could not be taken,
+carries nothing here rather than a zero, and `daemon status` leaves the line
+out rather than reporting a process holding none.
 
 ## Upgrading
 

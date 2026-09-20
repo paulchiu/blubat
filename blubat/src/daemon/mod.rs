@@ -13,7 +13,7 @@ mod watches;
 
 use std::io;
 
-use blubat_core::{Config, Health, HealthWindows, Paths, Timestamp};
+use blubat_core::{Config, HealthWindows, Paths, Reported, Timestamp};
 
 use crate::Failure;
 
@@ -57,7 +57,7 @@ pub fn run(command: &Command, paths: &Paths) -> Result<(), Failure> {
         Command::Status => launchd::status(
             &launchd::Cli,
             &launchd::plist_file()?,
-            health(paths),
+            reported(paths),
             &mut out,
         ),
         Command::CachedLevels => bluetoothd::print_cache(&mut out),
@@ -70,10 +70,10 @@ pub fn run(command: &Command, paths: &Paths) -> Result<(), Failure> {
 /// `[poll]` section that slows the daemon down moves what counts as silence
 /// with it. A config that will not parse is no reason to withhold the answer,
 /// so the built-in cadence stands in for one.
-fn health(paths: &Paths) -> Health {
+fn reported(paths: &Paths) -> Reported {
     let config = Config::load(paths.config_file()).unwrap_or_default();
 
-    Health::of(
+    Reported::of(
         blubat_core::load_heartbeat(&paths.health_file()),
         Timestamp::now(),
         HealthWindows::of(&config.poll),

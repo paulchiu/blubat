@@ -349,17 +349,28 @@ fn report(outcome: Outcome) {
     }
 }
 
-/// Writes down what this pass amounts to: that the loop came round, and when
-/// a sweep's readings last landed.
+/// Writes down what this pass amounts to: that the loop came round, when a
+/// sweep's readings last landed, and how many descriptors the process was
+/// holding while it did.
+///
+/// The count is taken here because the moment worth measuring is the one being
+/// written down.
 ///
 /// Hands back the line to log when the file could not be written. A heartbeat
 /// nothing can write is the shape of the very failure this record exists to
 /// expose, so it is said out loud rather than dropped the way a failed sweep
 /// save is.
 fn beat(path: &Path, beat_at: Timestamp, swept_at: Option<Timestamp>) -> Option<String> {
-    blubat_core::save_heartbeat(path, &Heartbeat { beat_at, swept_at })
-        .err()
-        .map(|error| error.to_string())
+    blubat_core::save_heartbeat(
+        path,
+        &Heartbeat {
+            beat_at,
+            swept_at,
+            open_files: blubat_core::open_files(),
+        },
+    )
+    .err()
+    .map(|error| error.to_string())
 }
 
 /// The sweep this run starts from: the previous run's, while it is recent
@@ -734,14 +745,13 @@ mod tests {
 
         let problem = beat(&file, Timestamp::from_unix(READ_AT), Some(swept));
 
+        let Recorded::Beat(beat) = blubat_core::load_heartbeat(&file) else {
+            panic!("a pass leaves a heartbeat behind");
+        };
+
         assert_eq!(problem, None);
-        assert_eq!(
-            blubat_core::load_heartbeat(&file),
-            blubat_core::Recorded::Beat(Heartbeat {
-                beat_at: Timestamp::from_unix(READ_AT),
-                swept_at: Some(swept),
-            })
-        );
+        assert_eq!(beat.beat_at, Timestamp::from_unix(READ_AT));
+        assert_eq!(beat.swept_at, Some(swept));
     }
 
     #[test]
@@ -817,6 +827,31 @@ mod tests {
         );
     }
 
+    /// Held open, and the slack for the rest of the suite doing the same on its
+    /// own threads. Pitched as `blubat_core::health`'s own count tests are.
+    const HELD: usize = 20;
+    const NOISE: usize = 8;
+
+    #[test]
+    fn a_pass_writes_down_how_many_descriptors_the_process_was_holding() {
+        let scratch = Scratch::new();
+        let held: Vec<fs::File> = (0..HELD)
+            .map(|_| fs::File::open(std::env::temp_dir()).expect("an opened directory"))
+            .collect();
+
+        let (_, recorded, _) = looped(&scratch, vec![Arrival::Reading(reading_now())]);
+
+        drop(held);
+        let Recorded::Beat(beat) = recorded else {
+            panic!("a pass leaves a heartbeat behind");
+        };
+        let counted = beat.open_files.expect("a count of the process");
+        assert!(
+            counted >= HELD - NOISE,
+            "the loop held {HELD} files open and wrote down {counted} descriptors"
+        );
+    }
+
     #[test]
     fn a_reading_writes_down_that_the_loop_came_round() {
         let scratch = Scratch::new();
@@ -825,13 +860,12 @@ mod tests {
 
         let (_, recorded, _) = looped(&scratch, vec![Arrival::Reading(reading)]);
 
-        assert_eq!(
-            recorded,
-            Recorded::Beat(Heartbeat {
-                beat_at: came_round,
-                swept_at: None
-            })
-        );
+        let Recorded::Beat(beat) = recorded else {
+            panic!("a pass leaves a heartbeat behind");
+        };
+
+        assert_eq!(beat.beat_at, came_round);
+        assert_eq!(beat.swept_at, None);
     }
 
     /// The two sources reach the loop over threads it does not own, so the

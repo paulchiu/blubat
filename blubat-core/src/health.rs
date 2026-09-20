@@ -42,6 +42,10 @@ pub struct Heartbeat {
     /// When a sweep last saved its readings, absent until one ever has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swept_at: Option<Timestamp>,
+    /// Descriptors the process held when it came round, absent where the
+    /// count could not be taken or the record predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_files: Option<usize>,
 }
 
 /// How long each answer stays good for, in the absence of a fresher one.
@@ -165,6 +169,55 @@ impl Health {
     }
 }
 
+/// What this machine's record says about its daemon: the verdict, and the
+/// measurement behind it that is a fact rather than a judgement.
+///
+/// The count sits beside [`Health`] rather than inside it because it says
+/// nothing about whether the daemon is well: a climbing count is the thing a
+/// reader judges for themselves, across passes, which no single reading can
+/// answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reported {
+    pub health: Health,
+    /// Descriptors the daemon held when it last came round.
+    pub open_files: Option<usize>,
+}
+
+impl Reported {
+    /// What the daemon last wrote, judged against this clock and these windows.
+    pub fn of(recorded: Recorded, now: Timestamp, windows: Windows) -> Self {
+        Self {
+            health: Health::of(recorded, now, windows),
+            open_files: match recorded {
+                Recorded::Beat(beat) => beat.open_files,
+                Recorded::Never | Recorded::Unreadable => None,
+            },
+        }
+    }
+}
+
+/// Where macOS lists the descriptors the calling process holds.
+const DESCRIPTORS: &str = "/dev/fd";
+
+/// How many descriptors this process is holding.
+///
+/// One of them is the read of `/dev/fd` itself, so the figure is a series to
+/// watch rather than a number to read on its own: what a leak looks like is
+/// this climbing pass after pass.
+pub fn open_files() -> Option<usize> {
+    counted(Path::new(DESCRIPTORS))
+}
+
+/// The count over whichever directory is handed in, so the answer for one that
+/// cannot be read is exercised without making `/dev/fd` unreadable.
+///
+/// Absent rather than zero: a process holding no descriptors at all is not a
+/// state that exists, so reporting one would be reporting a failed count as a
+/// reading.
+fn counted(directory: &Path) -> Option<usize> {
+    fs::read_dir(directory).ok().map(Iterator::count)
+}
+
 /// Writes the heartbeat atomically, the same idiom every other state file uses.
 ///
 /// # Errors
@@ -212,7 +265,11 @@ mod tests {
     }
 
     fn beating(beat_at: Timestamp, swept_at: Option<Timestamp>) -> Heartbeat {
-        Heartbeat { beat_at, swept_at }
+        Heartbeat {
+            beat_at,
+            swept_at,
+            open_files: None,
+        }
     }
 
     fn judged(beat: Heartbeat) -> Health {
@@ -360,11 +417,124 @@ mod tests {
         let beat = Heartbeat {
             beat_at: BEAT_AT,
             swept_at: Some(Timestamp::from_unix(1_785_643_000)),
+            open_files: Some(2536),
         };
 
         save(&scratch.health_file(), &beat).expect("writes");
 
         assert_eq!(load(&scratch.health_file()), Recorded::Beat(beat));
+    }
+
+    #[test]
+    fn a_report_carries_the_count_the_record_kept() {
+        let beat = Heartbeat {
+            beat_at: ago(60),
+            swept_at: Some(ago(60)),
+            open_files: Some(2536),
+        };
+
+        let reported = Reported::of(Recorded::Beat(beat), NOW, windows());
+
+        assert_eq!(reported.open_files, Some(2536));
+    }
+
+    #[test]
+    fn a_report_over_a_record_that_could_not_be_read_carries_no_count() {
+        for recorded in [Recorded::Never, Recorded::Unreadable] {
+            assert_eq!(
+                Reported::of(recorded, NOW, windows()).open_files,
+                None,
+                "{recorded:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_report_judges_the_record_the_same_way_health_does_on_its_own() {
+        let beat = beating(ago(60), Some(ago(60)));
+
+        let reported = Reported::of(Recorded::Beat(beat), NOW, windows());
+
+        assert_eq!(
+            reported.health,
+            Health::Ready {
+                last_beat: ago(60),
+                last_sweep: ago(60)
+            }
+        );
+    }
+
+    #[test]
+    fn a_heartbeat_with_no_count_to_record_is_still_written() {
+        let scratch = Scratch::new();
+        let beat = beating(BEAT_AT, Some(Timestamp::from_unix(1_785_643_000)));
+
+        save(&scratch.health_file(), &beat).expect("writes");
+
+        assert_eq!(load(&scratch.health_file()), Recorded::Beat(beat));
+    }
+
+    #[test]
+    fn a_heartbeat_written_before_the_count_existed_still_reads_as_a_heartbeat() {
+        let scratch = Scratch::new();
+        fs::create_dir_all(&scratch.0).expect("a scratch directory");
+        fs::write(
+            scratch.health_file(),
+            "beat_at = \"2026-08-02T03:59:59Z\"\nswept_at = \"2026-08-02T03:56:40Z\"\n",
+        )
+        .expect("a written file");
+
+        assert_eq!(
+            load(&scratch.health_file()),
+            Recorded::Beat(Heartbeat {
+                beat_at: BEAT_AT,
+                swept_at: Some(Timestamp::from_unix(1_785_643_000)),
+                open_files: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_directory_of_descriptors_is_counted_by_how_many_it_lists() {
+        let scratch = Scratch::new();
+        fs::create_dir_all(&scratch.0).expect("a scratch directory");
+        for name in ["0", "1", "2"] {
+            fs::write(scratch.0.join(name), "").expect("a written entry");
+        }
+
+        assert_eq!(counted(&scratch.0), Some(3));
+    }
+
+    /// Descriptors, not one descriptor: the suite's other tests open and close
+    /// files on their own threads while this one counts, so the tolerance sits
+    /// well under what this test holds and well over that noise, the same way
+    /// `crate::profiler`'s own leak tests are pitched.
+    const HELD: usize = 20;
+    const NOISE: usize = 8;
+
+    #[test]
+    fn the_count_follows_the_descriptors_this_process_actually_holds() {
+        let scratch = Scratch::new();
+        fs::create_dir_all(&scratch.0).expect("a scratch directory");
+        let before = open_files().expect("a count of this process");
+
+        let held: Vec<fs::File> = (0..HELD)
+            .map(|_| fs::File::open(&scratch.0).expect("an opened directory"))
+            .collect();
+        let after = open_files().expect("a count of this process");
+        drop(held);
+
+        assert!(
+            after >= before + HELD - NOISE,
+            "holding {HELD} more descriptors took the count from {before} to {after}"
+        );
+    }
+
+    #[test]
+    fn a_count_that_could_not_be_taken_is_absent_rather_than_zero() {
+        let scratch = Scratch::new();
+
+        assert_eq!(counted(&scratch.0), None);
     }
 
     #[test]
