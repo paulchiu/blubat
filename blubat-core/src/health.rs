@@ -42,6 +42,10 @@ pub struct Heartbeat {
     /// When a sweep last saved its readings, absent until one ever has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swept_at: Option<Timestamp>,
+    /// Descriptors the process held when it came round, absent where the
+    /// count could not be taken or the record predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_files: Option<usize>,
 }
 
 /// How long each answer stays good for, in the absence of a fresher one.
@@ -234,7 +238,11 @@ mod tests {
     }
 
     fn beating(beat_at: Timestamp, swept_at: Option<Timestamp>) -> Heartbeat {
-        Heartbeat { beat_at, swept_at }
+        Heartbeat {
+            beat_at,
+            swept_at,
+            open_files: None,
+        }
     }
 
     fn judged(beat: Heartbeat) -> Health {
@@ -382,11 +390,42 @@ mod tests {
         let beat = Heartbeat {
             beat_at: BEAT_AT,
             swept_at: Some(Timestamp::from_unix(1_785_643_000)),
+            open_files: Some(2536),
         };
 
         save(&scratch.health_file(), &beat).expect("writes");
 
         assert_eq!(load(&scratch.health_file()), Recorded::Beat(beat));
+    }
+
+    #[test]
+    fn a_heartbeat_with_no_count_to_record_is_still_written() {
+        let scratch = Scratch::new();
+        let beat = beating(BEAT_AT, Some(Timestamp::from_unix(1_785_643_000)));
+
+        save(&scratch.health_file(), &beat).expect("writes");
+
+        assert_eq!(load(&scratch.health_file()), Recorded::Beat(beat));
+    }
+
+    #[test]
+    fn a_heartbeat_written_before_the_count_existed_still_reads_as_a_heartbeat() {
+        let scratch = Scratch::new();
+        fs::create_dir_all(&scratch.0).expect("a scratch directory");
+        fs::write(
+            scratch.health_file(),
+            "beat_at = \"2026-08-02T03:59:59Z\"\nswept_at = \"2026-08-02T03:56:40Z\"\n",
+        )
+        .expect("a written file");
+
+        assert_eq!(
+            load(&scratch.health_file()),
+            Recorded::Beat(Heartbeat {
+                beat_at: BEAT_AT,
+                swept_at: Some(Timestamp::from_unix(1_785_643_000)),
+                open_files: None,
+            })
+        );
     }
 
     #[test]

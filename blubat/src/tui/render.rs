@@ -840,6 +840,7 @@ mod tests {
             daemon: Recorded::Beat(Heartbeat {
                 beat_at: Timestamp::from_unix(READ_AT.unix() - beat),
                 swept_at: sweep.map(|ago| Timestamp::from_unix(READ_AT.unix() - ago)),
+                open_files: None,
             }),
             ..loaded()
         }

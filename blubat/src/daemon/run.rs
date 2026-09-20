@@ -357,9 +357,16 @@ fn report(outcome: Outcome) {
 /// expose, so it is said out loud rather than dropped the way a failed sweep
 /// save is.
 fn beat(path: &Path, beat_at: Timestamp, swept_at: Option<Timestamp>) -> Option<String> {
-    blubat_core::save_heartbeat(path, &Heartbeat { beat_at, swept_at })
-        .err()
-        .map(|error| error.to_string())
+    blubat_core::save_heartbeat(
+        path,
+        &Heartbeat {
+            beat_at,
+            swept_at,
+            open_files: None,
+        },
+    )
+    .err()
+    .map(|error| error.to_string())
 }
 
 /// The sweep this run starts from: the previous run's, while it is recent
@@ -740,6 +747,7 @@ mod tests {
             blubat_core::Recorded::Beat(Heartbeat {
                 beat_at: Timestamp::from_unix(READ_AT),
                 swept_at: Some(swept),
+                open_files: None,
             })
         );
     }
@@ -829,7 +837,8 @@ mod tests {
             recorded,
             Recorded::Beat(Heartbeat {
                 beat_at: came_round,
-                swept_at: None
+                swept_at: None,
+                open_files: None,
             })
         );
     }
