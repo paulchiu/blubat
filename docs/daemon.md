@@ -94,8 +94,11 @@ A monitor that cannot notice it has stopped monitoring is worth fixing on its
 own, whatever made the sweeps fail.
 
 So the daemon writes `health.toml` beside its other state on every poll pass,
-holding two moments: when the loop last came round, and when a sweep's
-readings last actually reached disk. Everything else reads that file rather
+and again the moment a sweep's readings reach disk, holding two moments: when
+the loop last came round, and when a sweep's readings last actually reached
+disk. Writing a landing as it lands rather than at the next pass is what keeps
+a daemon that has just started from reading as not ready for a whole
+`daemon_interval` after it already is. Everything else reads that file rather
 than asking launchd for a pid, because a daemon wedged badly enough to stop
 sweeping is wedged badly enough to stop writing here: the record goes stale on
 its own, and nothing has to notice on its behalf.
@@ -121,7 +124,10 @@ neither of those states. `daemon status` reports `no heartbeat recorded` with
 nothing to fix, and the dashboard shows exactly what it always did: running
 blubat without a daemon is a documented way to use it, not a fault. The last
 sweep survives a restart, though, so restarting a daemon whose sweeps had
-stopped landing does not make it read as ready until one actually lands.
+stopped landing does not make it read as ready until one actually lands. A
+restart does take up a sweep recorded inside the last `daemon_interval` rather
+than repeating it, since a fresh pass would cost every headset a connection to
+say what is already on disk.
 
 A file that is there but cannot be made sense of, because it will not open or
 because it is not the TOML the daemon writes, is a fourth state and not the
