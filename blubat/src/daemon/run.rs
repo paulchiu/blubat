@@ -353,10 +353,8 @@ fn report(outcome: Outcome) {
 /// sweep's readings last landed, and how many descriptors the process was
 /// holding while it did.
 ///
-/// The count is taken here rather than handed in because the moment worth
-/// measuring is the one being written down. One figure says little; the
-/// series across passes is what shows a descriptor leak while the daemon is
-/// still working, rather than once it has run out.
+/// The count is taken here because the moment worth measuring is the one being
+/// written down.
 ///
 /// Hands back the line to log when the file could not be written. A heartbeat
 /// nothing can write is the shape of the very failure this record exists to
@@ -829,9 +827,8 @@ mod tests {
         );
     }
 
-    /// Descriptors, not one descriptor: the suite's other tests open and close
-    /// files on their own threads while the loop counts, so the tolerance sits
-    /// well under what this test holds open and well over that noise.
+    /// Held open, and the slack for the rest of the suite doing the same on its
+    /// own threads. Pitched as `blubat_core::health`'s own count tests are.
     const HELD: usize = 20;
     const NOISE: usize = 8;
 

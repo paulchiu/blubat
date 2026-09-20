@@ -426,6 +426,45 @@ mod tests {
     }
 
     #[test]
+    fn a_report_carries_the_count_the_record_kept() {
+        let beat = Heartbeat {
+            beat_at: ago(60),
+            swept_at: Some(ago(60)),
+            open_files: Some(2536),
+        };
+
+        let reported = Reported::of(Recorded::Beat(beat), NOW, windows());
+
+        assert_eq!(reported.open_files, Some(2536));
+    }
+
+    #[test]
+    fn a_report_over_a_record_that_could_not_be_read_carries_no_count() {
+        for recorded in [Recorded::Never, Recorded::Unreadable] {
+            assert_eq!(
+                Reported::of(recorded, NOW, windows()).open_files,
+                None,
+                "{recorded:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_report_judges_the_record_the_same_way_health_does_on_its_own() {
+        let beat = beating(ago(60), Some(ago(60)));
+
+        let reported = Reported::of(Recorded::Beat(beat), NOW, windows());
+
+        assert_eq!(
+            reported.health,
+            Health::Ready {
+                last_beat: ago(60),
+                last_sweep: ago(60)
+            }
+        );
+    }
+
+    #[test]
     fn a_heartbeat_with_no_count_to_record_is_still_written() {
         let scratch = Scratch::new();
         let beat = beating(BEAT_AT, Some(Timestamp::from_unix(1_785_643_000)));

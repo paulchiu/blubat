@@ -153,7 +153,7 @@ until it reached its per-process limit and every sweep after that failed with
 `os error 24`. The count had been climbing the whole time with nowhere to be
 seen, so the leak was only ever visible as the failure it eventually caused.
 
-One figure says nothing on its own: a healthy daemon holds a couple of dozen.
+One figure says nothing on its own: a healthy daemon holds a dozen or two.
 The series across passes is the instrument. A count that keeps climbing pass
 after pass is a leak while the daemon is still working, which is early enough
 to do something about.
